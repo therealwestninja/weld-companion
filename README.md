@@ -40,47 +40,46 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
    - **[Tampermonkey](https://www.tampermonkey.net/)** — Chrome, Edge, Safari, Opera
    - **[Violentmonkey](https://violentmonkey.github.io/)** / **[Greasemonkey](https://www.greasespot.net/)** — Firefox
 2. Open **[`weld-companion.user.js`](weld-companion.user.js)** and confirm the install when your manager prompts.
-3. Browse Perchance. A small dock of four buttons appears in the bottom-right corner.
+3. Browse Perchance. A single ⚡ Weld item is added to Perchance’s menu bar. Click it (or press `/`) to open the drawer with all features. On pages with no Perchance bar, nothing is injected — the `/` shortcut still opens the drawer.
 
 That's it — no account, no configuration required to start.
 
 ## Features
 
-A four-button **dock** sits in the bottom-right of every Perchance page:
+Weld Companion adds a single **⚡ Weld** item to Perchance’s own menu bar — placed just to the left of the **edit** button and styled like any native item, so nothing of Perchance’s is replaced, displaced, or covered. Click it (or press `/`) to open the Weld drawer, which holds everything: a result-tools row in its header (copy / save / pin / undo-reroll), and three tabs:
 
-| Button | Opens |
-| :----: | :---- |
-| ★ | Your generators — favorites & recently-used launcher (also `/`) |
-| 👁 | Reading comfort — theme, font, width, focus mode |
-| 🗂 | Generator manager — sort, filter, CRUD |
-| 🤖 | AI Helper settings — custom instruction or your own model |
+| Tab | What's in it |
+| :-- | :----------- |
+| ★ **Generators** | Favorites & recently-used, with search, sort, filter, and per-row open/edit/remove — plus New / Fork / Save / Delete actions |
+| 👁 **Comfort** | A theme picker (eye-comfort filters), font size, line height, max width, dyslexia font, focus mode |
+| 🤖 **AI Helper** | Custom instruction, or route to your own OpenAI / Anthropic / Google model |
 
 ### Quality-of-life
 
-- **Favorites & recently-used.** Every generator you open is remembered. Star the ones you keep coming back to, then press **`/`** anywhere for a fuzzy search palette (↑/↓ to move, Enter to open). No more re-finding the same handful of generators.
-- **Reading comfort** *(per-generator, remembered).* Override the page with **light / dark / sepia**, adjust **font size, max width, and line height** for text-heavy story and chat generators, switch on a **dyslexia-friendly font**, or hit **Focus mode** to hide menus and sidebars for distraction-free reading and clean screenshots.
-- **Result tools.** A small **Copy / Save / Pin** bar appears above any generator's output. **Pin** stashes a result in a side tray so you can compare several rolls at once.
-- **Result history (undo-reroll).** Lost a great roll to the reroll button? Step **back and forward** through previous outputs with the arrows (or **`[`** / **`]`**). Up to 50 snapshots per session.
+- **Favorites & recently-used.** Every generator you open is remembered. Star the ones you keep coming back to, then press **`/`** anywhere to open the **Generators** tab and search them (↑/↓ to move, Enter to open). No more re-finding the same handful of generators.
+- **Reading comfort** *(per-generator, remembered).* Pick a **theme** — Off / Dim / Warm / Sepia / Gray / Dark — applied as a full-page filter overlay that works on **any** generator without breaking its layout (each swatch previews its real effect). Adjust **font size, max width, and line height** for text-heavy story and chat generators, switch on a **dyslexia-friendly font**, or hit **Focus mode** to hide menus and sidebars for distraction-free reading and clean screenshots.
+- **Result tools.** **Copy / Save / Pin** live in the drawer header whenever a generator has output. **Pin** stashes a result in a side tray so you can compare several rolls at once.
+- **Result history (undo-reroll).** Lost a great roll to the reroll button? Step **back and forward** through previous outputs with the arrows in the drawer header (or **`[`** / **`]`**). Up to 50 snapshots per session.
 - **Resizable inputs.** An expand/collapse toggle on text areas — for the cramped AI-chat and prompt boxes.
 
 ### Generator management & CRUD
 
-Open the **🗂 manager** for a local overview of your generators:
+The **★ Generators** tab is both your launcher and a lightweight manager:
 
 - **Sort** by recently-used, name (A→Z), or favorites-first.
-- **Filter** by name as you type.
-- Per-generator quick actions: **open**, **edit**, **forget** (from the local list).
+- **Filter** by name as you type, with ↑/↓ + Enter keyboard navigation.
+- Per-row quick actions: **open**, **edit**, and **✕ remove** (from the local list).
 - **CRUD shortcuts** that drive Perchance's *own* functions when you're in the editor:
-  - ＋ **New generator**
+  - ＋ **New**
   - **Fork this** (open the editor to copy it)
-  - **Save now** — triggers Perchance's `saveGenerator`
+  - **Save** — triggers Perchance's `saveGenerator`
   - **Delete…** — Perchance's own delete, behind a confirmation
 
 > The local list is built from generators you've opened and starred. CRUD buttons call Perchance's built-in save/delete; they don't reimplement them.
 
 ### AI Helper — edit it, or bring your own GPT
 
-Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 settings** panel adds the two things it's missing:
+Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 AI Helper** tab adds the two things it's missing:
 
 1. **Edit the instruction.** Override the Helper's system prompt with your own, so it behaves the way *you* want.
 2. **Use your own model.** Route the Helper through your own account on any of the three most popular GPT APIs:
@@ -100,7 +99,7 @@ Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 s
 
 | Key | Action |
 | :-: | :----- |
-| `/` | Open the generator launcher / search palette |
+| `/` | Open the Weld drawer (Generators tab) |
 | `f` | Favorite / unfavorite the current generator |
 | `c` | Copy the current output |
 | `[` `]` | Previous / next result (undo-reroll) |
@@ -126,7 +125,9 @@ Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 s
 
 - Tested with **Tampermonkey** and **Violentmonkey**; Greasemonkey should work (uses only standard `GM_*` APIs).
 - Runs on `perchance.org` and `*.perchance.org`, top frame only.
-- Perchance's internal hooks are **not a documented API** — Perchance can rename them at any time. When that happens, the affected feature quietly stops working rather than erroring; update the script and it resumes.
+- **Works within Perchance's own bar.** The ⚡ Weld item is inserted to the left of the **edit** button; it's height-locked so it never grows or distorts the bar. If the page has no Perchance menu bar (e.g. a generator in *minimal* mode), nothing is injected — the `/` shortcut still opens the drawer, and the item is added automatically if the bar appears later.
+- **Themes use a `backdrop-filter` overlay**, so they work on any generator without touching its DOM. The "Dark" theme is an inversion (the standard dark-mode trick); like all invert-based dark modes it renders photos in negative, so the non-invert themes (Dim / Warm / Sepia / Gray) are the safer pick on image-heavy generators. Needs a current browser (`backdrop-filter` support); on a very old one the picker still works but shows no tint.
+- Perchance's internal hooks are **not a documented API** — Perchance can rename them at any time. When that happens, the affected feature quietly stops working (or falls back) rather than erroring; update the script and it resumes.
 - The **AI-Helper submit interception** is best-effort against the current helper element IDs. If a future Perchance update changes them, custom-provider routing falls back to no-op (the built-in helper still works); open an issue and it's a one-line fix.
 
 ## Relationship to Weld
