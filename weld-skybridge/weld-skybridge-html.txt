@@ -1,0 +1,119 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+:root{
+  --bg:#0d1117; --surface:#161b22; --ink:#e6edf3; --muted:#7d8590; --faint:#21262d;
+  --accent:#4493f8; --green:#3fb950; --red:#f85149; --yellow:#d29922; --border:rgba(255,255,255,0.10);
+  --font:'DM Sans',system-ui,sans-serif; --mono:'JetBrains Mono',monospace;
+}
+*{box-sizing:border-box;margin:0;}
+body{background:var(--bg);color:var(--ink);font:15px/1.65 var(--font);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;}a:hover{text-decoration:underline;}
+#page{max-width:720px;margin:0 auto;padding:48px 24px 96px;}
+.hdr{margin-bottom:40px;padding-bottom:24px;border-bottom:1px solid var(--border);}
+.hdr-row{display:flex;align-items:baseline;gap:14px;margin-bottom:8px;}
+.hdr h1{font-size:30px;font-weight:700;letter-spacing:-0.5px;font-family:var(--mono);}
+.hdr .ver{font:600 11px var(--mono);color:var(--muted);background:var(--faint);padding:2px 8px;border-radius:4px;letter-spacing:0.5px;}
+.hdr .lead{color:var(--muted);font-size:15px;max-width:640px;}
+h2{font-size:20px;font-weight:600;margin:48px 0 16px;letter-spacing:-0.2px;padding-top:24px;border-top:1px solid var(--border);}
+h2:first-of-type{border-top:0;padding-top:0;}
+h3{font-size:15px;font-weight:600;margin:28px 0 10px;color:var(--ink);font-family:var(--mono);}
+h4{font-size:13px;font-weight:600;margin:20px 0 8px;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase;font-family:var(--mono);}
+p{margin-bottom:14px;color:#c9d1d9;}
+strong{color:var(--ink);font-weight:600;}
+ul{margin:0 0 14px 22px;color:#c9d1d9;}li{margin-bottom:6px;}
+code{font-family:var(--mono);font-size:13px;color:var(--accent);background:var(--faint);padding:1px 6px;border-radius:3px;}
+pre{background:var(--faint);border:1px solid var(--border);border-radius:6px;padding:14px 16px;overflow-x:auto;margin:14px 0;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:#c9d1d9;min-height:1.5em;}
+pre code{background:none;padding:0;color:inherit;font-size:inherit;}
+.c-c{color:var(--muted);}.c-k{color:#ff7b72;}.c-s{color:#a5d6ff;}.c-n{color:#d2a8ff;}.c-f{color:#79c0ff;}
+.sig{font-family:var(--mono);font-size:13px;color:var(--accent);background:var(--faint);padding:8px 12px;border-radius:4px;border-left:3px solid var(--accent);margin:8px 0 12px;display:block;min-height:1.5em;}
+.note{background:rgba(68,147,248,0.07);border-left:3px solid var(--accent);padding:12px 16px;border-radius:0 4px 4px 0;margin:14px 0;font-size:14px;color:#c9d1d9;}
+.warn{background:rgba(210,153,34,0.08);border-left:3px solid var(--yellow);padding:12px 16px;border-radius:0 4px 4px 0;margin:14px 0;font-size:14px;color:#c9d1d9;}
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px;}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top;}
+th{color:var(--muted);font:600 12px var(--mono);text-transform:uppercase;letter-spacing:.05em;}
+td code{font-size:12px;}
+.toc{font:13px var(--mono);color:var(--muted);margin-bottom:8px;}
+.toc a{color:var(--muted);}.toc a:hover{color:var(--accent);}
+</style>
+
+<div id="page">
+  <div class="hdr">
+    <div class="hdr-row"><h1>weld.skybridge</h1><span class="ver">v1.0.0</span></div>
+    <p class="lead">The bridge between a generator (sandboxed) and <strong>Weld Companion</strong> (a userscript running above the page). It lends a plugin two powers a sandbox cannot have on its own &mdash; storage that persists across every generator, and the user&rsquo;s own AI model &mdash; while never <em>requiring</em> the companion to be installed.</p>
+    <p class="toc">on this page: <a href="#why">two contexts</a> &middot; <a href="#use">quick start</a> &middot; <a href="#api">api</a> &middot; <a href="#proto">protocol</a> &middot; <a href="#trust">trust</a> &middot; <a href="#fallback">fallback</a></p>
+  </div>
+
+  <h2 id="why">Two contexts, complementary powers</h2>
+  <p>A Weld <strong>plugin</strong> runs inside the generator sandbox: universal (everyone who imports it gets it) but confined &mdash; no cross-generator persistence, no arbitrary network, no access to the page around it. <strong>Weld Companion</strong> runs as a userscript in the top frame: privileged (persistent storage, the user&rsquo;s AI key) but optional &mdash; most visitors won&rsquo;t have it.</p>
+  <p>Skybridge joins them by <strong>composition with graceful degradation</strong>: a plugin stays fully self-sufficient and <em>opportunistically</em> gains the companion&rsquo;s powers when it detects one. Never the reverse &mdash; a plugin must not break without the companion.</p>
+
+  <h2 id="use">Quick start</h2>
+  <p>Import the plugin, then use it. Every privileged call returns a <em>result object</em> (or a value) and never throws, so you branch on data:</p>
+  <pre><code><span class="c-c">// in your generator's $output body, after {import:weld-skybridge-plugin}</span>
+<span class="c-k">var</span> sb = window.weld.skybridge;
+
+sb.<span class="c-f">onConnect</span>(<span class="c-k">function</span> (info) {            <span class="c-c">// fires if/when a companion links</span>
+  console.<span class="c-f">log</span>(<span class="c-s">'linked, protocol'</span>, info.protocol);
+});
+
+<span class="c-c">// storage works with OR without a companion (it falls back)</span>
+<span class="c-k">await</span> sb.storage.<span class="c-f">set</span>(<span class="c-s">'slot1'</span>, state);
+<span class="c-k">var</span> saved = <span class="c-k">await</span> sb.storage.<span class="c-f">get</span>(<span class="c-s">'slot1'</span>);
+
+<span class="c-c">// AI needs a companion + the user's own model; check first</span>
+<span class="c-k">if</span> (sb.<span class="c-f">has</span>(<span class="c-s">'ai'</span>)) {
+  <span class="c-k">var</span> r = <span class="c-k">await</span> sb.<span class="c-f">ai</span>(<span class="c-s">'Name a tavern.'</span>);
+  <span class="c-k">if</span> (r.ok) <span class="c-f">use</span>(r.value);            <span class="c-c">// denied/absent -> r.ok is false</span>
+}</code></pre>
+
+  <h2 id="api">API</h2>
+  <span class="sig">window.weld.skybridge</span>
+  <table>
+    <tr><th>Member</th><th>What it does</th></tr>
+    <tr><td><code>connected</code></td><td>Boolean. <code>true</code> once a companion has answered the handshake.</td></tr>
+    <tr><td><code>protocol</code></td><td>The negotiated protocol integer (<code>0</code> when not connected).</td></tr>
+    <tr><td><code>anchorVersion</code></td><td>The companion&rsquo;s reported semver, or <code>null</code>.</td></tr>
+    <tr><td><code>has(cap)</code></td><td>Does the linked companion advertise this capability? (<code>'storage'</code>, <code>'ai'</code>). Honest: <code>false</code> when unlinked.</td></tr>
+    <tr><td><code>onConnect(fn)</code></td><td>Call <code>fn(info)</code> when a companion links (or immediately if already linked). Returns an unsubscribe function.</td></tr>
+    <tr><td><code>request(cap, payload)</code></td><td>Low-level: send a capability request up. Resolves a result object <code>\{ ok, value \}</code> or <code>\{ ok:false, reason \}</code>.</td></tr>
+    <tr><td><code>ai(prompt, opts?)</code></td><td>Run a completion on the user&rsquo;s own model. <code>opts</code>: <code>system</code>, <code>maxTokens</code>, <code>temperature</code>. Resolves <code>\{ ok, value \}</code>.</td></tr>
+    <tr><td><code>storage.get/set/list</code></td><td>Async key/value. Routes to the companion when present, else falls back (see below).</td></tr>
+    <tr><td><code>storage.backend()</code></td><td><code>'companion'</code>, <code>'persist'</code>, or <code>'memory'</code> &mdash; where storage is actually going right now.</td></tr>
+    <tr><td><code>reconnect()</code></td><td>Re-send the handshake (e.g. if the companion mounts very late).</td></tr>
+    <tr><td><code>version</code></td><td>This plugin&rsquo;s semver (<code>'1.0.0'</code>).</td></tr>
+  </table>
+
+  <h4>Result reasons</h4>
+  <p>When <code>ok</code> is <code>false</code>, <code>reason</code> is one of: <code>disconnected</code> (no companion), <code>unsupported</code> (companion lacks that capability), <code>denied</code> (user said no), <code>no-own-model</code> (AI: user hasn&rsquo;t configured a model), <code>timeout</code>, or <code>malformed</code>.</p>
+
+  <h2 id="proto">Protocol versioning</h2>
+  <p>The two halves ship independently and land in browsers at different times, so the handshake <strong>negotiates a protocol version</strong>. Each side advertises a <code>min</code>&ndash;<code>max</code> range; they settle on the highest both support. If there&rsquo;s no overlap, Skybridge stays <em>disconnected</em> rather than half-speaking a protocol it doesn&rsquo;t understand. This is separate from <code>version</code> (the plugin&rsquo;s own semver) &mdash; <code>protocol</code> is the wire contract.</p>
+  <pre><code><span class="c-c">// the negotiation, conceptually</span>
+plugin: hello  { protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n">1</span> }
+anchor: here   { protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n">2</span>, capabilities:[<span class="c-s">'storage'</span>,<span class="c-s">'ai'</span>] }
+<span class="c-c">// agreed protocol = min(pluginMax, anchorMax) within the shared range = 1</span></code></pre>
+
+  <h2 id="trust">Trust model</h2>
+  <p>The boundary isn&rsquo;t the <em>direction</em> of messages &mdash; <code>postMessage</code> is two-way, and anything on the page (including a hostile generator) can post at the top frame. The boundary is <strong>what the companion will act on</strong>. So:</p>
+  <ul>
+    <li><strong>Origin-checked both ways.</strong> Messages are only honoured from <code>perchance.org</code> / <code>*.perchance.org</code>.</li>
+    <li><strong>Nonce-matched replies.</strong> Each request carries a nonce the reply must echo &mdash; no spoofing, no replay.</li>
+    <li><strong>Scoped capabilities, not raw power.</strong> A plugin can ask for <em>&ldquo;an AI completion&rdquo;</em>, never <em>&ldquo;fetch this URL with my key&rdquo;</em>.</li>
+    <li><strong>Per-capability consent.</strong> The first time a generator requests <code>storage</code> or <code>ai</code>, the companion asks the user &mdash; separately per capability &mdash; and remembers the choice for that generator.</li>
+    <li><strong>Per-generator storage namespace.</strong> One generator cannot read another&rsquo;s stored keys.</li>
+  </ul>
+  <div class="warn"><strong>Secrets never cross the bridge.</strong> For <code>ai</code>, the prompt goes up and the companion runs the keyed call itself; only the completion comes back. The API key is never placed on the bridge in either direction.</div>
+
+  <h2 id="fallback">Graceful fallback</h2>
+  <p>With <strong>no companion installed</strong>, Skybridge stays disconnected and harmless:</p>
+  <ul>
+    <li><code>connected</code> is <code>false</code>, <code>has('ai')</code> is <code>false</code> &mdash; AI calls resolve <code>\{ ok:false, reason:'disconnected' \}</code>.</li>
+    <li><code>storage</code> still works &mdash; it routes to <code>weld.persist</code> (IndexedDB, this browser) if present, else an in-memory map for the session.</li>
+    <li><code>has('storage')</code> reports the truth, so a plugin <em>can</em> tell &ldquo;saved everywhere&rdquo; from &ldquo;saved just here&rdquo; &mdash; though most won&rsquo;t need to.</li>
+  </ul>
+  <div class="note">Design rule: a Skybridge-backed plugin must do something reasonable with zero companion, and something <em>better</em> with one. Build for the fallback first.</div>
+
+  <h2>Changelog</h2>
+  <h3>1.0.0</h3>
+  <p>Initial release. Handshake with protocol negotiation (v1), origin- and nonce-checked request/response, capabilities <code>storage</code> and <code>ai</code>, per-capability consent (companion-side), per-generator storage namespace, graceful fallback to <code>weld.persist</code>/memory.</p>
+</div>

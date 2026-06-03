@@ -1,0 +1,115 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+:root{--bg:#0d1117;--surface:#161b22;--ink:#e6edf3;--muted:#7d8590;--faint:#21262d;--accent:#4493f8;--green:#3fb950;--red:#f85149;--amber:#d29922;--border:rgba(255,255,255,0.10);--font:'DM Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace;}
+*{box-sizing:border-box;margin:0;}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--font);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;}a:hover{text-decoration:underline;}
+#page{max-width:780px;margin:0 auto;padding:34px 18px 90px;}
+.breadcrumb{display:flex;justify-content:space-between;align-items:center;font:12px var(--mono);color:var(--muted);padding:12px 0 16px;margin-bottom:20px;border-bottom:1px solid var(--border);}
+.breadcrumb a{color:var(--muted);}.breadcrumb .sep{color:var(--faint);margin:0 8px;}.breadcrumb .cur{color:var(--ink);}
+.hdr{margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border);}
+.hdr-row{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}.hdr h1{font:700 24px var(--mono);letter-spacing:-0.5px;}
+.hdr .ver{font:600 11px var(--mono);color:var(--muted);background:var(--faint);padding:2px 8px;border-radius:4px;}
+.hdr .lead{color:var(--muted);margin-top:8px;}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin:14px 0;}
+.panel h2{font:600 13px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;}
+.row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:8px 0;}
+.lbl{font:600 12px var(--mono);color:var(--muted);min-width:74px;}
+.btn{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:9px 15px;font:600 13px var(--font);cursor:pointer;transition:.12s;}
+.btn:hover{filter:brightness(1.08);}.btn.ghost{background:var(--faint);color:var(--ink);}.btn.sm{padding:6px 11px;font-size:12px;}
+.btn:disabled{opacity:.4;cursor:not-allowed;}
+input,textarea{background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:14px var(--font);width:100%;}
+.pill{display:inline-flex;align-items:center;gap:6px;font:600 11px var(--mono);padding:3px 9px;border-radius:999px;border:1px solid var(--border);}
+.pill.on{color:var(--green);border-color:rgba(63,185,80,.4);}.pill.off{color:var(--muted);}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor;}
+.out{font:13px/1.5 var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;white-space:pre-wrap;color:var(--ink);margin-top:8px;min-height:20px;}
+.note{font:12px/1.5 var(--font);color:var(--muted);margin-top:8px;}
+.kbd{font:600 11px var(--mono);background:var(--faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--ink);}
+</style>
+
+<div id="page">
+  <div class="breadcrumb">
+    <span><a href="https://perchance.org/weld">weld</a><span class="sep">/</span><span class="cur">skybridge</span></span>
+    <span><a href="https://perchance.org/weld-skybridge-plugin">plugin source</a></span>
+  </div>
+
+  <div class="hdr">
+    <div class="hdr-row"><h1>weld.skybridge</h1><span class="ver">v1.0.0</span></div>
+    <p class="lead">The bridge to <strong>Weld Companion</strong>. Cross-generator storage and your own AI model when the companion is installed &mdash; and a clean fallback when it isn't.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Connection</h2>
+    <div class="row">
+      <span class="lbl">Status</span>
+      <span id="conn" class="pill off"><span class="dot"></span><span id="conn-txt">checking&hellip;</span></span>
+      <span id="proto" class="pill off">protocol &mdash;</span>
+      <span id="backend" class="pill off">storage &mdash;</span>
+    </div>
+    <p class="note">If you have the Weld Companion userscript installed, this links automatically. No companion? Everything below still works &mdash; storage just falls back to this browser, and the AI panel reports unavailable.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Cross-generator storage</h2>
+    <div class="row"><span class="lbl">Slot</span><input id="slot" value="slot1" style="max-width:120px"></div>
+    <div class="row"><span class="lbl">Text</span><input id="text" placeholder="anything to remember&hellip;"></div>
+    <div class="row">
+      <button class="btn sm" id="save">Save</button>
+      <button class="btn sm ghost" id="load">Load</button>
+      <button class="btn sm ghost" id="list">List slots</button>
+    </div>
+    <div class="out" id="store-out">&mdash;</div>
+    <p class="note">With the companion, this persists across <em>every</em> Perchance generator. Without it, it persists in this browser via <span class="kbd">weld.persist</span> (or memory).</p>
+  </div>
+
+  <div class="panel">
+    <h2>Your own AI model</h2>
+    <div class="row"><span class="lbl">Prompt</span><input id="ai-in" value="a cosy tavern by a river"></div>
+    <div class="row"><button class="btn sm" id="ai-go">Name it</button></div>
+    <div class="out" id="ai-out">&mdash;</div>
+    <p class="note">Routes through the model <em>you</em> configured in the companion. The prompt goes up, only the completion comes back &mdash; your API key never crosses the bridge. The companion asks your permission the first time.</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var D = window.__sbDemo;
+  function $(id){ return document.getElementById(id); }
+  function show(el, v){ el.textContent = (typeof v === 'string') ? v : JSON.stringify(v, null, 2); }
+
+  function paint(s) {
+    var c = $('conn'), t = $('conn-txt');
+    if (s.connected) { c.className = 'pill on'; t.textContent = 'companion linked'; }
+    else { c.className = 'pill off'; t.textContent = 'no companion (fallback)'; }
+    $('proto').textContent = 'protocol ' + (s.protocol || '—');
+    $('proto').className = 'pill ' + (s.connected ? 'on' : 'off');
+    $('backend').textContent = 'storage: ' + s.backend;
+    $('backend').className = 'pill ' + (s.backend === 'companion' ? 'on' : 'off');
+  }
+
+  function refresh(){ if (D) paint(D.status()); }
+
+  // react to a late connection
+  window.__sbOnConnect = function(){ refresh(); };
+
+  if (!D) { $('conn-txt').textContent = 'plugin not loaded'; return; }
+  refresh();
+  // the handshake is async; check again shortly after load
+  setTimeout(refresh, 600);
+
+  $('save').onclick = function(){ D.save($('slot').value, $('text').value).then(function(ok){ show($('store-out'), ok ? ('saved \u2713  (' + D.status().backend + ')') : 'save failed'); refresh(); }); };
+  $('load').onclick = function(){ D.load($('slot').value).then(function(v){ show($('store-out'), v ? v : '(nothing in that slot)'); }); };
+  $('list').onclick = function(){ D.listSlots().then(function(keys){ show($('store-out'), keys && keys.length ? keys : '(no slots yet)'); }); };
+
+  $('ai-go').onclick = function(){
+    show($('ai-out'), 'thinking\u2026');
+    D.ai($('ai-in').value).then(function(r){
+      if (r.ok) show($('ai-out'), r.value);
+      else if (r.reason === 'no-own-model') show($('ai-out'), 'No personal model configured. Open the companion \u2192 AI Helper tab and add your provider + key.');
+      else if (r.reason === 'denied') show($('ai-out'), 'Permission denied for this generator.');
+      else if (r.reason === 'disconnected' || r.reason === 'unsupported') show($('ai-out'), 'AI needs the Weld Companion userscript (with your own model set up).');
+      else show($('ai-out'), 'unavailable: ' + r.reason);
+    });
+  };
+})();
+</script>

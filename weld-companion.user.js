@@ -836,9 +836,137 @@
     else if (e.key === '?') { toast('/ open \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history', 4000); }
   }
 
+  // ============================================================ SKYBRIDGE ANCHOR
+  // The companion end of weld.skybridge. A generator (sandbox, usually a child
+  // frame) posts a 'hello' up; we negotiate a protocol version, advertise our
+  // capabilities, then service origin-checked, nonce-matched requests. Every
+  // privileged capability is gated behind a PER-CAPABILITY consent prompt,
+  // remembered per generator. Secrets never cross: for 'ai' we run the keyed
+  // call here and post only the completion back down.
+  var SB = 'weld.skybridge';
+  var SB_PROTO_MIN = 1, SB_PROTO_MAX = 1;
+  var SB_CAPS = ['storage', 'ai'];          // what this companion offers
+
+  // consent: gget('sb:perm') -> { '<gen>': { storage:true, ai:false }, ... }
+  function sbPerms() { return gget('sb:perm', {}); }
+  function sbPermFor(gen, cap) {
+    var all = sbPerms(); var g = all[gen]; if (!g) return undefined; return g[cap];
+  }
+  function sbSetPerm(gen, cap, allowed) {
+    var all = sbPerms(); if (!all[gen]) all[gen] = {}; all[gen][cap] = !!allowed; gset('sb:perm', all);
+  }
+  // ask the user once per (generator, capability). Returns a Promise<bool>.
+  function sbConsent(gen, cap) {
+    return new Promise(function (resolve) {
+      var prior = sbPermFor(gen, cap);
+      if (prior === true) return resolve(true);
+      if (prior === false) return resolve(false);   // remembered "no"
+      var labels = { storage: 'save data that persists across generators', ai: 'use your own AI model' };
+      var what = labels[cap] || ('use the "' + cap + '" capability');
+      var msg = 'This generator (' + (gen || 'unknown') + ') wants to ' + what + ' via Weld Companion.\n\nAllow it? (remembered for this generator)';
+      var ok = false;
+      try { ok = window.confirm(msg); } catch (e) { ok = false; }
+      sbSetPerm(gen, cap, ok);
+      try { toast(ok ? ('Skybridge: ' + cap + ' allowed') : ('Skybridge: ' + cap + ' blocked')); } catch (e) {}
+      resolve(ok);
+    });
+  }
+
+  // per-generator storage namespace, so one generator can't read another's keys
+  function sbStoreKey(gen, key) { return 'sbk:' + gen + ':' + key; }
+
+  function sbReply(source, origin, nonce, result) {
+    try { source.postMessage({ channel: SB, type: 'reply', nonce: nonce, result: result }, origin && origin !== 'null' ? origin : '*'); } catch (e) {}
+  }
+
+  function sbServiceStorage(gen, payload) {
+    return new Promise(function (resolve) {
+      var op = payload && payload.op;
+      if (op === 'get') {
+        resolve({ ok: true, value: gget(sbStoreKey(gen, payload.key), null) });
+      } else if (op === 'set') {
+        gset(sbStoreKey(gen, payload.key), payload.value); resolve({ ok: true });
+      } else if (op === 'list') {
+        var prefix = 'sbk:' + gen + ':' + (payload.prefix || '');
+        var out = [];
+        try {
+          var all = (typeof GM_listValues === 'function') ? GM_listValues() : [];
+          for (var i = 0; i < all.length; i++) {
+            var k = all[i];
+            if (typeof k === 'string' && k.indexOf(prefix) === 0) out.push(k.slice(('sbk:' + gen + ':').length));
+          }
+        } catch (e) {}
+        resolve({ ok: true, value: out });
+      } else {
+        resolve({ ok: false, reason: 'bad-op' });
+      }
+    });
+  }
+
+  function sbServiceAI(payload) {
+    return new Promise(function (resolve) {
+      var cfg = aiConfig();
+      if (!cfg || cfg.provider === 'builtin' || !cfg.provider) {
+        return resolve({ ok: false, reason: 'no-own-model' });   // user hasn't set up their own model
+      }
+      var sys = payload.system || 'You are a helpful assistant inside a Perchance generator.';
+      var user = String(payload.prompt || '');
+      // callOwnAI uses the user's stored key HERE; only the completion goes back.
+      callOwnAI(cfg, sys, user, function (err, txt) {
+        if (err) resolve({ ok: false, reason: String(err).slice(0, 120) });
+        else resolve({ ok: true, value: txt });
+      });
+    });
+  }
+
+  function sbOriginOk(o) {
+    if (typeof o !== 'string' || o === 'null') return false;
+    if (o === location.origin) return true;
+    var h = o; var p = h.indexOf('://'); if (p !== -1) h = h.slice(p + 3);
+    var s = h.indexOf('/'); if (s !== -1) h = h.slice(0, s);
+    var c = h.indexOf(':'); if (c !== -1) h = h.slice(0, c);
+    h = h.toLowerCase();
+    return h === 'perchance.org' || (h.length > 13 && h.slice(-14) === '.perchance.org');
+  }
+
+  function mountSkybridgeAnchor() {
+    if (!window.addEventListener) return;
+    window.addEventListener('message', function (ev) {
+      if (!ev || !sbOriginOk(ev.origin)) return;
+      var d = ev.data;
+      if (!d || typeof d !== 'object' || d.channel !== SB) return;
+      var source = ev.source || window;
+
+      if (d.type === 'hello') {
+        // negotiate: respond with our range + capabilities; the plugin picks the common max
+        source.postMessage({
+          channel: SB, type: 'here', version: '1.0.0',
+          protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS
+        }, ev.origin && ev.origin !== 'null' ? ev.origin : '*');
+        return;
+      }
+
+      if (d.type === 'request') {
+        var cap = String(d.cap || '');
+        var nonce = d.nonce;
+        if (SB_CAPS.indexOf(cap) === -1) { sbReply(source, ev.origin, nonce, { ok: false, reason: 'unsupported' }); return; }
+        var gen = genName() || 'unknown';
+        sbConsent(gen, cap).then(function (allowed) {
+          if (!allowed) { sbReply(source, ev.origin, nonce, { ok: false, reason: 'denied' }); return; }
+          var work = (cap === 'storage') ? sbServiceStorage(gen, d.payload || {})
+                   : (cap === 'ai')      ? sbServiceAI(d.payload || {})
+                   : Promise.resolve({ ok: false, reason: 'unsupported' });
+          work.then(function (result) { sbReply(source, ev.origin, nonce, result || { ok: false, reason: 'error' }); });
+        });
+        return;
+      }
+    }, false);
+  }
+
   function init() {
     if (window.top !== window.self) return; // top frame only
     try {
+      mountSkybridgeAnchor();
       recordVisit();
       adoptTheme();
       applyComfort();

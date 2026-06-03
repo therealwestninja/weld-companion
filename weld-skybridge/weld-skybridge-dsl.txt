@@ -1,0 +1,285 @@
+$meta
+  title       = weld.skybridge
+  description = The companion bridge. Weld Companion (a userscript) runs ABOVE the page, in the top frame, with powers a sandboxed generator cannot have: storage that persists across every generator, and the user's own AI model. weld.skybridge is the sandbox end of the link to it -- a request/response channel over window.postMessage, origin-checked to perchance.org and nonce-matched so replies cannot be spoofed. It negotiates a PROTOCOL VERSION on connect (highest the two ends share, else it stays cleanly disconnected), gates every privileged call behind the companion's own per-capability consent prompt, and -- crucially -- degrades gracefully: with no companion installed, storage falls back to weld.persist or memory and AI reports unavailable, so a plugin built on it still runs for everyone. Secrets never cross the bridge: a prompt goes up, only the completion comes back. Stash on window.weld.skybridge.
+  tags        = weld, skybridge, bridge, companion, userscript, postmessage, plugin
+
+$output() =>
+  'use strict';
+
+  if (!window.weld) window.weld = {};
+  if (window.weld.skybridge) return window.weld.skybridge;
+
+  // -----------------------------------------------------------------
+  // weld.skybridge: the sandbox half of the Weld Companion bridge.
+  //
+  // Two execution contexts, complementary powers. A PLUGIN (here, in the
+  // generator sandbox) is universal but confined. The COMPANION (a
+  // userscript, top frame) is privileged but optional. skybridge joins
+  // them -- WITHOUT ever letting a plugin require the companion.
+  //
+  //   var sb = weld.skybridge;
+  //   sb.onConnect(function (info) {                 // fires if/when linked
+  //     console.log('linked, protocol', info.protocol);
+  //   });
+  //   if (sb.has('ai')) {                            // honest capability check
+  //     var r = await sb.request('ai', { prompt: 'Name a tavern.' });
+  //     if (r.ok) use(r.value);                      // result is data, not throw
+  //   }
+  //   await sb.storage.set('slot1', state);          // works with OR without
+  //   var s = await sb.storage.get('slot1');         // the companion present
+  //
+  // PROTOCOL VERSIONING. The two halves ship independently and land in
+  // browsers at different times, so the handshake negotiates a protocol
+  // version: each side advertises a min..max range; they settle on the
+  // highest both support. No overlap -> stay disconnected (never half-speak a
+  // protocol). weld.skybridge.protocol holds the agreed integer (0 = not
+  // connected). This is separate from `version` (this plugin's own semver).
+  //
+  // TRUST. Everything inbound is untrusted. Every message, both ways, is
+  // checked: right origin (*.perchance.org), right envelope shape, and a
+  // per-request nonce the reply must echo (no spoof, no replay). The
+  // companion -- not this plugin -- owns the consent prompt, PER CAPABILITY,
+  // remembered per generator. A denied request comes back as
+  // { ok:false, reason:'denied' }: data to branch on, not an exception.
+  //
+  // SECRETS NEVER CROSS. `ai` sends a prompt up; the companion runs the
+  // keyed call itself and sends only the completion down. The API key is
+  // never placed on the bridge in either direction.
+  //
+  // GRACEFUL FALLBACK. With no companion: connected=false, has('ai')=false,
+  // but storage still works -- it routes to weld.persist if present, else an
+  // in-memory map. has('storage') always reports the truth so a plugin CAN
+  // distinguish "saved everywhere" from "saved just here" if it cares; most
+  // won't need to.
+  // -----------------------------------------------------------------
+
+  // ---- protocol the sandbox end speaks (advertise a range) ----
+  var PROTO_MIN = 1;
+  var PROTO_MAX = 1;
+  var MSG = 'weld.skybridge';          // envelope tag, both directions
+  var HELLO_TIMEOUT = 4000;            // ms to wait for the anchor to answer
+  var REQUEST_TIMEOUT = 30000;         // ms before a pending request gives up
+
+  // ---- connection state ----
+  var connected = false;
+  var proto = 0;                       // negotiated protocol (0 = none)
+  var caps = {};                       // capability name -> true (advertised)
+  var anchorVersion = null;            // the companion's reported semver
+  var onConnectFns = new Array();
+  var pending = {};                    // nonce -> { resolve, timer }
+  var helloTimer = null;
+
+  function isTopFrame() { try { return window.top === window.self; } catch (e) { return false; } }
+  function originOk(o) {
+    if (typeof o !== 'string' || o === 'null') return false;
+    if (o === location.origin) return true;
+    // Parse without a regex: bracket character-classes like the ones a host
+    // pattern would need are themselves list-reference traps in Perchance, so
+    // we match "https://(...).perchance.org" with plain string ops instead.
+    var host = o;
+    var p = host.indexOf('://');
+    if (p !== -1) host = host.slice(p + 3);
+    var slash = host.indexOf('/'); if (slash !== -1) host = host.slice(0, slash);
+    var colon = host.indexOf(':'); if (colon !== -1) host = host.slice(0, colon);
+    host = host.toLowerCase();
+    return host === 'perchance.org' || (host.length > 13 && host.slice(-14) === '.perchance.org');
+  }
+  function nonce() {
+    return 'sb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+  }
+  // the counterpart frame: if we're inside an iframe, talk to the top; else to ourselves
+  function peer() { try { return (window.top && window.top !== window.self) ? window.top : window; } catch (e) { return window; } }
+  function postUp(obj) {
+    try { peer().postMessage(obj, '*'); } catch (e) { /* peer may be cross-origin-guarded; harmless */ }
+  }
+
+  function fireConnect() {
+    var info = { protocol: proto, version: anchorVersion, capabilities: Object.keys(caps) };
+    for (var i = 0; i < onConnectFns.length; i++) {
+      try { Reflect.get(onConnectFns, i)(info); } catch (e) { /* swallow */ }
+    }
+  }
+  function onConnect(fn) {
+    if (typeof fn !== 'function') return function () {};
+    onConnectFns.push(fn);
+    if (connected) { try { fn({ protocol: proto, version: anchorVersion, capabilities: Object.keys(caps) }); } catch (e) {} }
+    return function () { var ix = onConnectFns.indexOf(fn); if (ix !== -1) onConnectFns.splice(ix, 1); };
+  }
+
+  // ---- inbound message handling (treat everything as untrusted) ----
+  function onMessage(ev) {
+    if (!ev || !originOk(ev.origin)) return;
+    var d = ev.data;
+    if (!d || typeof d !== 'object' || d.channel !== MSG) return;
+
+    if (d.type === 'here') {
+      // handshake reply: negotiate the highest protocol both ends share
+      var lo = Math.max(PROTO_MIN, (d.protoMin | 0) || 0);
+      var hi = Math.min(PROTO_MAX, (d.protoMax | 0) || 0);
+      if (hi < lo) return;             // no common protocol -> stay disconnected
+      if (connected) return;           // already linked; ignore duplicates
+      proto = hi;
+      anchorVersion = (typeof d.version === 'string') ? d.version : null;
+      caps = {};
+      if (d.capabilities && typeof d.capabilities === 'object' && d.capabilities.length != null) {
+        for (var i = 0; i < d.capabilities.length; i++) {
+          var c = Reflect.get(d.capabilities, i);
+          if (typeof c === 'string') Reflect.set(caps, c, true);
+        }
+      }
+      connected = true;
+      if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+      fireConnect();
+      return;
+    }
+
+    if (d.type === 'reply') {
+      var p = Reflect.get(pending, String(d.nonce));
+      if (!p) return;                  // unknown / replayed / spoofed nonce -> drop
+      Reflect.deleteProperty(pending, String(d.nonce));
+      if (p.timer) clearTimeout(p.timer);
+      var result = (d.result && typeof d.result === 'object')
+        ? d.result
+        : { ok: false, reason: 'malformed' };
+      p.resolve(result);
+      return;
+    }
+  }
+
+  // ---- send a capability request up; resolve with a result object ----
+  function request(capability, payload) {
+    return new Promise(function (resolve) {
+      if (!connected) { resolve({ ok: false, reason: 'disconnected' }); return; }
+      if (!Reflect.get(caps, String(capability))) { resolve({ ok: false, reason: 'unsupported' }); return; }
+      var id = nonce();
+      var timer = setTimeout(function () {
+        if (Reflect.get(pending, id)) {
+          Reflect.deleteProperty(pending, id);
+          resolve({ ok: false, reason: 'timeout' });
+        }
+      }, REQUEST_TIMEOUT);
+      Reflect.set(pending, id, { resolve: resolve, timer: timer });
+      postUp({
+        channel: MSG, type: 'request', proto: proto, nonce: id,
+        cap: String(capability),
+        payload: (payload && typeof payload === 'object') ? payload : {}
+      });
+    });
+  }
+
+  function has(capability) { return !!Reflect.get(caps, String(capability)); }
+
+  // ---- storage: companion when available, else weld.persist, else memory ----
+  // Uniform async (Promise) API, since the companion path is a round-trip.
+  var mem = {};                        // session-only fallback map
+  var persistColl = null;              // lazily-opened weld.persist collection
+  function persistCollection() {
+    if (persistColl) return persistColl;
+    try {
+      if (window.weld && window.weld.persist && typeof window.weld.persist.open === 'function') {
+        var db = window.weld.persist.open('weld-skybridge');
+        persistColl = db.collection('kv');
+        return persistColl;
+      }
+    } catch (e) { /* fall through to memory */ }
+    return null;
+  }
+  function storageGet(key) {
+    var k = String(key);
+    if (connected && has('storage')) {
+      return request('storage', { op: 'get', key: k }).then(function (r) { return r.ok ? r.value : null; });
+    }
+    var coll = persistCollection();
+    if (coll) {
+      try { return Promise.resolve(coll.get(k)).then(function (rec) { return rec != null ? rec : null; }); }
+      catch (e) { /* fall through */ }
+    }
+    return Promise.resolve(Reflect.has(mem, k) ? Reflect.get(mem, k) : null);
+  }
+  function storageSet(key, value) {
+    var k = String(key);
+    if (connected && has('storage')) {
+      return request('storage', { op: 'set', key: k, value: value }).then(function (r) { return !!r.ok; });
+    }
+    var coll = persistCollection();
+    if (coll) {
+      try { return Promise.resolve(coll.put(k, value)).then(function () { return true; }); }
+      catch (e) { /* fall through */ }
+    }
+    Reflect.set(mem, k, value);
+    return Promise.resolve(true);
+  }
+  function storageList(prefix) {
+    var pre = prefix != null ? String(prefix) : '';
+    if (connected && has('storage')) {
+      return request('storage', { op: 'list', prefix: pre }).then(function (r) { return r.ok ? r.value : new Array(); });
+    }
+    var coll = persistCollection();
+    if (coll && typeof coll.query === 'function') {
+      try {
+        return Promise.resolve(coll.query()).then(function (rows) {
+          var out = new Array();
+          if (rows && rows.length != null) {
+            for (var i = 0; i < rows.length; i++) {
+              var key = Reflect.get(Reflect.get(rows, i) || {}, 'key');
+              if (typeof key === 'string' && key.indexOf(pre) === 0) out.push(key);
+            }
+          }
+          return out;
+        });
+      } catch (e) { /* fall through */ }
+    }
+    var keys = Object.keys(mem), res = new Array();
+    for (var j = 0; j < keys.length; j++) { var kk = Reflect.get(keys, j); if (kk.indexOf(pre) === 0) res.push(kk); }
+    return Promise.resolve(res);
+  }
+  // where is storage actually going right now? (for honesty / debugging)
+  function storageBackend() {
+    if (connected && has('storage')) return 'companion';
+    return persistCollection() ? 'persist' : 'memory';
+  }
+
+  // ---- ai: prompt up, completion down; key never crosses ----
+  function ai(prompt, options) {
+    var payload = { prompt: String(prompt != null ? prompt : '') };
+    if (options && typeof options === 'object') {
+      if (options.system != null) payload.system = String(options.system);
+      if (options.maxTokens != null) payload.maxTokens = options.maxTokens | 0;
+      if (options.temperature != null) payload.temperature = +options.temperature;
+    }
+    return request('ai', payload);     // resolves { ok, value } or { ok:false, reason }
+  }
+
+  // ---- start the handshake ----
+  function connect() {
+    if (connected) return;
+    postUp({ channel: MSG, type: 'hello', protoMin: PROTO_MIN, protoMax: PROTO_MAX });
+    if (!helloTimer) {
+      helloTimer = setTimeout(function () { helloTimer = null; /* stay disconnected, harmless */ }, HELLO_TIMEOUT);
+    }
+  }
+
+  try { window.addEventListener('message', onMessage, false); } catch (e) { /* no window.addEventListener?? */ }
+  // kick the handshake now and once more after load, in case the anchor mounts late
+  connect();
+  try { window.addEventListener('load', connect, { once: true }); } catch (e) {}
+
+  window.weld.skybridge = {
+    // connection
+    get connected() { return connected; },
+    get protocol() { return proto; },          // negotiated protocol int (0 = none)
+    get anchorVersion() { return anchorVersion; },
+    has: has,
+    onConnect: onConnect,
+    reconnect: connect,
+    // privileged calls (each resolves a result object, never throws)
+    request: request,
+    ai: ai,
+    // storage: graceful fallback, honest backend
+    storage: { get: storageGet, set: storageSet, list: storageList, backend: storageBackend },
+    // protocol range this sandbox end speaks
+    protocolRange: { min: PROTO_MIN, max: PROTO_MAX },
+    version: '1.0.0'
+  };
+
+  return window.weld.skybridge;
