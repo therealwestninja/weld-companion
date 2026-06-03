@@ -74,7 +74,7 @@
   function genName() { return (window.generatorName || (location.pathname.replace(/^\//, '').split('/')[0]) || '').trim(); }
   function isEditMode() { return /[?&]edit/.test(location.search) || !!window.modelTextEditor; }
   function toast(msg, ms) {
-    var t = el('div', { class: 'wc-toast', text: msg });
+    var t = el('div', { class: 'wc-root wc-toast', text: msg });
     document.body.appendChild(t);
     requestAnimationFrame(function () { t.classList.add('wc-toast-in'); });
     setTimeout(function () { t.classList.remove('wc-toast-in'); setTimeout(function () { t.remove(); }, 300); }, ms || 2200);
@@ -83,45 +83,214 @@
   // expose a tiny namespace for debugging / other scripts
   window.weldCompanion = { gget: gget, gset: gset, version: '1.0.0' };
 
+  // ---- adopt Perchance's own theme ------------------------------------------
+  // Our chrome should belong to the page, not impose a foreign palette. We read
+  // the page's actual computed colours (background, text, and the menu bar) and
+  // map them onto our --wc-* tokens, so the bar/drawer/inputs match whatever
+  // theme Perchance is showing (it honours prefers-color-scheme). Falls back to
+  // the dark defaults in :root if anything can't be read.
+  function parseRGB(str) {
+    var m = (str || '').match(/rgba?\(([^)]+)\)/); if (!m) return null;
+    var p = m[1].split(',').map(function (x) { return parseFloat(x); });
+    if (p.length < 3 || isNaN(p[0])) return null;
+    return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+  }
+  function luminance(c) { return (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) / 255; }
+  function mix(c, d, t) { return { r: c.r + (d.r - c.r) * t, g: c.g + (d.g - c.g) * t, b: c.b + (d.b - c.b) * t }; }
+  function rgb(c) { return 'rgb(' + Math.round(c.r) + ',' + Math.round(c.g) + ',' + Math.round(c.b) + ')'; }
+  function adoptTheme() {
+    try {
+      var bodyStyle = getComputedStyle(document.body);
+      var bg = parseRGB(bodyStyle.backgroundColor);
+      // many pages have a transparent body bg — walk to html, else default
+      if (!bg || bg.a === 0) bg = parseRGB(getComputedStyle(document.documentElement).backgroundColor);
+      if (!bg || bg.a === 0) bg = null;
+      var ink = parseRGB(bodyStyle.color);
+      if (!bg && !ink) return; // nothing reliable — keep dark defaults
+
+      var dark = bg ? luminance(bg) < 0.5 : (ink ? luminance(ink) > 0.5 : true);
+      var base = bg || (dark ? { r: 19, g: 23, b: 30 } : { r: 247, g: 248, b: 252 });
+      var textC = ink || (dark ? { r: 238, g: 242, b: 246 } : { r: 26, g: 28, b: 34 });
+      var towardText = dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+
+      // surfaces: nudge the page background slightly toward the text colour for
+      // raised panels, so the drawer reads as "on top of" the page
+      var surface  = rgb(mix(base, towardText, dark ? 0.06 : 0.02));
+      var surface2 = rgb(mix(base, towardText, dark ? 0.12 : 0.05));
+      var surface3 = rgb(mix(base, towardText, dark ? 0.18 : 0.09));
+      var lineA = dark ? 'rgba(255,255,255,.10)' : 'rgba(0,0,0,.12)';
+      var lineB = dark ? 'rgba(255,255,255,.05)' : 'rgba(0,0,0,.06)';
+
+      var set = {
+        '--wc-surface': surface, '--wc-surface-2': surface2, '--wc-surface-3': surface3,
+        '--wc-ink': rgb(textC),
+        '--wc-dim': rgb(mix(textC, base, 0.35)),
+        '--wc-faint': rgb(mix(textC, base, 0.6)),
+        '--wc-line': lineA, '--wc-line-2': lineB,
+        '--wc-shadow': dark ? '0 24px 64px -16px rgba(0,0,0,.78),0 6px 18px -6px rgba(0,0,0,.6)'
+                            : '0 24px 64px -16px rgba(0,0,0,.22),0 6px 18px -6px rgba(0,0,0,.14)'
+      };
+      var s = document.getElementById('wc-theme-vars') || document.createElement('style');
+      s.id = 'wc-theme-vars';
+      s.textContent = ':root{' + Object.keys(set).map(function (k) { return k + ':' + set[k] + ';'; }).join('') + '}';
+      if (!s.parentNode) document.head.appendChild(s);
+    } catch (e) { /* keep dark defaults */ }
+  }
+
   // ============================================================ styles
+  // Design language: "precision instrument" — deep graphite glass, a single
+  // welding-arc amber accent with a cool cyan signal colour, hairline borders
+  // with inner light, layered depth, a characterful mono display face paired
+  // with a clean grotesque body. Everything is scoped under .wc-root / wc-*
+  // and resets inherited host styles at the boundary so a generator's own CSS
+  // can't bleed in (and ours can't leak out).
   GM_addStyle([
-    ':root{--wc-accent:#4493f8;--wc-bg:#11151c;--wc-panel:#1a212b;--wc-border:#2a3340;--wc-ink:#e6edf3;--wc-muted:#8b98a8;}',
-    '.wc-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(12px);z-index:2147483600;',
-    '  background:var(--wc-panel);color:var(--wc-ink);border:1px solid var(--wc-border);border-radius:8px;',
-    '  padding:10px 16px;font:500 13px system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.4);opacity:0;transition:opacity .25s,transform .25s;}',
-    '.wc-toast-in{opacity:1;transform:translateX(-50%) translateY(0);}',
-    '.wc-btn{background:var(--wc-panel);color:var(--wc-ink);border:1px solid var(--wc-border);border-radius:6px;',
-    '  padding:6px 10px;font:600 12px system-ui,sans-serif;cursor:pointer;transition:border-color .15s,background .15s;}',
-    '.wc-btn:hover{border-color:var(--wc-accent);}',
-    '.wc-btn-accent{background:var(--wc-accent);border-color:var(--wc-accent);color:#fff;}',
-    '.wc-dock{position:fixed;right:14px;bottom:14px;z-index:2147483500;display:flex;flex-direction:column;gap:8px;align-items:flex-end;}',
-    '.wc-fab{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;',
-    '  background:var(--wc-panel);color:var(--wc-ink);border:1px solid var(--wc-border);cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.35);transition:transform .15s,border-color .15s;}',
-    '.wc-fab:hover{transform:translateY(-2px);border-color:var(--wc-accent);}',
-    '.wc-panel{position:fixed;z-index:2147483550;background:var(--wc-panel);color:var(--wc-ink);border:1px solid var(--wc-border);',
-    '  border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,.5);font:14px system-ui,sans-serif;max-height:80vh;overflow:auto;}',
-    '.wc-panel h3{margin:0 0 10px;font:700 14px system-ui,sans-serif;color:var(--wc-ink);}',
-    '.wc-panel label{display:block;font:600 11px system-ui,sans-serif;color:var(--wc-muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.5px;}',
-    '.wc-panel input[type=text],.wc-panel input[type=password],.wc-panel input[type=number],.wc-panel select,.wc-panel textarea{',
-    '  width:100%;box-sizing:border-box;background:var(--wc-bg);color:var(--wc-ink);border:1px solid var(--wc-border);border-radius:6px;padding:7px 9px;font:13px system-ui,sans-serif;}',
-    '.wc-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
+    // ---- tokens ----
+    ':root{',
+    '  --wc-mono:"Berkeley Mono","JetBrains Mono","SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;',
+    '  --wc-sans:"Geist","Satoshi",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
+    '  --wc-ink:#eef2f6; --wc-dim:#9aa7b6; --wc-faint:#5d6b7b;',
+    '  --wc-arc:#ff8a3d;        /* welding-arc amber, the primary accent */',
+    '  --wc-arc-soft:rgba(255,138,61,.14);',
+    '  --wc-signal:#4ee0c8;     /* cool cyan signal, secondary */',
+    '  --wc-gold:#ffcd4d;',
+    // Opaque surfaces: legibility must NOT depend on backdrop-filter (it fails
+    // over light/complex host pages). Blur is a subtle enhancement layered on a
+    // solid base, never the base itself.
+    '  --wc-surface:#13171e;    /* solid window background */',
+    '  --wc-surface-2:#1a1f28;  /* raised rows / inputs */',
+    '  --wc-surface-3:#222936;  /* hover */',
+    '  --wc-glass:#13171e; --wc-glass-2:#1a1f28;',
+    '  --wc-line:rgba(255,255,255,.09); --wc-line-2:rgba(255,255,255,.05);',
+    '  --wc-shadow:0 24px 64px -16px rgba(0,0,0,.78),0 6px 18px -6px rgba(0,0,0,.6);',
+    '  --wc-z:2147483500;',
+    '}',
+    // ---- boundary reset: neutralise inherited host styles on our subtree ----
+    '.wc-root,.wc-root *{box-sizing:border-box;}',
+    '.wc-root{all:revert;font-family:var(--wc-sans);line-height:1.5;-webkit-font-smoothing:antialiased;color:var(--wc-ink);text-align:left;}',
+    // theme overlay: fixed, click-through; filters the whole page behind it.
+    // z below our UI (bar/drawer/pins/toast) so those stay un-filtered.
+    '.wc-theme-overlay{position:fixed;inset:0;pointer-events:none;z-index:2147483400;}',
+    // ---- our single item inside Perchance's own menu bar (#menuBarEl) ----
+    // Styled exactly like a native .menu-item; height-locked so it can't grow
+    // or distort the bar. One item only — Perchance's UI is never displaced.
+    '.wc-weld-item{position:relative;height:100% !important;box-sizing:border-box !important;',
+    '  line-height:1 !important;white-space:nowrap !important;flex:0 0 auto !important;}',
+    '.wc-weld-item .menu-item-icon{line-height:1 !important;}',
+    '.wc-weld-item.wc-on{color:var(--wc-arc) !important;}',
+    '.wc-weld-item.wc-on::after{content:"";position:absolute;left:4px;right:4px;bottom:0;height:2px;background:var(--wc-arc);border-radius:2px 2px 0 0;}',
+    // ---- drawer (hangs beneath Perchance\'s bar; never covers it) ----
+    '.wc-scrim{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483540;background:transparent;}',
+    '.wc-drawer{position:fixed;top:8px;right:12px;width:min(440px,calc(100vw - 24px));z-index:2147483550;',
+    '  display:flex;flex-direction:column;background:var(--wc-surface);border:1px solid var(--wc-line);',
+    '  border-radius:14px;box-shadow:var(--wc-shadow);overflow:hidden;opacity:0;transform:translateY(-8px);',
+    '  animation:wc-drawer-in .2s cubic-bezier(.2,.8,.2,1) forwards;}',
+    '@keyframes wc-drawer-in{to{opacity:1;transform:translateY(0);}}',
+    // drawer header: brand + result tools + close
+    '.wc-titlebar{display:flex;align-items:center;gap:10px;padding:11px 12px 11px 15px;border-bottom:1px solid var(--wc-line-2);flex:none;}',
+    '.wc-brand{display:flex;align-items:center;gap:8px;font:700 12px/1 var(--wc-mono);letter-spacing:1px;text-transform:uppercase;color:var(--wc-ink);}',
+    '.wc-brand .wc-dot{width:8px;height:8px;border-radius:50%;background:var(--wc-arc);box-shadow:0 0 10px var(--wc-arc);}',
+    '.wc-tools{display:inline-flex;align-items:center;gap:3px;margin-left:auto;}',
+    '.wc-toolbtn{appearance:none;border:1px solid transparent;background:transparent;color:var(--wc-dim);cursor:pointer;',
+    '  width:26px;height:26px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;line-height:1;transition:color .15s,background .15s,border-color .15s;}',
+    '.wc-toolbtn:hover{color:var(--wc-arc);background:var(--wc-surface-2);border-color:var(--wc-line);}',
+    '.wc-histgroup{display:inline-flex;align-items:center;gap:1px;margin-left:3px;padding-left:5px;border-left:1px solid var(--wc-line);}',
+    '.wc-histlabel{font:600 10px/1 var(--wc-mono);color:var(--wc-faint);padding:0 3px;min-width:24px;text-align:center;}',
+    '.wc-close{width:28px;height:28px;border-radius:8px;border:1px solid var(--wc-line);background:var(--wc-surface-2);',
+    '  color:var(--wc-dim);font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;transition:color .15s,background .15s,border-color .15s;}',
+    '.wc-close:hover{color:#fff;background:#c0392b;border-color:#c0392b;}',
+    // drawer tab strip
+    '.wc-menu{display:flex;gap:2px;padding:8px 10px;border-bottom:1px solid var(--wc-line-2);flex:none;}',
+    '.wc-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:9px 8px;border-radius:9px;cursor:pointer;',
+    '  font:600 12px/1 var(--wc-sans);letter-spacing:.2px;color:var(--wc-dim);border:1px solid transparent;transition:color .15s,background .15s,border-color .15s;}',
+    '.wc-tab:hover{color:var(--wc-ink);background:var(--wc-surface-2);}',
+    '.wc-tab.wc-on{color:var(--wc-ink);background:var(--wc-surface-3);box-shadow:inset 0 -2px 0 var(--wc-arc);}',
+    '.wc-tab .wc-ti{font-size:14px;}',
+    '.wc-body{overflow:auto;padding:16px;scrollbar-width:thin;scrollbar-color:var(--wc-faint) transparent;}',
+    '.wc-body::-webkit-scrollbar{width:9px;} .wc-body::-webkit-scrollbar-thumb{background:var(--wc-line);border-radius:9px;}',
+    '.wc-body::-webkit-scrollbar-track{background:transparent;}',
+    // a sticky footer area inside a tab (for CRUD / actions)
+    '.wc-foot{margin-top:14px;padding-top:14px;border-top:1px solid var(--wc-line-2);}',
+    '.wc-section-note{font:500 11px/1.5 var(--wc-sans);color:var(--wc-faint);margin-top:12px;}',
+    // ---- toast ----
+    '.wc-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(14px) scale(.98);z-index:2147483600;',
+    '  padding:11px 18px 11px 15px;font:500 13px/1.3 var(--wc-sans);letter-spacing:.1px;color:var(--wc-ink);',
+    '  background:var(--wc-surface);border:1px solid var(--wc-line);border-radius:12px;box-shadow:var(--wc-shadow);',
+    '  display:flex;align-items:center;gap:9px;opacity:0;transition:opacity .3s cubic-bezier(.2,.8,.2,1),transform .3s cubic-bezier(.2,.8,.2,1);}',
+    '.wc-toast::after{content:"";position:absolute;left:0;top:14%;height:72%;width:3px;border-radius:3px;background:var(--wc-arc);box-shadow:0 0 12px var(--wc-arc);}',
+    '.wc-toast-in{opacity:1;transform:translateX(-50%) translateY(0) scale(1);}',
+    // ---- buttons ----
+    '.wc-btn{appearance:none;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01));color:var(--wc-ink);',
+    '  border:1px solid var(--wc-line);border-radius:9px;padding:8px 13px;font:600 12px/1 var(--wc-sans);letter-spacing:.2px;',
+    '  cursor:pointer;transition:transform .12s ease,border-color .15s,background .15s,box-shadow .15s;}',
+    '.wc-btn:hover{border-color:rgba(255,138,61,.5);box-shadow:0 0 0 1px rgba(255,138,61,.15),0 6px 16px -8px rgba(0,0,0,.6);transform:translateY(-1px);}',
+    '.wc-btn:active{transform:translateY(0) scale(.98);}',
+    '.wc-btn-accent{background:linear-gradient(180deg,#ff9a52,#f4751f);border-color:#ff8a3d;color:#1a0f05;text-shadow:0 1px 0 rgba(255,255,255,.2);}',
+    '.wc-btn-accent:hover{box-shadow:0 0 18px -2px rgba(255,138,61,.55);border-color:#ffab6b;}',
+    '.wc-mini{padding:5px 9px;font-size:11px;border-radius:7px;}',
+    // ---- panels ----
+    '.wc-label{display:block;font:600 10px/1 var(--wc-mono);color:var(--wc-dim);margin:14px 0 6px;text-transform:uppercase;letter-spacing:.9px;}',
+    '.wc-field{width:100%;box-sizing:border-box;background:var(--wc-surface-2);color:var(--wc-ink);border:1px solid var(--wc-line);',
+    '  border-radius:9px;padding:9px 11px;font:13px/1.4 var(--wc-sans);transition:border-color .15s,box-shadow .15s;outline:none;}',
+    '.wc-field:focus{border-color:rgba(255,138,61,.6);box-shadow:0 0 0 3px var(--wc-arc-soft);}',
+    'textarea.wc-field{resize:vertical;font-family:var(--wc-mono);font-size:12px;line-height:1.5;}',
+    '.wc-row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;}',
+    // toggle styled checkbox
+    '.wc-check{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font:500 13px/1 var(--wc-sans);color:var(--wc-ink);}',
+    '.wc-check input{position:absolute;opacity:0;width:0;height:0;}',
+    '.wc-check .wc-sw{width:36px;height:20px;border-radius:20px;background:rgba(255,255,255,.1);border:1px solid var(--wc-line);position:relative;transition:background .2s;flex:none;}',
+    '.wc-check .wc-sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--wc-dim);transition:transform .2s,background .2s;}',
+    '.wc-check input:checked + .wc-sw{background:var(--wc-arc-soft);border-color:rgba(255,138,61,.5);}',
+    '.wc-check input:checked + .wc-sw::after{transform:translateX(16px);background:var(--wc-arc);box-shadow:0 0 8px var(--wc-arc);}',
+    // ---- lists ----
     '.wc-list{list-style:none;margin:0;padding:0;}',
-    '.wc-list li{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;cursor:pointer;}',
-    '.wc-list li:hover{background:rgba(68,147,248,.12);}',
-    '.wc-star{cursor:pointer;color:var(--wc-muted);}.wc-star.on{color:#f0c419;}',
-    '.wc-overlay{position:fixed;inset:0;z-index:2147483540;background:rgba(0,0,0,.45);}',
-    '.wc-palette{position:fixed;left:50%;top:14%;transform:translateX(-50%);width:min(560px,92vw);}',
-    '.wc-result-tools{display:inline-flex;gap:6px;margin:6px 0;vertical-align:middle;}',
-    '.wc-mini{font-size:11px;padding:3px 7px;}',
-    '.wc-hist-bar{display:inline-flex;gap:6px;align-items:center;font:600 12px system-ui,sans-serif;color:var(--wc-muted);}',
+    '.wc-list li{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;',
+    '  transition:background .12s;position:relative;}',
+    '.wc-list li:hover{background:var(--wc-surface-3);}',
+    '.wc-list li.wc-sel{background:var(--wc-arc-soft);box-shadow:inset 2px 0 0 var(--wc-arc);}',
+    '.wc-gname{flex:1;font:500 13px/1.2 var(--wc-sans);color:var(--wc-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.wc-gslug{font:500 11px/1 var(--wc-mono);color:var(--wc-faint);}',
+    '.wc-star{cursor:pointer;color:var(--wc-faint);font-size:14px;transition:color .15s,transform .15s;flex:none;}',
+    '.wc-star:hover{transform:scale(1.2);} .wc-star.on{color:var(--wc-gold);text-shadow:0 0 10px rgba(255,205,77,.5);}',
+    // ---- comfort body classes (host page) ----
     'body.wc-focus :is(.menu-bar,#adCtn,.adCtn,[id*="ad" i][class*="ad" i],aside,nav){display:none !important;}',
-    'body.wc-comfort #output,body.wc-comfort .generatorOutput{max-width:var(--wc-width,720px);margin-left:auto;margin-right:auto;',
-    '  font-size:var(--wc-font,16px) !important;line-height:var(--wc-lh,1.6) !important;}',
-    'body.wc-sepia{filter:sepia(.35) brightness(.98);}',
-    '.wc-resize-handle{height:8px;cursor:ns-resize;background:linear-gradient(var(--wc-border),transparent);border-radius:0 0 6px 6px;}',
-    '.wc-pin-tray{position:fixed;left:14px;bottom:14px;z-index:2147483500;max-width:280px;display:flex;flex-direction:column;gap:6px;}',
-    '.wc-pin{background:var(--wc-panel);border:1px solid var(--wc-border);border-radius:8px;padding:8px;font-size:12px;color:var(--wc-ink);position:relative;}',
-    '.wc-pin .wc-x{position:absolute;top:4px;right:6px;cursor:pointer;color:var(--wc-muted);}'
+
+
+    // ---- pins (a tidy tray, bottom-left, below the bar) ----
+    '.wc-pin-tray{position:fixed;left:14px;bottom:14px;z-index:var(--wc-z);width:248px;max-height:calc(100vh - 80px);overflow:auto;',
+    '  display:flex;flex-direction:column;gap:8px;background:var(--wc-surface);border:1px solid var(--wc-line);border-radius:14px;',
+    '  box-shadow:var(--wc-shadow);padding:10px;scrollbar-width:thin;scrollbar-color:var(--wc-faint) transparent;}',
+    '.wc-pin-tray::-webkit-scrollbar{width:8px;} .wc-pin-tray::-webkit-scrollbar-thumb{background:var(--wc-line);border-radius:8px;}',
+    '.wc-pin-trayhead{display:flex;align-items:center;justify-content:space-between;font:700 9px/1 var(--wc-mono);letter-spacing:1.5px;color:var(--wc-arc);padding:2px 2px 0;}',
+    '.wc-pin-clear{cursor:pointer;color:var(--wc-faint);letter-spacing:.5px;text-transform:uppercase;transition:color .15s;}',
+    '.wc-pin-clear:hover{color:var(--wc-arc);}',
+    '.wc-pin{background:var(--wc-surface-2);border:1px solid var(--wc-line);border-radius:10px;overflow:hidden;}',
+    '.wc-pin-head{display:flex;align-items:center;justify-content:space-between;padding:5px 9px;background:rgba(255,255,255,.03);border-bottom:1px solid var(--wc-line-2);}',
+    '.wc-pin-num{font:700 9px/1 var(--wc-mono);letter-spacing:1px;color:var(--wc-faint);}',
+    '.wc-pin-x{cursor:pointer;color:var(--wc-faint);font-size:15px;line-height:1;width:18px;height:18px;display:flex;align-items:center;justify-content:center;border-radius:5px;transition:color .15s,background .15s;}',
+    '.wc-pin-x:hover{color:#fff;background:#c0392b;}',
+    // the embedded result is arbitrary host HTML — clamp it hard so it can never break the card
+    '.wc-pin-body{max-height:140px;overflow:auto;padding:9px 10px;font:12px/1.5 var(--wc-sans);color:var(--wc-ink);}',
+    '.wc-pin-body *{max-width:100% !important;height:auto;margin:0 !important;padding:0 !important;float:none !important;font-size:inherit !important;color:inherit !important;background:transparent !important;}',
+    '.wc-pin-body img{border-radius:6px;display:block;margin:4px 0 !important;}',
+    // expand-textarea button
+    '.wc-expand{appearance:none;border:1px solid var(--wc-line);background:var(--wc-surface-2);color:var(--wc-dim);border-radius:7px;',
+    '  width:24px;height:24px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;transition:color .15s,border-color .15s;}',
+    '.wc-expand:hover{color:var(--wc-arc);border-color:rgba(255,138,61,.5);}',
+    // ---- theme swatches (mini-page preview with the real filter laid over it) ----
+    '.wc-swatch-row{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 2px;}',
+    '.wc-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;border:2px solid transparent;',
+    '  border-radius:11px;padding:4px;transition:border-color .15s,transform .15s;flex:none;}',
+    '.wc-swatch:hover{transform:scale(1.05);}',
+    '.wc-swatch.on{border-color:var(--wc-arc);box-shadow:0 0 0 1px var(--wc-arc),0 0 14px -5px var(--wc-arc);}',
+    '.wc-swatch-sample{position:relative;width:54px;height:40px;border-radius:7px;overflow:hidden;background:#f4f1ea;}',
+    '.wc-sample-line{position:absolute;left:7px;height:4px;border-radius:2px;background:#3a3a3a;}',
+    '.wc-sample-line-1{top:9px;width:38px;}',
+    '.wc-sample-line-2{top:18px;width:28px;background:#6b6b6b;}',
+    '.wc-sample-dot{position:absolute;left:7px;top:26px;width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,#ff8a3d,#4ee0c8);}',
+    '.wc-swatch-filter{position:absolute;inset:0;pointer-events:none;}',
+    '.wc-swatch-label{font:600 10px/1 var(--wc-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--wc-dim);}',
+    '.wc-swatch.on .wc-swatch-label{color:var(--wc-arc);}'
   ].join('\n'));
 
   // (modules B–H appended below)
@@ -145,91 +314,295 @@
     gset('favorites', f); return i === -1;
   }
 
-  function openPalette() {
-    if ($('.wc-palette')) return;
-    var overlay = el('div', { class: 'wc-overlay', onclick: close });
-    var favs = favorites();
-    var recent = gget('recent', []);
-    var input = el('input', { type: 'text', placeholder: 'Search your generators…  (\u2191\u2193 to move, Enter to open)' });
-    var listEl = el('ul', { class: 'wc-list' });
-    var panel = el('div', { class: 'wc-panel wc-palette', style: { padding: '14px' } }, [
-      el('h3', { text: 'Your generators' }), input, listEl
+  // ============================================================ TOP NAVIGATION BAR + DRAWER
+  // We add our tabs to the page's top navigation. Perchance already has its own
+  // in-flow menu bar (#menuBarEl) — so when it's present we inject our tabs INTO
+  // it as native-styled items: one bar, no overlap, nothing covered. Only when
+  // there's no Perchance bar (minimal-mode / bare pages) do we inject our own
+  // slim bar and push the page down. Clicking a tab opens a drawer beneath it.
+  var WC_TAB = null; // null = drawer closed
+  function perchanceBar() {
+    var b = document.getElementById('menuBarEl');
+    // only use it if it's actually visible (it's hidden in minimal mode)
+    if (b && b.offsetParent !== null && getComputedStyle(b).display !== 'none') return b;
+    return null;
+  }
+  function buildBar() {
+    if ($('.wc-weld-item')) return;
+    var host = perchanceBar();
+    if (!host) return; // no Perchance bar here — stay out of the way ('/' still opens the drawer)
+    // Add EXACTLY ONE native-style item, like any other Perchance menu item. We
+    // never inject a competing bar or displace Perchance's own UI. Everything
+    // else (tabs, tools) lives in our own drawer.
+    var item = el('div', { class: 'menu-item wc-weld-item', title: 'Weld Companion  ( / )',
+      onclick: function () { toggleDrawer(); } }, [
+      el('span', { class: 'menu-item-icon', text: '\u26A1' }),
+      el('span', { class: 'menu-item-label', text: 'Weld' })
     ]);
-    function close() { overlay.remove(); panel.remove(); document.removeEventListener('keydown', onKey); }
-    var rows = [];
-    function build(filter) {
-      listEl.innerHTML = ''; rows = [];
-      var seen = {};
-      var pool = [];
-      favs.forEach(function (n) { if (!seen[n]) { seen[n] = 1; pool.push({ name: n, fav: true }); } });
-      recent.forEach(function (r) { if (!seen[r.name]) { seen[r.name] = 1; pool.push({ name: r.name, title: r.title, fav: false }); } });
-      pool.filter(function (p) { return !filter || p.name.toLowerCase().indexOf(filter.toLowerCase()) !== -1; })
-        .slice(0, 40).forEach(function (p, idx) {
-          var star = el('span', { class: 'wc-star' + (isFav(p.name) ? ' on' : ''), text: '\u2605',
-            onclick: function (e) { e.stopPropagation(); var on = toggleFav(p.name); star.classList.toggle('on', on); } });
-          var li = el('li', { onclick: function () { location.href = 'https://perchance.org/' + p.name; } }, [
-            star, el('span', { text: p.title || p.name, style: { flex: '1' } }),
-            el('span', { text: p.name, style: { color: 'var(--wc-muted)', fontSize: '11px' } })
-          ]);
-          if (idx === 0) li.style.background = 'rgba(68,147,248,.12)';
-          listEl.appendChild(li); rows.push(li);
-        });
-      if (!rows.length) listEl.appendChild(el('li', { text: filter ? 'No matches.' : 'Visit some generators to populate this list.', style: { color: 'var(--wc-muted)' } }));
+    // Insert to the LEFT of Perchance's Edit button so we never land at the far
+    // end of the bar (where we could overlap the minimize / minimal-mode button).
+    var editBtn = host.querySelector('.edit-generator-button, .menu-item.edit, [class*="edit-generator"]');
+    if (editBtn && editBtn.parentNode === host) host.insertBefore(item, editBtn);
+    else host.appendChild(item); // fallback: no Edit button found (e.g. not the owner)
+    document.addEventListener('keydown', winKeys);
+  }
+  function tabDefs() {
+    return [
+      { id: 'generators', glyph: '\u2605', label: 'Generators' },
+      { id: 'comfort', glyph: '\u{1F441}', label: 'Comfort' },
+      { id: 'ai', glyph: '\u{1F916}', label: 'AI Helper' }
+    ];
+  }
+  function weldItem() { return $('.wc-weld-item'); }
+  function winKeys(e) { if (e.key === 'Escape' && WC_TAB) { e.preventDefault(); closeDrawer(); } }
+  function closeDrawer() {
+    WC_TAB = null;
+    var d = $('#wc-drawer'); if (d) d.remove();
+    var sc = $('#wc-scrim'); if (sc) sc.remove();
+    var wi = weldItem(); if (wi) wi.classList.remove('wc-on');
+  }
+  // openWindow(tab) is the public entry (shortcuts, etc.)
+  function openWindow(tab) { openDrawer(tab || 'generators'); }
+  function toggleDrawer() { if (WC_TAB) closeDrawer(); else openDrawer('generators'); }
+  function openDrawer(tab) {
+    WC_TAB = tab || WC_TAB || 'generators';
+    var wi = weldItem(); if (wi) wi.classList.add('wc-on');
+    if (!$('#wc-drawer')) {
+      var scrim = el('div', { class: 'wc-root wc-scrim', id: 'wc-scrim', onclick: closeDrawer });
+      // header: brand + (result tools, when output exists) + close
+      var tabsStrip = el('div', { class: 'wc-menu', id: 'wc-menu' }, tabDefs().map(function (d) {
+        return el('div', { class: 'wc-tab', 'data-tab': d.id, onclick: function () { setTab(d.id); } }, [
+          el('span', { class: 'wc-ti', text: d.glyph }), el('span', { text: d.label })
+        ]);
+      }));
+      var drawer = el('div', { class: 'wc-root wc-drawer', id: 'wc-drawer' }, [
+        el('div', { class: 'wc-titlebar' }, [
+          el('span', { class: 'wc-brand' }, [ el('span', { class: 'wc-dot' }), el('span', { text: 'Weld Companion' }) ]),
+          el('span', { class: 'wc-tools', id: 'wc-tools' }),
+          el('button', { class: 'wc-close', title: 'Close (Esc)', text: '\u2715', onclick: closeDrawer })
+        ]),
+        tabsStrip,
+        el('div', { class: 'wc-body', id: 'wc-body' })
+      ]);
+      document.body.appendChild(scrim);
+      document.body.appendChild(drawer);
     }
-    var sel = 0;
-    function highlight() { rows.forEach(function (r, i) { r.style.background = i === sel ? 'rgba(68,147,248,.12)' : ''; }); }
-    function onKey(e) {
-      if (e.key === 'Escape') return close();
+    setTab(WC_TAB);
+    positionDrawer();
+    renderResultTools();
+  }
+  function setTab(id) {
+    WC_TAB = id;
+    var menu = $('#wc-menu');
+    if (menu) $$('.wc-tab', menu).forEach(function (t) { t.classList.toggle('wc-on', t.getAttribute('data-tab') === id); });
+    renderTab();
+  }
+  function positionDrawer() {
+    var drawer = $('#wc-drawer'), scrim = $('#wc-scrim'); if (!drawer) return;
+    var top = 8, host = perchanceBar();
+    if (host) { var r = host.getBoundingClientRect(); top = Math.max(0, r.bottom); }
+    drawer.style.top = top + 'px';
+    drawer.style.maxHeight = 'calc(100vh - ' + (top + 16) + 'px)';
+    if (scrim) scrim.style.top = top + 'px';
+  }
+  function renderTab() {
+    var body = $('#wc-body'); if (!body) return;
+    body.innerHTML = '';
+    if (WC_TAB === 'generators') renderGenerators(body);
+    else if (WC_TAB === 'comfort') renderComfort(body);
+    else if (WC_TAB === 'ai') renderAI(body);
+  }
+
+  // ============================================================ B. favorites & recently-used
+  function recordVisit() {
+    var name = genName();
+    if (!name) return;
+    if (isEditMode()) return; // only count viewer visits
+    var recent = gget('recent', []);
+    recent = recent.filter(function (r) { return r.name !== name; });
+    recent.unshift({ name: name, t: Date.now(), title: (document.title || name).replace(/ ― Perchance.*$/, '').trim() });
+    if (recent.length > 60) recent = recent.slice(0, 60);
+    gset('recent', recent);
+  }
+  function favorites() { return gget('favorites', []); }
+  function isFav(name) { return favorites().indexOf(name) !== -1; }
+  function toggleFav(name) {
+    var f = favorites(); var i = f.indexOf(name);
+    if (i === -1) f.push(name); else f.splice(i, 1);
+    gset('favorites', f); return i === -1;
+  }
+
+  // Generators tab = the old launcher + manager, merged (they list the same data).
+  // Search + sort + filter, keyboard nav, per-row star/open/edit/forget, and the
+  // CRUD actions in a footer.
+  function renderGenerators(body) {
+    var sort = gget('mgrSort', 'recent');
+    var filter = '';
+    var search = el('input', { class: 'wc-field', type: 'text', placeholder: 'Search your generators\u2026   \u2191\u2193 move \u00b7 \u21b5 open' });
+    var sortSel = el('select', { class: 'wc-field', style: { maxWidth: '128px', flex: 'none' } }, [['recent', 'Recent'], ['name', 'A\u2192Z'], ['fav', 'Favorites']].map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === sort) op.selected = true; return op; }));
+    var listEl = el('ul', { class: 'wc-list' });
+    var rows = [], sel = 0;
+    function model() {
+      var seen = {}, items = [], favs = favorites(), recent = gget('recent', []);
+      favs.forEach(function (n) { if (!seen[n]) { seen[n] = 1; items.push({ name: n, fav: true, t: 0 }); } });
+      recent.forEach(function (r) { if (!seen[r.name]) { seen[r.name] = 1; items.push({ name: r.name, title: r.title, fav: false, t: r.t }); } });
+      if (filter) items = items.filter(function (i) { return (i.name + (i.title || '')).toLowerCase().indexOf(filter.toLowerCase()) !== -1; });
+      if (sort === 'name') items.sort(function (a, b) { return a.name.localeCompare(b.name); });
+      else if (sort === 'fav') items.sort(function (a, b) { return (b.fav ? 1 : 0) - (a.fav ? 1 : 0); });
+      else items.sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
+      return items;
+    }
+    function build() {
+      listEl.innerHTML = ''; rows = [];
+      var items = model();
+      if (!items.length) { listEl.appendChild(el('li', { class: 'wc-gslug', text: filter ? 'No matches.' : 'Visit some generators to populate this list.' })); return; }
+      items.slice(0, 60).forEach(function (it, idx) {
+        var star = el('span', { class: 'wc-star' + (isFav(it.name) ? ' on' : ''), text: '\u2605', onclick: function (e) { e.stopPropagation(); var on = toggleFav(it.name); star.classList.toggle('on', on); } });
+        var open = el('button', { class: 'wc-btn wc-mini', text: 'open', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name; } });
+        var edit = el('button', { class: 'wc-btn wc-mini', text: 'edit', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name + '?edit'; } });
+        var forget = el('button', { class: 'wc-btn wc-mini', text: '\u2715', title: 'Remove from this list', onclick: function (e) { e.stopPropagation(); var r = gget('recent', []).filter(function (x) { return x.name !== it.name; }); gset('recent', r); build(); } });
+        var li = el('li', { onclick: function () { location.href = 'https://perchance.org/' + it.name; } }, [star, el('span', { class: 'wc-gname', text: it.title || it.name }), el('span', { class: 'wc-gslug', text: it.name }), open, edit, forget]);
+        if (idx === 0) li.classList.add('wc-sel');
+        listEl.appendChild(li); rows.push(li);
+      });
+    }
+    function highlight() { rows.forEach(function (r, i) { r.classList.toggle('wc-sel', i === sel); }); }
+    search.addEventListener('input', function () { filter = search.value; sel = 0; build(); });
+    sortSel.addEventListener('change', function () { sort = sortSel.value; gset('mgrSort', sort); build(); });
+    search.addEventListener('keydown', function (e) {
       if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, rows.length - 1); highlight(); e.preventDefault(); }
       else if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, 0); highlight(); e.preventDefault(); }
       else if (e.key === 'Enter' && rows[sel]) rows[sel].click();
-    }
-    input.addEventListener('input', function () { sel = 0; build(input.value); });
-    document.addEventListener('keydown', onKey);
-    document.body.appendChild(overlay); document.body.appendChild(panel);
-    build(''); input.focus();
+    });
+    var crud = el('div', { class: 'wc-foot' }, [
+      el('div', { class: 'wc-row' }, [
+        el('button', { class: 'wc-btn wc-btn-accent', text: '\uFF0B New', onclick: function () { window.open('https://perchance.org/create', '_blank'); } }),
+        el('button', { class: 'wc-btn', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '?edit'; else toast('Open a generator first'); } }),
+        el('button', { class: 'wc-btn', text: 'Save', title: 'Trigger Perchance save (edit mode)', onclick: function () { if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); } catch (e) { toast('Save failed'); } } else toast('Open the editor to save'); } }),
+        el('button', { class: 'wc-btn', text: 'Delete\u2026', title: 'Delete current generator (edit mode)', onclick: function () { if (window.settingsModal && typeof window.settingsModal.deleteGenerator === 'function') { if (confirm('Delete ' + genName() + '? This uses Perchance\u2019s own delete and cannot be undone.')) window.settingsModal.deleteGenerator(); } else toast('Open the editor settings to delete'); } })
+      ]),
+      el('div', { class: 'wc-section-note', text: 'List from generators you\u2019ve opened and starred. New/Fork/Save/Delete drive Perchance\u2019s own functions when available.' })
+    ]);
+    body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel ]));
+    body.appendChild(listEl);
+    body.appendChild(crud);
+    build();
+    setTimeout(function () { try { search.focus(); } catch (e) {} }, 30);
   }
 
   // ============================================================ C. theme / reading comfort
   function comfortSettings() { return gget('comfort:' + genName(), gget('comfort:_default', {})); }
+  // Themes via a fixed, click-through overlay using backdrop-filter. This filters
+  // the ENTIRE page behind it reliably (any DOM, any generator) without touching
+  // layout or colours we can't see. Our own UI sits above the overlay (higher
+  // z-index) so it stays clean. This is why it always works, where forcing
+  // body/output colours did not.
+  var THEME_FILTERS = {
+    off:   '',
+    dim:   'brightness(.85)',
+    warm:  'sepia(.4) brightness(.98)',
+    sepia: 'sepia(.7) contrast(.95) brightness(.95)',
+    gray:  'grayscale(1)',
+    dark:  'invert(.92) hue-rotate(180deg)'
+  };
   function applyComfort() {
     var c = comfortSettings();
-    document.body.classList.toggle('wc-comfort', !!c.enabled);
-    document.body.classList.toggle('wc-sepia', c.theme === 'sepia');
-    if (c.theme === 'dark') document.documentElement.style.colorScheme = 'dark';
-    else if (c.theme === 'light') document.documentElement.style.colorScheme = 'light';
-    if (c.font) document.documentElement.style.setProperty('--wc-font', c.font + 'px');
-    if (c.width) document.documentElement.style.setProperty('--wc-width', c.width + 'px');
-    if (c.lh) document.documentElement.style.setProperty('--wc-lh', c.lh);
-    if (c.dyslexic) document.body.style.fontFamily = '"OpenDyslexic","Comic Sans MS",system-ui,sans-serif';
-    else document.body.style.fontFamily = '';
+    document.body.classList.toggle('wc-focus', !!c.focus);
+    document.body.style.fontFamily = c.dyslexic ? '"OpenDyslexic","Comic Sans MS",system-ui,sans-serif' : '';
+
+    // best-effort reading typography on the output (harmless if it misses)
+    var prev = document.getElementById('wc-comfort-styles'); if (prev) prev.remove();
+    if (c.enabled) {
+      var s = document.createElement('style'); s.id = 'wc-comfort-styles';
+      s.textContent = '#output,.generatorOutput,[id*="output" i]:not([id*="weld" i]):not([id*="wc" i]){' +
+        'max-width:' + (c.width || 720) + 'px !important;margin-left:auto !important;margin-right:auto !important;' +
+        'font-size:' + (c.font || 16) + 'px !important;line-height:' + (c.lh || 1.6) + ' !important;}';
+      document.head.appendChild(s);
+    }
+
+    // theme overlay
+    var filter = THEME_FILTERS[c.theme || 'off'] || '';
+    var ov = document.getElementById('wc-theme-overlay');
+    if (!filter) { if (ov) ov.remove(); return; }
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'wc-theme-overlay'; ov.className = 'wc-theme-overlay';
+      document.body.appendChild(ov);
+    }
+    ov.style.webkitBackdropFilter = filter;
+    ov.style.backdropFilter = filter;
   }
-  function openComfort() {
-    if ($('#wc-comfort-panel')) { $('#wc-comfort-panel').remove(); return; }
+  function renderComfort(body) {
     var c = comfortSettings();
-    function field(label, node) { return el('div', {}, [el('label', { text: label }), node]); }
+    function field(label, node) { return el('div', {}, [el('label', { class: 'wc-label', text: label }), node]); }
+    function toggle(node, labelText) { return el('label', { class: 'wc-check' }, [node, el('span', { class: 'wc-sw' }), el('span', { text: labelText })]); }
+
+    // ---- theme swatches (each previews its ACTUAL backdrop-filter effect) ----
+    var THEMES = [
+      { id: 'off',   label: 'Off' },
+      { id: 'dim',   label: 'Dim' },
+      { id: 'warm',  label: 'Warm' },
+      { id: 'sepia', label: 'Sepia' },
+      { id: 'gray',  label: 'Gray' },
+      { id: 'dark',  label: 'Dark' }
+    ];
+    var curTheme = c.theme || 'off';
+    var swatchEls = [];
+    var swatchRow = el('div', { class: 'wc-swatch-row' });
+    THEMES.forEach(function (th) {
+      var filterStr = THEME_FILTERS[th.id] || '';
+      // a mini "page" (text lines + a colour dot) with the theme filter laid over it
+      var sample = el('div', { class: 'wc-swatch-sample' }, [
+        el('span', { class: 'wc-sample-line wc-sample-line-1' }),
+        el('span', { class: 'wc-sample-line wc-sample-line-2' }),
+        el('span', { class: 'wc-sample-dot' }),
+        el('span', { class: 'wc-swatch-filter', style: { backdropFilter: filterStr, webkitBackdropFilter: filterStr } })
+      ]);
+      var sw = el('div', { class: 'wc-swatch' + (curTheme === th.id ? ' on' : ''), title: th.label,
+        onclick: function () {
+          curTheme = th.id;
+          swatchEls.forEach(function (s) { s.classList.remove('on'); });
+          sw.classList.add('on');
+          save();
+        }
+      }, [ sample, el('span', { class: 'wc-swatch-label', text: th.label }) ]);
+      swatchEls.push(sw); swatchRow.appendChild(sw);
+    });
+
     var enable = el('input', { type: 'checkbox' }); enable.checked = !!c.enabled;
-    var theme = el('select', {}, ['system', 'dark', 'light', 'sepia'].map(function (t) { var o = el('option', { value: t, text: t }); if ((c.theme || 'system') === t) o.selected = true; return o; }));
-    var font = el('input', { type: 'number', value: c.font || 16, min: '11', max: '32' });
-    var width = el('input', { type: 'number', value: c.width || 720, min: '360', max: '1400', step: '20' });
-    var lh = el('input', { type: 'number', value: c.lh || 1.6, min: '1.1', max: '2.4', step: '0.1' });
-    var dys = el('input', { type: 'checkbox' }); dys.checked = !!c.dyslexic;
+    var focusCb = el('input', { type: 'checkbox' }); focusCb.checked = !!c.focus;
+    var dysCb = el('input', { type: 'checkbox' }); dysCb.checked = !!c.dyslexic;
+    var font  = el('input', { class: 'wc-field', type: 'number', value: c.font  || 16,  min: '11',  max: '32',   step: '1' });
+    var width = el('input', { class: 'wc-field', type: 'number', value: c.width || 720, min: '360', max: '1400', step: '20' });
+    var lh    = el('input', { class: 'wc-field', type: 'number', value: c.lh    || 1.6, min: '1.1', max: '2.4',  step: '0.1' });
+
     function save() {
-      var v = { enabled: enable.checked, theme: theme.value, font: +font.value, width: +width.value, lh: +lh.value, dyslexic: dys.checked };
+      var v = { enabled: enable.checked, focus: focusCb.checked, theme: curTheme,
+                font: +font.value, width: +width.value, lh: +lh.value, dyslexic: dysCb.checked };
       gset('comfort:' + genName(), v); gset('comfort:_default', v); applyComfort();
     }
-    [enable, theme, font, width, lh, dys].forEach(function (n) { n.addEventListener('change', save); n.addEventListener('input', save); });
-    var panel = el('div', { id: 'wc-comfort-panel', class: 'wc-panel', style: { right: '64px', bottom: '14px', width: '260px', padding: '14px' } }, [
-      el('h3', { text: 'Reading comfort' }),
-      el('label', { text: 'Apply comfort layout' }), enable,
-      field('Theme', theme), field('Font size (px)', font), field('Max width (px)', width), field('Line height', lh),
-      el('label', { text: 'Dyslexia-friendly font' }), dys,
-      el('div', { class: 'wc-row', style: { marginTop: '12px' } }, [
-        el('button', { class: 'wc-btn wc-mini', text: 'Focus mode', onclick: function () { document.body.classList.toggle('wc-focus'); } }),
-        el('button', { class: 'wc-btn wc-mini', text: 'Reset', onclick: function () { gdel('comfort:' + genName()); applyComfort(); $('#wc-comfort-panel').remove(); } })
-      ])
-    ]);
-    document.body.appendChild(panel);
+    [enable, focusCb, dysCb, font, width, lh].forEach(function (n) {
+      n.addEventListener('change', save); n.addEventListener('input', save);
+    });
+
+    body.appendChild(toggle(enable, 'Apply comfort layout'));
+    body.appendChild(el('label', { class: 'wc-label', text: 'Theme' }));
+    body.appendChild(swatchRow);
+    body.appendChild(el('div', { class: 'wc-row', style: { marginTop: '4px' } }, [
+      el('div', { style: { flex: '1' } }, [field('Font size', font)]),
+      el('div', { style: { flex: '1' } }, [field('Line height', lh)])
+    ]));
+    body.appendChild(field('Max width px', width));
+    body.appendChild(el('div', { style: { marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' } }, [
+      toggle(dysCb,   'Dyslexia-friendly font'),
+      toggle(focusCb, 'Focus mode (hide menus & sidebar)')
+    ]));
+    body.appendChild(el('div', { class: 'wc-foot' }, [
+      el('div', { class: 'wc-row' }, [
+        el('button', { class: 'wc-btn', text: 'Reset to defaults', onclick: function () { gdel('comfort:' + genName()); applyComfort(); renderTab(); } })
+      ]),
+      el('div', { class: 'wc-section-note', text: genName() ? 'Settings are remembered per generator.' : 'Open a generator to save per-generator.' })
+    ]));
   }
 
   // ============================================================ D. result tools (copy / save / pin / compare)
@@ -253,25 +626,46 @@
   function renderPins() {
     var tray = $('.wc-pin-tray'); if (tray) tray.remove();
     var pins = gget('pins:' + genName(), []); if (!pins.length) return;
-    tray = el('div', { class: 'wc-pin-tray' });
+    tray = el('div', { class: 'wc-root wc-pin-tray' });
+    tray.appendChild(el('div', { class: 'wc-pin-trayhead' }, [
+      el('span', { text: 'PINNED \u00b7 ' + pins.length }),
+      el('span', { class: 'wc-pin-clear', text: 'clear all', onclick: function () { gset('pins:' + genName(), []); renderPins(); } })
+    ]));
     pins.slice(0, 6).forEach(function (p, i) {
-      var x = el('span', { class: 'wc-x', text: '\u00d7', onclick: function () { var arr = gget('pins:' + genName(), []); arr.splice(i, 1); gset('pins:' + genName(), arr); renderPins(); } });
-      var body = el('div', { html: p.html });
-      var pin = el('div', { class: 'wc-pin' }, [x, body]);
-      tray.appendChild(pin);
+      var head = el('div', { class: 'wc-pin-head' }, [
+        el('span', { class: 'wc-pin-num', text: '#' + (i + 1) }),
+        el('span', { class: 'wc-pin-x', text: '\u00d7', title: 'Remove pin', onclick: function () { var arr = gget('pins:' + genName(), []); arr.splice(i, 1); gset('pins:' + genName(), arr); renderPins(); } })
+      ]);
+      // the pinned result is arbitrary generator HTML; sandbox it visually so it
+      // can never blow out the card (clip, clamp height, neutralise stray margins)
+      var body = el('div', { class: 'wc-pin-body', html: p.html });
+      tray.appendChild(el('div', { class: 'wc-pin' }, [head, body]));
     });
     document.body.appendChild(tray);
   }
-  function attachResultTools() {
-    var out = outputNode(); if (!out || out.dataset.wcTools) return;
-    out.dataset.wcTools = '1';
-    var tools = el('div', { class: 'wc-result-tools' }, [
-      el('button', { class: 'wc-btn wc-mini', text: '\u2398 Copy', title: 'Copy output text', onclick: function () { copyText(nodeToText(out)); } }),
-      el('button', { class: 'wc-btn wc-mini', text: '\u2913 Save', title: 'Download as .txt', onclick: function () { download(genName() + '-output.txt', nodeToText(out)); } }),
-      el('button', { class: 'wc-btn wc-mini', text: '\u{1F4CC} Pin', title: 'Pin this result for comparison', onclick: function () { pinResult(out.innerHTML); toast('Pinned'); } })
-    ]);
-    out.parentNode.insertBefore(tools, out);
+  // Result tools (copy / save / pin / history) live in the DRAWER header — not in
+  // Perchance's bar. They appear only when the drawer is open AND a generator
+  // output exists. This keeps Perchance's bar untouched.
+  function renderResultTools() {
+    var host = $('#wc-tools'); if (!host) return;
+    host.innerHTML = '';
+    var out = outputNode(); if (!out) return;
+    function toolBtn(glyph, title, fn) {
+      return el('button', { class: 'wc-toolbtn', title: title, onclick: fn }, [ el('span', { text: glyph }) ]);
+    }
+    host.appendChild(toolBtn('\u2398', 'Copy output', function () { var o = outputNode(); if (o) copyText(nodeToText(o)); }));
+    host.appendChild(toolBtn('\u2913', 'Save output as .txt', function () { var o = outputNode(); if (o) download(genName() + '-output.txt', nodeToText(o)); }));
+    host.appendChild(toolBtn('\u{1F4CC}', 'Pin this result', function () { var o = outputNode(); if (o) { pinResult(o.innerHTML); toast('Pinned'); } }));
+    if (histStack.length > 1) {
+      var grp = el('span', { class: 'wc-histgroup' }, [
+        el('button', { class: 'wc-toolbtn', title: 'Previous result', onclick: function () { if (histPos > 0) { restore(histPos - 1); renderResultTools(); } } }, [ el('span', { text: '\u2190' }) ]),
+        el('span', { class: 'wc-histlabel', text: (histPos + 1) + '/' + histStack.length }),
+        el('button', { class: 'wc-toolbtn', title: 'Next result', onclick: function () { if (histPos < histStack.length - 1) { restore(histPos + 1); renderResultTools(); } } }, [ el('span', { text: '\u2192' }) ])
+      ]);
+      host.appendChild(grp);
+    }
   }
+  function renderHistBar() { if ($('#wc-drawer')) renderResultTools(); }
 
   // ============================================================ E. result history (undo-reroll)
   var histStack = [], histPos = -1, lastSnap = '';
@@ -290,19 +684,6 @@
     var out = outputNode(); if (!out || !histStack[i]) return;
     histPos = i; lastSnap = histStack[i]; out.innerHTML = histStack[i]; renderHistBar();
   }
-  function renderHistBar() {
-    var out = outputNode(); if (!out) return;
-    var bar = $('#wc-hist-bar');
-    if (!bar) {
-      bar = el('span', { id: 'wc-hist-bar', class: 'wc-hist-bar' }, [
-        el('button', { class: 'wc-btn wc-mini', text: '\u2190', title: 'Previous result', onclick: function () { if (histPos > 0) restore(histPos - 1); } }),
-        el('span', { id: 'wc-hist-label' }),
-        el('button', { class: 'wc-btn wc-mini', text: '\u2192', title: 'Next result', onclick: function () { if (histPos < histStack.length - 1) restore(histPos + 1); } })
-      ]);
-      var tools = $('.wc-result-tools'); if (tools) tools.appendChild(bar); else { out.parentNode.insertBefore(bar, out); }
-    }
-    var lbl = $('#wc-hist-label'); if (lbl) lbl.textContent = (histPos + 1) + ' / ' + histStack.length;
-  }
 
   // ============================================================ F. resizable inputs
   function enhanceInputs() {
@@ -311,7 +692,7 @@
       ta.style.resize = ta.style.resize || 'vertical';
       // Enter submits / Shift+Enter newline normalization is risky to force globally;
       // instead add an unobtrusive expand button.
-      var expand = el('button', { class: 'wc-btn wc-mini', text: '\u26F6', title: 'Expand / collapse',
+      var expand = el('button', { class: 'wc-root wc-expand', text: '\u26F6', title: 'Expand / collapse',
         style: { position: 'absolute', zIndex: '20' },
         onclick: function (e) {
           e.preventDefault();
@@ -325,71 +706,6 @@
         ta.parentNode.appendChild(expand);
       } catch (e) {}
     });
-  }
-
-  // ============================================================ G. generator management (folders + CRUD)
-  // Perchance has a "my generators" list with server-side folder maps
-  // (/api/saveUserGeneratorFolderMap, /api/getGeneratorList). It does NOT offer
-  // good client-side sorting/filtering of that list, so we add a local overlay:
-  // sort by name/recent, filter by text, and quick CRUD shortcuts that drive the
-  // platform's own functions (saveGenerator / settingsModal.deleteGenerator) when
-  // present. Everything degrades if the hooks are absent.
-  function findGeneratorListContainer() {
-    // best-effort: the account page lists generators; look for known ids/classes
-    return $('#generatorList') || $('[id*="generatorList" i]') || $('.generator-list') || null;
-  }
-  function openManager() {
-    if ($('#wc-mgr')) { $('#wc-mgr').remove(); return; }
-    var recent = gget('recent', []);
-    var favs = favorites();
-    var localFolders = gget('localFolders', {}); // { folderName: [genName,...] }  (our own grouping)
-    var sort = gget('mgrSort', 'recent');
-    var filter = '';
-
-    var search = el('input', { type: 'text', placeholder: 'Filter your generators…' });
-    var sortSel = el('select', {}, [['recent', 'Recently used'], ['name', 'Name A\u2192Z'], ['fav', 'Favorites first']].map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === sort) op.selected = true; return op; }));
-    var listEl = el('ul', { class: 'wc-list' });
-
-    function model() {
-      var seen = {}, items = [];
-      favs.forEach(function (n) { if (!seen[n]) { seen[n] = 1; items.push({ name: n, fav: true, t: 0 }); } });
-      recent.forEach(function (r) { if (!seen[r.name]) { seen[r.name] = 1; items.push({ name: r.name, title: r.title, fav: false, t: r.t }); } });
-      if (filter) items = items.filter(function (i) { return (i.name + (i.title || '')).toLowerCase().indexOf(filter.toLowerCase()) !== -1; });
-      if (sort === 'name') items.sort(function (a, b) { return a.name.localeCompare(b.name); });
-      else if (sort === 'fav') items.sort(function (a, b) { return (b.fav ? 1 : 0) - (a.fav ? 1 : 0); });
-      else items.sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
-      return items;
-    }
-    function build() {
-      listEl.innerHTML = '';
-      var items = model();
-      if (!items.length) { listEl.appendChild(el('li', { text: 'No generators tracked yet.', style: { color: 'var(--wc-muted)' } })); return; }
-      items.forEach(function (it) {
-        var star = el('span', { class: 'wc-star' + (isFav(it.name) ? ' on' : ''), text: '\u2605', onclick: function (e) { e.stopPropagation(); var on = toggleFav(it.name); star.classList.toggle('on', on); favs = favorites(); } });
-        var open = el('button', { class: 'wc-btn wc-mini', text: 'open', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name; } });
-        var edit = el('button', { class: 'wc-btn wc-mini', text: 'edit', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name + '?edit'; } });
-        var forget = el('button', { class: 'wc-btn wc-mini', text: 'forget', title: 'Remove from this local list', onclick: function (e) { e.stopPropagation(); var r = gget('recent', []).filter(function (x) { return x.name !== it.name; }); gset('recent', r); recent = r; build(); } });
-        listEl.appendChild(el('li', {}, [star, el('span', { text: it.title || it.name, style: { flex: '1' } }), el('span', { text: it.name, style: { color: 'var(--wc-muted)', fontSize: '11px' } }), open, edit, forget]));
-      });
-    }
-    search.addEventListener('input', function () { filter = search.value; build(); });
-    sortSel.addEventListener('change', function () { sort = sortSel.value; gset('mgrSort', sort); build(); });
-
-    // CRUD shortcuts (drive Perchance's own functions where present)
-    var crud = el('div', { class: 'wc-row', style: { marginTop: '12px' } }, [
-      el('button', { class: 'wc-btn wc-mini wc-btn-accent', text: '\uFF0B New generator', onclick: function () { window.open('https://perchance.org/create', '_blank'); } }),
-      el('button', { class: 'wc-btn wc-mini', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '?edit'; else toast('Open a generator first'); } }),
-      el('button', { class: 'wc-btn wc-mini', text: 'Save now', title: 'Trigger Perchance save (edit mode)', onclick: function () { if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); } catch (e) { toast('Save failed'); } } else toast('Open the editor to save'); } }),
-      el('button', { class: 'wc-btn wc-mini', text: 'Delete\u2026', title: 'Delete current generator (edit mode)', onclick: function () { if (window.settingsModal && typeof window.settingsModal.deleteGenerator === 'function') { if (confirm('Delete ' + genName() + '? This uses Perchance\u2019s own delete and cannot be undone.')) window.settingsModal.deleteGenerator(); } else toast('Open the editor settings to delete'); } })
-    ]);
-
-    var panel = el('div', { id: 'wc-mgr', class: 'wc-panel', style: { right: '14px', top: '14px', width: 'min(440px,94vw)', padding: '16px' } }, [
-      el('h3', { text: 'Generator manager' }),
-      el('div', { class: 'wc-row' }, [search, sortSel]),
-      listEl, crud,
-      el('div', { style: { marginTop: '10px', fontSize: '11px', color: 'var(--wc-muted)' }, text: 'Local list built from generators you\u2019ve opened and starred. CRUD buttons drive Perchance\u2019s own save/delete when available.' })
-    ]);
-    document.body.appendChild(panel); build(); search.focus();
   }
 
   // ============================================================ H. AI provider layer (edit Helper, or use your own GPT)
@@ -437,50 +753,49 @@
       onerror: function () { cb('Network error contacting ' + p.label, null); }
     });
   }
-  function openAISettings() {
-    if ($('#wc-ai')) { $('#wc-ai').remove(); return; }
+  function renderAI(body) {
     var cfg = aiConfig();
-    var provider = el('select', {}, [['builtin', 'Perchance built-in (default)']].concat(Object.keys(PROVIDERS).map(function (k) { return [k, PROVIDERS[k].label]; })).map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === cfg.provider) op.selected = true; return op; }));
+    var provider = el('select', { class: 'wc-field' }, [['builtin', 'Perchance built-in (default)']].concat(Object.keys(PROVIDERS).map(function (k) { return [k, PROVIDERS[k].label]; })).map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === cfg.provider) op.selected = true; return op; }));
     var keyWrap = el('div', {});
     var modelWrap = el('div', {});
-    var instruction = el('textarea', { rows: '4', placeholder: 'Optional: override the AI Helper\u2019s system instruction (what it should do with your prompt). Leave blank to use Perchance\u2019s default.' });
+    var instruction = el('textarea', { class: 'wc-field', rows: '4', placeholder: 'Optional: override the AI Helper\u2019s system instruction (what it should do with your prompt). Leave blank to use Perchance\u2019s default.' });
     instruction.value = cfg.instruction || '';
     function renderProviderFields() {
       keyWrap.innerHTML = ''; modelWrap.innerHTML = '';
       var pk = provider.value;
       if (pk === 'builtin') {
-        keyWrap.appendChild(el('div', { style: { fontSize: '12px', color: 'var(--wc-muted)' }, text: 'Uses Perchance\u2019s own ai-text broker. No key needed. You can still set a custom instruction below.' }));
+        keyWrap.appendChild(el('div', { class: 'wc-section-note', text: 'Uses Perchance\u2019s own ai-text broker \u2014 no key needed. You can still set a custom instruction below.' }));
         return;
       }
       var p = PROVIDERS[pk];
-      var key = el('input', { type: 'password', placeholder: p.keyHint, value: (cfg.keys || {})[pk] || '' });
-      var model = el('input', { type: 'text', placeholder: p.defaultModel, value: (cfg.models || {})[pk] || '' });
+      var key = el('input', { class: 'wc-field', type: 'password', placeholder: p.keyHint, value: (cfg.keys || {})[pk] || '' });
+      var model = el('input', { class: 'wc-field', type: 'text', placeholder: p.defaultModel, value: (cfg.models || {})[pk] || '' });
       key.addEventListener('input', function () { cfg.keys = cfg.keys || {}; cfg.keys[pk] = key.value; });
       model.addEventListener('input', function () { cfg.models = cfg.models || {}; cfg.models[pk] = model.value; });
-      keyWrap.appendChild(el('label', { text: p.label + ' API key (stored locally only)' })); keyWrap.appendChild(key);
-      modelWrap.appendChild(el('label', { text: 'Model' })); modelWrap.appendChild(model);
+      keyWrap.appendChild(el('label', { class: 'wc-label', text: p.label + ' \u00b7 API key (local only)' })); keyWrap.appendChild(key);
+      modelWrap.appendChild(el('label', { class: 'wc-label', text: 'Model' })); modelWrap.appendChild(model);
     }
     provider.addEventListener('change', renderProviderFields);
     function save() {
       cfg.provider = provider.value; cfg.instruction = instruction.value; gset('ai', cfg);
-      applyHelperInstruction(); toast('AI settings saved'); $('#wc-ai').remove();
+      applyHelperInstruction(); toast('AI settings saved');
     }
-    var test = el('button', { class: 'wc-btn wc-mini', text: 'Test', onclick: function () {
+    var test = el('button', { class: 'wc-btn', text: 'Test', onclick: function () {
       if (provider.value === 'builtin') return toast('Built-in uses Perchance directly');
       cfg.provider = provider.value;
       callOwnAI(cfg, 'You are a helper. Reply with the single word: ok', 'ping', function (err, txt) { toast(err ? ('\u2717 ' + err).slice(0, 80) : ('\u2713 ' + (txt || '').trim().slice(0, 40))); });
     } });
-    var panel = el('div', { id: 'wc-ai', class: 'wc-panel', style: { right: '14px', bottom: '64px', width: 'min(420px,94vw)', padding: '16px' } }, [
-      el('h3', { text: 'AI Helper settings' }),
-      el('label', { text: 'Provider' }), provider, keyWrap, modelWrap,
-      el('label', { text: 'Custom Helper instruction (system prompt)' }), instruction,
-      el('div', { class: 'wc-row', style: { marginTop: '12px' } }, [
-        el('button', { class: 'wc-btn wc-btn-accent wc-mini', text: 'Save', onclick: save }), test,
-        el('button', { class: 'wc-btn wc-mini', text: 'Close', onclick: function () { $('#wc-ai').remove(); } })
-      ]),
-      el('div', { style: { marginTop: '10px', fontSize: '11px', color: 'var(--wc-muted)' }, text: 'Your key is stored only in this browser and sent only to the provider you pick. Choose "Perchance built-in" to keep using the default broker with just a custom instruction.' })
-    ]);
-    document.body.appendChild(panel); renderProviderFields();
+    body.appendChild(el('label', { class: 'wc-label', text: 'Provider' }));
+    body.appendChild(provider);
+    body.appendChild(keyWrap);
+    body.appendChild(modelWrap);
+    body.appendChild(el('label', { class: 'wc-label', text: 'Custom instruction (system prompt)' }));
+    body.appendChild(instruction);
+    body.appendChild(el('div', { class: 'wc-foot' }, [
+      el('div', { class: 'wc-row' }, [ el('button', { class: 'wc-btn wc-btn-accent', text: 'Save', onclick: save }), test ]),
+      el('div', { class: 'wc-section-note', text: 'Your key is stored only in this browser and sent only to the provider you pick. \u201cPerchance built-in\u201d keeps the default broker with just a custom instruction.' })
+    ]));
+    renderProviderFields();
   }
   // Pre-fill / override the Helper's visible instruction field if present.
   function applyHelperInstruction() {
@@ -510,44 +825,42 @@
   }
 
   // ============================================================ bootstrap
-  function buildDock() {
-    if ($('.wc-dock')) return;
-    var dock = el('div', { class: 'wc-dock' }, [
-      el('div', { class: 'wc-fab', title: 'Generator manager', text: '\u{1F5C2}', onclick: openManager }),
-      el('div', { class: 'wc-fab', title: 'AI Helper settings', text: '\u{1F916}', onclick: openAISettings }),
-      el('div', { class: 'wc-fab', title: 'Reading comfort', text: '\u{1F441}', onclick: openComfort }),
-      el('div', { class: 'wc-fab', title: 'Your generators ( / )', text: '\u2605', onclick: openPalette })
-    ]);
-    document.body.appendChild(dock);
-  }
   function shortcuts(e) {
     var typing = /input|textarea|select/i.test((e.target.tagName || '')) || e.target.isContentEditable;
-    if (e.key === '/' && !typing) { e.preventDefault(); openPalette(); return; }
+    if (e.key === '/' && !typing) { e.preventDefault(); openWindow('generators'); return; }
     if (typing) return;
     if (e.key === 'f' || e.key === 'F') { var n = genName(); if (n) { var on = toggleFav(n); toast(on ? 'Favorited \u2605' : 'Unfavorited'); } }
     else if (e.key === 'c' || e.key === 'C') { var o = outputNode(); if (o) copyText(nodeToText(o)); }
     else if (e.key === '[') { if (histPos > 0) restore(histPos - 1); }
     else if (e.key === ']') { if (histPos < histStack.length - 1) restore(histPos + 1); }
-    else if (e.key === '?') { toast('/ launcher \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history \u00b7 dock buttons bottom-right', 4000); }
+    else if (e.key === '?') { toast('/ open \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history', 4000); }
   }
 
   function init() {
     if (window.top !== window.self) return; // top frame only
     try {
       recordVisit();
+      adoptTheme();
       applyComfort();
-      buildDock();
+      buildBar();
       renderPins();
       document.addEventListener('keydown', shortcuts);
+      // keep the drawer anchored to Perchance's bar; if the page scrolls and the
+      // in-flow bar leaves the viewport, close the drawer to avoid a stray panel
+      window.addEventListener('resize', function () { if (WC_TAB) positionDrawer(); });
+      window.addEventListener('scroll', function () { if (!WC_TAB) return; var b = perchanceBar(); if (b && b.getBoundingClientRect().bottom <= 0) return closeDrawer(); positionDrawer(); }, true);
 
-      // observe output for history + tools; observe DOM for inputs + helper hooks
+      // observe output: refresh history snapshots + the drawer's result tools
       var out = outputNode();
-      if (out) { snapshotOutput(); attachResultTools();
-        new MutationObserver(debounce(function () { attachResultTools(); snapshotOutput(); }, 250)).observe(out, { childList: true, subtree: true, characterData: true });
+      if (out) { snapshotOutput();
+        new MutationObserver(debounce(function () { snapshotOutput(); if (WC_TAB) renderResultTools(); }, 250)).observe(out, { childList: true, subtree: true, characterData: true });
       }
-      var enhance = debounce(function () { enhanceInputs(); applyHelperInstruction(); hookHelperSubmit(); if (!outputNode()) return; if (!$('.wc-result-tools')) attachResultTools(); }, 400);
+      var enhance = debounce(function () { enhanceInputs(); applyHelperInstruction(); hookHelperSubmit(); }, 400);
       enhance();
-      new MutationObserver(enhance).observe(document.body, { childList: true, subtree: true });
+      // If Perchance's bar appears after we loaded (or wasn't there yet), add our
+      // single Weld item to it then. We never inject a competing bar.
+      var barWatch = debounce(function () { if (!weldItem() && perchanceBar()) buildBar(); }, 500);
+      new MutationObserver(function () { enhance(); barWatch(); }).observe(document.body, { childList: true, subtree: true });
     } catch (e) { /* never break the host page */ if (window.console) console.warn('[WeldCompanion]', e); }
   }
 
