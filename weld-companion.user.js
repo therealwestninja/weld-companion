@@ -12,6 +12,7 @@
 // @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @connect      api.openai.com
 // @connect      api.anthropic.com
 // @connect      generativelanguage.googleapis.com
@@ -847,6 +848,31 @@
   var SB_PROTO_MIN = 1, SB_PROTO_MAX = 1;
   var SB_CAPS = ['storage', 'ai'];          // what this companion offers
 
+  // The userscript manager runs us in a sandbox where `window` is a wrapper:
+  // a 'message' listener placed on it may NOT receive the page's real
+  // cross-frame postMessages, and `window.frames` may not list the real child
+  // iframes. The generator (and its weld.skybridge plugin) live in a child
+  // iframe and talk to the *real* top window. So bind the whole bridge to the
+  // real page window via unsafeWindow when the manager exposes it.
+  var SB_WIN = (function () {
+    try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; } catch (e) { return window; }
+  })();
+  var SB_BUILD = 'sb-anchor/2026-06-04.2';   // bump on every change; printed at mount so a stale userscript is obvious
+  // verbose-logging toggle: ?sbdebug in the URL, or window.WELD_SKYBRIDGE_DEBUG = true
+  var SB_DEBUG = false;
+  try {
+    if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.WELD_SKYBRIDGE_DEBUG !== 'undefined') SB_DEBUG = !!unsafeWindow.WELD_SKYBRIDGE_DEBUG;
+    else if (typeof location !== 'undefined') SB_DEBUG = ((' ' + location.search + ' ' + location.hash).indexOf('sbdebug') !== -1);
+  } catch (e) {}
+  function sbDebug() { if (SB_DEBUG) sbLog.apply(null, arguments); }
+  function sbLog() { try { if (window.console) console.log.apply(console, ['[WeldCompanion]'].concat([].slice.call(arguments))); } catch (e) {} }
+  // diagnostics ring: handshake events seen by the anchor, readable live
+  var SB_TRACE = [];
+  function sbRec(dir, type, origin, note) {
+    try { SB_TRACE.push({ t: Date.now(), dir: dir, type: type || '', origin: origin || '', note: note || '' }); if (SB_TRACE.length > 60) SB_TRACE.shift(); } catch (e) {}
+  }
+  var sbLastFrameCount = -1;
+
   // consent: gget('sb:perm') -> { '<gen>': { storage:true, ai:false }, ... }
   function sbPerms() { return gget('sb:perm', {}); }
   function sbPermFor(gen, cap) {
@@ -929,15 +955,41 @@
     return h === 'perchance.org' || (h.length > 13 && h.slice(-14) === '.perchance.org');
   }
 
-  function mountSkybridgeAnchor() {
-    if (!window.addEventListener) return;
-    window.addEventListener('message', function (ev) {
-      if (!ev || !sbOriginOk(ev.origin)) return;
-      var d = ev.data;
-      if (!d || typeof d !== 'object' || d.channel !== SB) return;
-      var source = ev.source || window;
+  // Broadcast our presence DOWN to child frames. We mount at the top frame's
+  // document-idle, which is usually AFTER a generator iframe has already fired
+  // its one-shot 'hello' -- so we cannot rely on being greeted. We announce
+  // instead, and repeat for frames that load later. The plugin treats our
+  // 'here' as a connect whether or not it ever heard us greet back.
+  function sbAnnounce(win) {
+    var root = win || SB_WIN, list;
+    try { list = root.frames; } catch (e) { return; }   // cross-origin parent walk guard
+    if (!root || root === SB_WIN) {
+      var n = (list && list.length) || 0;
+      if (n !== sbLastFrameCount) { sbLastFrameCount = n; sbRec('tx', 'announce', '', n + ' child frame(s)'); sbDebug('skybridge announce: ' + n + ' child frame(s) visible'); }
+    }
+    if (!list || !list.length) return;
+    var msg = { channel: SB, type: 'here', version: '1.0.0', protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS };
+    for (var i = 0; i < list.length; i++) {
+      var f = null; try { f = list[i]; } catch (e) {}
+      if (!f) continue;
+      try { f.postMessage(msg, '*'); } catch (e) {}     // '*' is required: child is a different *.perchance.org origin
+      try { sbAnnounce(f); } catch (e) {}                // nested frames (cross-origin ones are skipped via the guard)
+    }
+  }
+  function sbHandleMessage(ev) {
+      var d = ev && ev.data;
+      var isSb = d && typeof d === 'object' && d.channel === SB;
+      if (isSb) sbRec('rx', d.type, ev.origin, '');           // trace before any filter
+      if (!ev || !sbOriginOk(ev.origin)) {
+        if (isSb) { sbRec('drop', d.type, ev.origin, 'origin-rejected'); sbDebug('skybridge: dropped ' + d.type + ' from disallowed origin ' + ev.origin); }
+        return;
+      }
+      if (!isSb) return;
+      var source = ev.source || SB_WIN;
 
       if (d.type === 'hello') {
+        sbRec('tx', 'here', ev.origin, 'reply to hello');
+        sbDebug('skybridge: hello from', ev.origin, '\u2192 replying here');
         // negotiate: respond with our range + capabilities; the plugin picks the common max
         source.postMessage({
           channel: SB, type: 'here', version: '1.0.0',
@@ -960,11 +1012,51 @@
         });
         return;
       }
-    }, false);
   }
 
+  function mountSkybridgeAnchor() {
+    if (!SB_WIN || !SB_WIN.addEventListener) return;
+    // Attach to the real page window AND (if different) the sandbox window, so
+    // whichever one actually delivers the page's cross-frame messages catches it.
+    try { SB_WIN.addEventListener('message', sbHandleMessage, false); } catch (e) {}
+    try { if (window !== SB_WIN && window.addEventListener) window.addEventListener('message', sbHandleMessage, false); } catch (e) {}
+
+    // Don't wait to be greeted: announce now, and keep announcing on a bounded
+    // interval so a generator iframe that appears late on a slow shell still gets
+    // greeted. The plugin ignores duplicate 'here's once it is linked.
+    sbRec('init', 'mount', location.origin, SB_BUILD);
+    sbLog('skybridge anchor ' + SB_BUILD + ' mounted; bound to real page window; origin=' + location.origin + ' top===self=' + (function () { try { return SB_WIN.top === SB_WIN.self; } catch (e) { return '?'; } })());
+    sbAnnounce();
+    var sbTicks = 0;
+    var sbTimer = setInterval(function () { sbAnnounce(); if (++sbTicks >= 20) clearInterval(sbTimer); }, 600); // ~12s
+  }
+
+  // live snapshot for troubleshooting; reachable as weldCompanion.skybridgeDiagnostics()
+  function sbDiagnostics() {
+    var n = -1; try { n = (SB_WIN.frames && SB_WIN.frames.length) || 0; } catch (e) {}
+    return {
+      build: SB_BUILD,
+      debug: SB_DEBUG,
+      boundToUnsafeWindow: (SB_WIN !== window),
+      origin: location.origin,
+      topIsSelf: (function () { try { return SB_WIN.top === SB_WIN.self; } catch (e) { return null; } })(),
+      childFrames: n,
+      capabilities: SB_CAPS.slice(),
+      perms: sbPerms(),
+      trace: SB_TRACE.slice()
+    };
+  }
+  try {
+    if (window.weldCompanion) {
+      window.weldCompanion.skybridgeDiagnostics = sbDiagnostics;
+      window.weldCompanion.skybridgeDebug = function (on) { SB_DEBUG = (on !== false); sbLog('skybridge debug ' + (SB_DEBUG ? 'ON' : 'OFF') + ' \u2014 build ' + SB_BUILD); return SB_DEBUG; };
+    }
+  } catch (e) {}
+
   function init() {
-    if (window.top !== window.self) return; // top frame only
+    // top frame only. Compare on the SAME (real) window object -- in a userscript
+    // sandbox, `window` (wrapper) !== `window.self` (real) can be falsely true.
+    try { if (SB_WIN.top !== SB_WIN.self) return; } catch (e) {}
     try {
       mountSkybridgeAnchor();
       recordVisit();
@@ -988,7 +1080,8 @@
       // If Perchance's bar appears after we loaded (or wasn't there yet), add our
       // single Weld item to it then. We never inject a competing bar.
       var barWatch = debounce(function () { if (!weldItem() && perchanceBar()) buildBar(); }, 500);
-      new MutationObserver(function () { enhance(); barWatch(); }).observe(document.body, { childList: true, subtree: true });
+      var sbPing = debounce(function () { sbAnnounce(); }, 400);   // greet a generator iframe injected after load
+      new MutationObserver(function () { enhance(); barWatch(); sbPing(); }).observe(document.body, { childList: true, subtree: true });
     } catch (e) { /* never break the host page */ if (window.console) console.warn('[WeldCompanion]', e); }
   }
 

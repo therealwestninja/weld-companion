@@ -59,6 +59,27 @@ $output() =>
   var MSG = 'weld.skybridge';          // envelope tag, both directions
   var HELLO_TIMEOUT = 4000;            // ms to wait for the anchor to answer
   var REQUEST_TIMEOUT = 30000;         // ms before a pending request gives up
+  var BUILD = 'sb-plugin/2026-06-04.2';  // bump on every change; printed at load so a stale deploy is obvious
+  var LOADED_AT = Date.now();
+  // Early, dependency-free deployment beacon: even if a later line throws, this
+  // proves WHICH build actually loaded (read it from the example or console).
+  try { window.__weldSkybridge = { build: BUILD, version: '1.0.0', at: Date.now() }; } catch (e) {}
+  // verbose console logging toggle: add ?sbdebug to the URL, or set
+  // window.WELD_SKYBRIDGE_DEBUG = true before load, or call .debug(true) at runtime.
+  var DEBUG = false;
+  try {
+    if (typeof window.WELD_SKYBRIDGE_DEBUG !== 'undefined') DEBUG = !!window.WELD_SKYBRIDGE_DEBUG;
+    else if (typeof location !== 'undefined') DEBUG = ((' ' + location.search + ' ' + location.hash).indexOf('sbdebug') !== -1);
+  } catch (e) {}
+
+  // ---- diagnostics: a small ring buffer of handshake events, readable live ----
+  var TRACE = new Array();             // ring of { t, dir, type, origin, note } records
+  function rec(dir, type, origin, note) {
+    try {
+      TRACE.push({ t: Date.now(), dir: dir, type: type || '', origin: origin || '', note: note || '' });
+      if (TRACE.length > 60) TRACE.shift();
+    } catch (e) {}
+  }
 
   // ---- connection state ----
   var connected = false;
@@ -87,10 +108,26 @@ $output() =>
   function nonce() {
     return 'sb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
   }
-  // the counterpart frame: if we're inside an iframe, talk to the top; else to ourselves
-  function peer() { try { return (window.top && window.top !== window.self) ? window.top : window; } catch (e) { return window; } }
+  function sbLog() {
+    try {
+      if (!window.console) return;
+      var a = Array.of('\[skybridge\]');                 // escaped so the engine doesn't read it as a list ref
+      console.log.apply(console, a.concat(Array.prototype.slice.call(arguments)));
+    } catch (e) {}
+  }
+  function sbDebug() { if (DEBUG) sbLog.apply(null, arguments); }   // verbose; silent unless debug is on
+  // the counterpart frame(s): the companion runs in the top frame, but post to
+  // the direct parent too in case of nesting. De-dup identical window refs.
+  function peers() {
+    var out = new Array();
+    try { if (window.top && window.top !== window.self) out.push(window.top); } catch (e) {}
+    try { if (window.parent && window.parent !== window.self && out.indexOf(window.parent) === -1) out.push(window.parent); } catch (e) {}
+    if (!out.length) out.push(window);   // not framed: talk to ourselves (e.g. companion-less self-test)
+    return out;
+  }
   function postUp(obj) {
-    try { peer().postMessage(obj, '*'); } catch (e) { /* peer may be cross-origin-guarded; harmless */ }
+    var ps = peers();
+    for (var i = 0; i < ps.length; i++) { try { Reflect.get(ps, i).postMessage(obj, '*'); } catch (e) { /* cross-origin-guarded; harmless */ } }
   }
 
   function fireConnect() {
@@ -108,15 +145,22 @@ $output() =>
 
   // ---- inbound message handling (treat everything as untrusted) ----
   function onMessage(ev) {
-    if (!ev || !originOk(ev.origin)) return;
-    var d = ev.data;
-    if (!d || typeof d !== 'object' || d.channel !== MSG) return;
+    var d = ev && ev.data;
+    var isSb = d && typeof d === 'object' && d.channel === MSG;
+    // Trace ALL skybridge-tagged traffic before any filter, so a message that
+    // gets dropped (bad origin, no common protocol) is still visible.
+    if (isSb) rec('rx', d.type, ev.origin, '');
+    if (!ev || !originOk(ev.origin)) {
+      if (isSb) { rec('drop', d.type, ev.origin, 'origin-rejected'); sbDebug('dropped ' + d.type + ' from disallowed origin ' + ev.origin); }
+      return;
+    }
+    if (!isSb) return;
 
     if (d.type === 'here') {
       // handshake reply: negotiate the highest protocol both ends share
       var lo = Math.max(PROTO_MIN, (d.protoMin | 0) || 0);
       var hi = Math.min(PROTO_MAX, (d.protoMax | 0) || 0);
-      if (hi < lo) return;             // no common protocol -> stay disconnected
+      if (hi < lo) { rec('drop', 'here', ev.origin, 'no-common-protocol'); sbDebug('here from ' + ev.origin + ' but no common protocol (' + d.protoMin + '..' + d.protoMax + ' vs ' + PROTO_MIN + '..' + PROTO_MAX + ')'); return; }
       if (connected) return;           // already linked; ignore duplicates
       proto = hi;
       anchorVersion = (typeof d.version === 'string') ? d.version : null;
@@ -129,6 +173,8 @@ $output() =>
       }
       connected = true;
       if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+      rec('ok', 'connected', ev.origin, 'proto ' + proto);
+      sbLog('connected to companion (protocol ' + proto + ', caps: ' + Object.keys(caps).join(',') + ')');
       fireConnect();
       return;
     }
@@ -253,9 +299,12 @@ $output() =>
   // ---- start the handshake ----
   function connect() {
     if (connected) return;
+    var ps = peers();
+    rec('tx', 'hello', '', ps.length + ' peer(s)');
+    sbDebug('sending hello to ' + ps.length + ' peer frame(s); framed=' + (window.top !== window.self));
     postUp({ channel: MSG, type: 'hello', protoMin: PROTO_MIN, protoMax: PROTO_MAX });
     if (!helloTimer) {
-      helloTimer = setTimeout(function () { helloTimer = null; /* stay disconnected, harmless */ }, HELLO_TIMEOUT);
+      helloTimer = setTimeout(function () { helloTimer = null; if (!connected) { rec('to', 'timeout', '', 'no answer'); sbDebug('no companion answered (fallback mode)'); } }, HELLO_TIMEOUT);
     }
   }
 
@@ -263,6 +312,11 @@ $output() =>
   // kick the handshake now and once more after load, in case the anchor mounts late
   connect();
   try { window.addEventListener('load', connect, { once: true }); } catch (e) {}
+  // The companion anchor mounts at the top frame's document-idle -- usually AFTER
+  // we load -- so our first hellos may arrive before it is listening. Retry a few
+  // times; connect() no-ops once linked. (The companion also announces itself
+  // downward, so whichever side comes up first, the link forms.)
+  Array.of(150, 500, 1500, 3000).forEach(function (t) { setTimeout(connect, t); });
 
   window.weld.skybridge = {
     // connection
@@ -279,7 +333,29 @@ $output() =>
     storage: { get: storageGet, set: storageSet, list: storageList, backend: storageBackend },
     // protocol range this sandbox end speaks
     protocolRange: { min: PROTO_MIN, max: PROTO_MAX },
-    version: '1.0.0'
+    version: '1.0.0',
+    build: BUILD,
+    // verbose-logging toggle. on()/off; returns the new state.
+    debug: function (on) {
+      DEBUG = (on !== false);
+      sbLog('debug ' + (DEBUG ? 'ON' : 'OFF') + ' \u2014 build ' + BUILD + ', connected=' + connected + ', protocol=' + proto);
+      return DEBUG;
+    },
+    // a live snapshot for troubleshooting (state + recent handshake events)
+    diagnostics: function () {
+      return {
+        build: BUILD, version: '1.0.0', debug: DEBUG, loadedAt: LOADED_AT,
+        connected: connected, protocol: proto, anchorVersion: anchorVersion,
+        framed: (function () { try { return window.top !== window.self; } catch (e) { return null; } })(),
+        origin: location.origin,
+        peers: peers().length,
+        capabilities: Object.keys(caps),
+        storageBackend: storageBackend(),
+        trace: TRACE.slice()
+      };
+    }
   };
 
+  rec('init', 'load', location.origin, BUILD);
+  sbLog('plugin ' + BUILD + ' loaded; framed=' + (function () { try { return window.top !== window.self; } catch (e) { return '?'; } })() + ' origin=' + location.origin + (DEBUG ? ' (debug ON)' : ''));
   return window.weld.skybridge;

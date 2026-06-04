@@ -18,10 +18,24 @@ a{color:var(--accent);text-decoration:none;}a:hover{text-decoration:underline;}
 .btn{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:9px 15px;font:600 13px var(--font);cursor:pointer;transition:.12s;}
 .btn:hover{filter:brightness(1.08);}.btn.ghost{background:var(--faint);color:var(--ink);}.btn.sm{padding:6px 11px;font-size:12px;}
 .btn:disabled{opacity:.4;cursor:not-allowed;}
-input,textarea{background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:14px var(--font);width:100%;}
+input{background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:14px var(--font);width:100%;}
 .pill{display:inline-flex;align-items:center;gap:6px;font:600 11px var(--mono);padding:3px 9px;border-radius:999px;border:1px solid var(--border);}
 .pill.on{color:var(--green);border-color:rgba(63,185,80,.4);}.pill.off{color:var(--muted);}
 .dot{width:7px;height:7px;border-radius:50%;background:currentColor;}
+.summary{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font:600 13px var(--mono);}
+.summary .big{font-size:22px;}
+.summary .pass{color:var(--green);}.summary .fail{color:var(--red);}.summary .skip{color:var(--muted);}
+.tests{list-style:none;margin:6px 0 0;padding:0;}
+.test{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-top:1px solid var(--border);font-size:14px;}
+.test:first-child{border-top:0;}
+.badge{flex:none;width:46px;text-align:center;font:700 10px var(--mono);letter-spacing:.04em;padding:3px 0;border-radius:5px;text-transform:uppercase;}
+.badge.pass{background:rgba(63,185,80,.15);color:var(--green);}
+.badge.fail{background:rgba(248,81,73,.15);color:var(--red);}
+.badge.skip{background:var(--faint);color:var(--muted);}
+.badge.run{background:rgba(68,147,248,.15);color:var(--accent);}
+.test .body{flex:1;}
+.test .name{font-weight:600;}
+.test .detail{color:var(--muted);font:12px/1.5 var(--mono);margin-top:2px;white-space:pre-wrap;}
 .out{font:13px/1.5 var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;white-space:pre-wrap;color:var(--ink);margin-top:8px;min-height:20px;}
 .note{font:12px/1.5 var(--font);color:var(--muted);margin-top:8px;}
 .kbd{font:600 11px var(--mono);background:var(--faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--ink);}
@@ -29,87 +43,310 @@ input,textarea{background:var(--bg);color:var(--ink);border:1px solid var(--bord
 
 <div id="page">
   <div class="breadcrumb">
-    <span><a href="https://perchance.org/weld">weld</a><span class="sep">/</span><span class="cur">skybridge</span></span>
+    <span><a href="https://perchance.org/weld">weld</a><span class="sep">/</span><span class="cur">skybridge</span><span class="sep">/</span><span class="cur">live test</span></span>
     <span><a href="https://perchance.org/weld-skybridge-plugin">plugin source</a></span>
   </div>
 
   <div class="hdr">
-    <div class="hdr-row"><h1>weld.skybridge</h1><span class="ver">v1.0.0</span></div>
-    <p class="lead">The bridge to <strong>Weld Companion</strong>. Cross-generator storage and your own AI model when the companion is installed &mdash; and a clean fallback when it isn't.</p>
+    <div class="hdr-row"><h1>weld.skybridge &mdash; live bridge test</h1><span class="ver">v1.0.0</span></div>
+    <p class="lead">Runs real probes against the bridge in <em>this</em> page and reports pass/fail per step. With the Weld Companion userscript installed you should see the companion-linked path; without it, the graceful-fallback path. Both are valid &mdash; the test tells you which one you're on.</p>
   </div>
 
   <div class="panel">
-    <h2>Connection</h2>
-    <div class="row">
-      <span class="lbl">Status</span>
-      <span id="conn" class="pill off"><span class="dot"></span><span id="conn-txt">checking&hellip;</span></span>
+    <h2>Result</h2>
+    <div class="summary">
+      <span id="conn" class="pill off"><span class="dot"></span><span id="conn-txt">initializing&hellip;</span></span>
       <span id="proto" class="pill off">protocol &mdash;</span>
       <span id="backend" class="pill off">storage &mdash;</span>
+      <span class="big"><span id="s-pass" class="pass">0</span>&thinsp;/&thinsp;<span id="s-total">0</span></span>
+      <span id="s-fail" class="fail" style="display:none"></span>
+      <span id="s-skip" class="skip" style="display:none"></span>
     </div>
-    <p class="note">If you have the Weld Companion userscript installed, this links automatically. No companion? Everything below still works &mdash; storage just falls back to this browser, and the AI panel reports unavailable.</p>
+    <ul class="tests" id="tests"></ul>
+    <div class="row" style="margin-top:12px"><button class="btn sm" id="rerun">Re-run tests</button></div>
+    <p class="note">A <span class="kbd">SKIP</span> is not a failure &mdash; e.g. the AI completion is skipped unless a companion is linked and you've configured your own model. The test never sends your API key anywhere; AI probes only ask the companion to run a completion on your behalf.</p>
   </div>
 
   <div class="panel">
-    <h2>Cross-generator storage</h2>
-    <div class="row"><span class="lbl">Slot</span><input id="slot" value="slot1" style="max-width:120px"></div>
-    <div class="row"><span class="lbl">Text</span><input id="text" placeholder="anything to remember&hellip;"></div>
-    <div class="row">
-      <button class="btn sm" id="save">Save</button>
-      <button class="btn sm ghost" id="load">Load</button>
-      <button class="btn sm ghost" id="list">List slots</button>
+    <h2>Diagnostics</h2>
+    <p class="note" style="margin-top:0">If the bridge won't connect, this is the fastest way to see why. Open your browser console too &mdash; the plugin logs <span class="kbd">\[skybridge\]</span> and the companion logs <span class="kbd">\[WeldCompanion\]</span>. <strong>Check the build stamps first:</strong> if the plugin build below is missing or old, the generator wasn't re-saved.</p>
+    <div class="out" id="diag-out" style="min-height:140px">collecting&hellip;</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn sm" id="diag-refresh">Refresh</button>
+      <button class="btn sm ghost" id="diag-copy">Copy report</button>
+      <span id="diag-copied" class="note" style="margin:0 0 0 6px"></span>
     </div>
+  </div>
+
+  <div class="panel">
+    <h2>Try it yourself</h2>
+    <div class="row"><span class="lbl">Slot</span><input id="slot" value="probe" style="max-width:120px"><button class="btn sm" id="save">Save</button><button class="btn sm ghost" id="load">Load</button><button class="btn sm ghost" id="list">List</button></div>
     <div class="out" id="store-out">&mdash;</div>
-    <p class="note">With the companion, this persists across <em>every</em> Perchance generator. Without it, it persists in this browser via <span class="kbd">weld.persist</span> (or memory).</p>
-  </div>
-
-  <div class="panel">
-    <h2>Your own AI model</h2>
-    <div class="row"><span class="lbl">Prompt</span><input id="ai-in" value="a cosy tavern by a river"></div>
-    <div class="row"><button class="btn sm" id="ai-go">Name it</button></div>
+    <div class="row" style="margin-top:14px"><span class="lbl">Prompt</span><input id="ai-in" value="a cosy tavern by a river"><button class="btn sm" id="ai-go">Run AI</button></div>
     <div class="out" id="ai-out">&mdash;</div>
-    <p class="note">Routes through the model <em>you</em> configured in the companion. The prompt goes up, only the completion comes back &mdash; your API key never crosses the bridge. The companion asks your permission the first time.</p>
   </div>
 </div>
 
 <script>
 (function () {
-  var D = window.__sbDemo;
+  // An imported plugin's $output is a function DEFINITION -- it does not run on
+  // import; something must CALL it. The plugin builds its API as a side effect
+  // (window.weld.skybridge) and is idempotent, so we trigger it once here.
+  // Without this call the plugin never runs and window.weld.skybridge is absent.
+  try {
+    if (typeof root !== 'undefined' && typeof root.weldSkybridge === 'function') root.weldSkybridge();
+  } catch (e) { try { if (window.console) console.log('\[skybridge\] could not trigger root.weldSkybridge():', e && e.message); } catch (e2) {} }
+  var sb = (window.weld && window.weld.skybridge) || null;
   function $(id){ return document.getElementById(id); }
-  function show(el, v){ el.textContent = (typeof v === 'string') ? v : JSON.stringify(v, null, 2); }
+  function esc(s){ return String(s); }
 
-  function paint(s) {
-    var c = $('conn'), t = $('conn-txt');
-    if (s.connected) { c.className = 'pill on'; t.textContent = 'companion linked'; }
-    else { c.className = 'pill off'; t.textContent = 'no companion (fallback)'; }
-    $('proto').textContent = 'protocol ' + (s.protocol || '—');
-    $('proto').className = 'pill ' + (s.connected ? 'on' : 'off');
-    $('backend').textContent = 'storage: ' + s.backend;
-    $('backend').className = 'pill ' + (s.backend === 'companion' ? 'on' : 'off');
+  // ---- diagnostics panel ------------------------------------------------
+  function diagSnapshot(){
+    if (sb && typeof sb.diagnostics === 'function') return sb.diagnostics();
+    var beacon = null; try { beacon = window.__weldSkybridge || null; } catch (e) {}
+    if (sb && (sb.build || sb.version)) {
+      return { error: 'plugin present (build ' + (sb.build || '?') + ', v' + (sb.version || '?') + ') but THIS build has no diagnostics() \u2014 it is older than the current source. Re-save weld-skybridge-plugin.' };
+    }
+    if (beacon && beacon.build) {
+      return { error: 'deployment beacon found (build ' + beacon.build + ') but window.weld.skybridge was not built \u2014 the plugin threw AFTER setting the beacon. Open the generator console for the error.' };
+    }
+    return { error: 'window.weld.skybridge and the beacon are both absent \u2014 the plugin $output never ran. An imported plugin is NOT auto-invoked; this page calls root.weldSkybridge() to trigger it. Check that {import:weld-skybridge-plugin} is in the generator and that root.weldSkybridge is a function.' };
+  }
+  function fmtTrace(tr){
+    if (!tr || !tr.length) return '   (no handshake events yet)';
+    var t0 = tr[0].t;
+    return tr.map(function(e){
+      var dt = '+' + String(e.t - t0).padStart(5,' ') + 'ms';
+      var line = '   ' + dt + '  ' + e.dir.toUpperCase().padEnd(5,' ') + ' ' + (e.type||'');
+      if (e.origin) line += '  <- ' + e.origin;
+      if (e.note)   line += '  (' + e.note + ')';
+      return line;
+    }).join('\n');
+  }
+  function renderDiag(){
+    var d = diagSnapshot();
+    var lines = [];
+    if (d.error) { lines.push('PLUGIN: ' + d.error); }
+    else {
+      lines.push('PLUGIN build : ' + d.build + '   (v' + d.version + ')');
+      lines.push('connected    : ' + d.connected + '   protocol ' + d.protocol + (d.anchorVersion ? '   anchor v' + d.anchorVersion : ''));
+      lines.push('framed       : ' + d.framed + '   origin ' + d.origin + '   peers ' + d.peers);
+      lines.push('capabilities : ' + (d.capabilities.length ? d.capabilities.join(', ') : '(none)') + '   storage backend: ' + d.storageBackend);
+      lines.push('');
+      lines.push('handshake trace (plugin side):');
+      lines.push(fmtTrace(d.trace));
+    }
+    var el = $('diag-out');
+    if (el) el.textContent = lines.join('\n');
+    return d;
+  }
+  function copyReport(){
+    var d = renderDiag();
+    var report = 'weld.skybridge diagnostics report\n'
+      + 'page: ' + location.href + '\n'
+      + 'when: ' + new Date().toISOString() + '\n'
+      + '----- plugin diagnostics -----\n'
+      + JSON.stringify(d, null, 2) + '\n'
+      + '----- note -----\n'
+      + 'Also copy the browser console lines tagged [skybridge] and [WeldCompanion].\n'
+      + 'In the top-frame console run: weldCompanion.skybridgeDiagnostics()  (companion side).\n';
+    var done = function(ok){ var c = $('diag-copied'); if (c) c.textContent = ok ? 'copied \u2713' : 'copy failed -- select the box manually'; };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(report).then(function(){done(true);}, function(){done(false);});
+      else done(false);
+    } catch (e) { done(false); }
   }
 
-  function refresh(){ if (D) paint(D.status()); }
+  // ---- tiny test runner -------------------------------------------------
+  var tests = [];           // { name, run() -> Promise<{status, detail}> }
+  var nodes = {};           // name -> { badge, detail }
+  function def(name, run){ tests.push({ name: name, run: run }); }
+  function mkRow(name){
+    var li = document.createElement('li'); li.className = 'test';
+    var b = document.createElement('span'); b.className = 'badge run'; b.textContent = '...';
+    var body = document.createElement('div'); body.className = 'body';
+    var nm = document.createElement('div'); nm.className = 'name'; nm.textContent = name;
+    var dt = document.createElement('div'); dt.className = 'detail'; dt.textContent = 'queued';
+    body.appendChild(nm); body.appendChild(dt);
+    li.appendChild(b); li.appendChild(body);
+    $('tests').appendChild(li);
+    nodes[name] = { badge: b, detail: dt };
+  }
+  function setRow(name, status, detail){
+    var n = nodes[name]; if (!n) return;
+    n.badge.className = 'badge ' + status;
+    n.badge.textContent = status;
+    n.detail.textContent = detail || '';
+  }
+  function paintConn(){
+    var c = $('conn'), t = $('conn-txt');
+    if (sb && sb.connected) { c.className = 'pill on'; t.textContent = 'companion linked'; }
+    else { c.className = 'pill off'; t.textContent = sb ? 'no companion (fallback)' : 'plugin not loaded'; }
+    $('proto').textContent = 'protocol ' + (sb && sb.protocol ? sb.protocol : '\u2014');
+    $('proto').className = 'pill ' + (sb && sb.connected ? 'on' : 'off');
+    var be = sb ? sb.storage.backend() : '\u2014';
+    $('backend').textContent = 'storage: ' + be;
+    $('backend').className = 'pill ' + (be === 'companion' ? 'on' : 'off');
+  }
 
-  // react to a late connection
-  window.__sbOnConnect = function(){ refresh(); };
+  // ---- the probes -------------------------------------------------------
+  // PASS = behaved correctly. SKIP = correct-but-not-applicable (e.g. no companion).
+  function P(detail){ return { status: 'pass', detail: detail }; }
+  function F(detail){ return { status: 'fail', detail: detail }; }
+  function S(detail){ return { status: 'skip', detail: detail }; }
 
-  if (!D) { $('conn-txt').textContent = 'plugin not loaded'; return; }
-  refresh();
-  // the handshake is async; check again shortly after load
-  setTimeout(refresh, 600);
+  def('plugin present', function(){
+    return Promise.resolve(sb && typeof sb.request === 'function'
+      ? P('window.weld.skybridge is installed (v' + sb.version + ')')
+      : F('window.weld.skybridge missing \u2014 is the plugin imported?'));
+  });
 
-  $('save').onclick = function(){ D.save($('slot').value, $('text').value).then(function(ok){ show($('store-out'), ok ? ('saved \u2713  (' + D.status().backend + ')') : 'save failed'); refresh(); }); };
-  $('load').onclick = function(){ D.load($('slot').value).then(function(v){ show($('store-out'), v ? v : '(nothing in that slot)'); }); };
-  $('list').onclick = function(){ D.listSlots().then(function(keys){ show($('store-out'), keys && keys.length ? keys : '(no slots yet)'); }); };
+  def('advertises protocol range', function(){
+    var r = sb.protocolRange;
+    return Promise.resolve(r && r.min === 1 && r.max >= r.min
+      ? P('this end speaks protocol ' + r.min + '..' + r.max)
+      : F('unexpected protocolRange: ' + JSON.stringify(r)));
+  });
 
-  $('ai-go').onclick = function(){
-    show($('ai-out'), 'thinking\u2026');
-    D.ai($('ai-in').value).then(function(r){
-      if (r.ok) show($('ai-out'), r.value);
-      else if (r.reason === 'no-own-model') show($('ai-out'), 'No personal model configured. Open the companion \u2192 AI Helper tab and add your provider + key.');
-      else if (r.reason === 'denied') show($('ai-out'), 'Permission denied for this generator.');
-      else if (r.reason === 'disconnected' || r.reason === 'unsupported') show($('ai-out'), 'AI needs the Weld Companion userscript (with your own model set up).');
-      else show($('ai-out'), 'unavailable: ' + r.reason);
+  def('handshake', function(){
+    // give the async hello/here a moment if it hasn't settled yet
+    function check(){ return sb.connected; }
+    if (check()) return Promise.resolve(P('companion answered \u2014 anchor v' + (sb.anchorVersion || '?')));
+    return new Promise(function(resolve){
+      var done = false;
+      var off = sb.onConnect(function(){ if (!done){ done = true; resolve(P('companion answered \u2014 anchor v' + (sb.anchorVersion || '?'))); } });
+      setTimeout(function(){
+        if (done) return;
+        // no companion is a valid state; this is a SKIP, not a FAIL.
+        // (waited past the companion's announce schedule + our hello retries)
+        resolve(S('no companion linked \u2014 running in fallback mode (this is fine)'));
+      }, 3500);
     });
-  };
+  });
+
+  def('negotiated protocol', function(){
+    if (!sb.connected) return Promise.resolve(S('skipped \u2014 not connected'));
+    return Promise.resolve(sb.protocol >= 1
+      ? P('agreed on protocol ' + sb.protocol)
+      : F('connected but protocol is ' + sb.protocol));
+  });
+
+  def('capabilities advertised', function(){
+    if (!sb.connected) return Promise.resolve(S('skipped \u2014 not connected'));
+    var caps = ['storage','ai'].filter(function(c){ return sb.has(c); });
+    return Promise.resolve(caps.length
+      ? P('companion offers: ' + caps.join(', '))
+      : F('connected but advertises no capabilities'));
+  });
+
+  def('storage backend resolves', function(){
+    var be = sb.storage.backend();
+    var ok = be === 'companion' || be === 'persist' || be === 'memory';
+    if (!ok) return Promise.resolve(F('unknown backend: ' + be));
+    return Promise.resolve(P('routing to "' + be + '"' + (be === 'companion' ? ' (cross-generator)' : ' (this browser only)')));
+  });
+
+  def('storage round-trip', function(){
+    var key = 'selftest:rt', val = { n: Date.now(), tag: 'skybridge-live' };
+    return sb.storage.set(key, val).then(function(ok){
+      if (!ok) return F('set() returned false (companion may have denied permission)');
+      return sb.storage.get(key).then(function(got){
+        if (got && got.n === val.n && got.tag === val.tag) return P('set then get returned the same record via "' + sb.storage.backend() + '"');
+        return F('get() did not return what set() wrote: ' + JSON.stringify(got));
+      });
+    }).catch(function(e){ return F('threw: ' + (e && e.message)); });
+  });
+
+  def('storage list sees the key', function(){
+    return sb.storage.list('selftest:').then(function(keys){
+      var hit = keys && keys.indexOf && keys.indexOf('selftest:rt') !== -1;
+      // some fallbacks return bare keys; accept any array that includes our suffix
+      var loose = keys && keys.join && keys.join(',').indexOf('selftest:rt') !== -1;
+      return (hit || loose) ? P('list("selftest:") includes the probe key')
+                            : F('probe key not found in list: ' + JSON.stringify(keys));
+    }).catch(function(e){ return F('threw: ' + (e && e.message)); });
+  });
+
+  def('ai routes to your model', function(){
+    if (!sb.connected) return Promise.resolve(S('skipped \u2014 AI needs a linked companion'));
+    if (!sb.has('ai'))  return Promise.resolve(S('skipped \u2014 companion does not advertise "ai"'));
+    return sb.ai('Name a cosy riverside tavern. Reply with just the name.', { system: 'You name fantasy taverns. Reply with only the name.' }).then(function(r){
+      if (r.ok) return P('completion received (key never crossed the bridge): \u201c' + String(r.value).slice(0, 80) + '\u201d');
+      if (r.reason === 'no-own-model') return S('skipped \u2014 no personal model set in the companion (AI Helper tab)');
+      if (r.reason === 'denied')       return S('skipped \u2014 you declined the permission prompt');
+      return F('ai() failed: ' + r.reason);
+    }).catch(function(e){ return F('threw: ' + (e && e.message)); });
+  });
+
+  def('fallback contract (when offline)', function(){
+    if (sb.connected) return Promise.resolve(S('skipped \u2014 companion is linked, fallback path not exercised'));
+    var okHas = sb.has('storage') === false && sb.has('ai') === false;
+    return sb.ai('x').then(function(r){
+      var okAi = r.ok === false && (r.reason === 'disconnected' || r.reason === 'unsupported');
+      return (okHas && okAi)
+        ? P('offline: has()=false and ai() returns {ok:false, reason:"' + r.reason + '"} \u2014 degrades cleanly')
+        : F('offline contract off: has()=' + sb.has('storage') + '/' + sb.has('ai') + ', ai=' + JSON.stringify(r));
+    });
+  });
+
+  // ---- run loop ---------------------------------------------------------
+  function runAll(){
+    $('tests').innerHTML = '';
+    nodes = {};
+    tests.forEach(function(t){ mkRow(t.name); });
+    var pass = 0, fail = 0, skip = 0, total = tests.length;
+    $('s-total').textContent = total; $('s-pass').textContent = '0';
+    $('s-fail').style.display = 'none'; $('s-skip').style.display = 'none';
+    paintConn();
+
+    var i = 0;
+    function next(){
+      if (i >= tests.length){
+        $('s-pass').textContent = pass;
+        if (fail){ var f = $('s-fail'); f.style.display = ''; f.textContent = fail + ' failed'; }
+        if (skip){ var s = $('s-skip'); s.style.display = ''; s.textContent = skip + ' skipped'; }
+        paintConn();
+        return;
+      }
+      var t = tests[i++];
+      Promise.resolve().then(t.run).then(function(res){
+        res = res || F('no result');
+        setRow(t.name, res.status, res.detail);
+        if (res.status === 'pass') pass++; else if (res.status === 'fail') fail++; else skip++;
+        $('s-pass').textContent = pass;
+        paintConn();
+        next();
+      }, function(err){
+        setRow(t.name, 'fail', 'threw: ' + (err && err.message));
+        fail++; next();
+      });
+    }
+    next();
+  }
+
+  if (!sb) {
+    paintConn();
+    $('tests').innerHTML = '<li class="test"><span class="badge fail">fail</span><div class="body"><div class="name">plugin present</div><div class="detail">window.weld.skybridge is missing \u2014 import {import:weld-skybridge-plugin} in this generator.</div></div></li>';
+  } else {
+    runAll();
+    $('rerun').onclick = runAll;
+  }
+
+  // ---- diagnostics wiring ------------------------------------------------
+  renderDiag();
+  $('diag-refresh').onclick = renderDiag;
+  $('diag-copy').onclick = copyReport;
+  if (sb && typeof sb.onConnect === 'function') sb.onConnect(renderDiag);
+  // the trace fills in over the first few seconds; refresh a few times
+  [600, 1500, 3500, 6000].forEach(function (t) { setTimeout(renderDiag, t); });
+
+  // ---- manual playground ------------------------------------------------
+  function show(el, v){ el.textContent = (typeof v === 'string') ? v : JSON.stringify(v, null, 2); }
+  if (sb) {
+    $('save').onclick = function(){ sb.storage.set('demo:' + $('slot').value, { text: 'saved at ' + new Date().toLocaleTimeString(), at: Date.now() }).then(function(ok){ show($('store-out'), ok ? ('saved \u2713 via ' + sb.storage.backend()) : 'save failed/denied'); }); };
+    $('load').onclick = function(){ sb.storage.get('demo:' + $('slot').value).then(function(v){ show($('store-out'), v ? v : '(nothing in that slot)'); }); };
+    $('list').onclick = function(){ sb.storage.list('demo:').then(function(k){ show($('store-out'), k && k.length ? k : '(no slots yet)'); }); };
+    $('ai-go').onclick = function(){ show($('ai-out'), 'thinking\u2026'); sb.ai($('ai-in').value, { system: 'You name fantasy taverns. Reply with just the name.' }).then(function(r){ show($('ai-out'), r.ok ? r.value : ('unavailable: ' + r.reason)); }); };
+  }
 })();
 </script>
