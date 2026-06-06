@@ -2267,7 +2267,7 @@
   //   :runs     index of run ids (most-recent-first)
   // -----------------------------------------------------------------
 
-  var BUILD = 'crew/2026-06-04.2';
+  var BUILD = 'crew/2026-06-06.3';
 
   // ---- storage: lean on skybridge (companion -> persist -> memory), else our own fallback ----
   function makeStore() {
@@ -2328,7 +2328,7 @@
     var extraSystem = opts.system || '';
     var aiOpts = opts.model || {};
     var store = makeStore();
-    var tools = {};            // name -> tool spec
+    var tools = {}; var fetchCache = {};            // name -> tool spec; C3: per-run web.fetch cache
     var stopped = false;
 
     function key(ns, k) { return 'crew:' + workspace + ':' + ns + (k ? (':' + k) : ''); }
@@ -2408,14 +2408,14 @@
         if (sb && sb.connected && typeof sb.has === 'function' && sb.has('fetch') && typeof sb.request === 'function') {
           return await sb.request('fetch', { url: a.url, method: a.method || 'GET' });
         }
-        var wf = window.weld && window.weld.fetch;
+        var ck = (a.method || 'GET') + ' ' + a.url; if (fetchCache[ck]) return Object.assign({ cached: true }, fetchCache[ck]); var wf = window.weld && window.weld.fetch;
         if (wf && typeof wf.request === 'function') {
           try {
             var res = await wf.request(a.url, { method: a.method || 'GET' });
-            var body = '';
+            var ct = ''; try { var _h = res.headers; ct = _h ? ((typeof _h.get === 'function' ? _h.get('content-type') : (_h['content-type'] || _h['Content-Type'])) || '') : ''; } catch (e) {} if (ct && !/text|html|json|xml|javascript|csv|plain|urlencoded/i.test(ct)) { var nt = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, contentType: ct, note: 'non-text content (' + ct + '); body omitted' }; fetchCache[ck] = nt; return nt; } var body = '';
             try { body = await res.text(); } catch (e) {}
             if (typeof body === 'string' && body.length > 8000) body = body.slice(0, 8000) + '\u2026[truncated]';
-            return { ok: !!res.ok, status: res.status, url: res.url, via: res.via, body: body };
+            var out = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, body: body }; if (out.ok) fetchCache[ck] = out; return out;
           } catch (e) {
             return { ok: false, reason: 'weld.fetch error: ' + (e && e.message ? e.message : String(e)) };
           }
@@ -2501,7 +2501,7 @@
           if (s.tool) line += '\naction: ' + s.tool + ' ' + JSON.stringify(s.args || {}) + '\nobservation: ' + JSON.stringify(s.observation);
           return line;
         }).join('\n\n');
-        transcript += '\n\nReply with the next JSON step.';
+        transcript += '\n\nSteps remaining: ' + (cap - rec.steps.length) + '. ' + ((cap - rec.steps.length) <= 1 ? 'Reply now with your final answer.' : 'Finalize as soon as you can answer; do not waste steps.') + '\n\nReply with the next JSON step.';
 
         var sysText = systemPrompt(memText, scratchText);
         onStep({ type: 'prompt', system: sysText, transcript: transcript, step: rec.steps.length + 1 });
@@ -2532,9 +2532,9 @@
         if (!tool) {
           step.tool = name; step.observation = { error: 'unknown tool: ' + name + '. Pick from: ' + Object.keys(tools).join(', ') };
         } else {
-          step.tool = name; step.args = parsed.args || {};
+          step.tool = name; step.args = parsed.args || {}; var missingArgs = Object.keys(tool.args || {}).filter(function (ak) { return !/optional/i.test(String(tool.args[ak])) && step.args[ak] == null; });
           onStep({ type: 'action', tool: name, args: step.args });
-          try { step.observation = await tool.run(step.args || {}); }
+          if (missingArgs.length) { step.observation = { error: 'missing required arg(s) for ' + name + ': ' + missingArgs.join(', ') + '. Retry the call including: ' + missingArgs.join(', ') + '.' }; } else try { step.observation = await tool.run(step.args || {}); }
           catch (e) { step.observation = { error: String(e && e.message || e) }; }
         }
         onStep({ type: 'observation', tool: step.tool, observation: step.observation });
@@ -8018,7 +8018,7 @@
     var SW = (window.weld && window.weld.swarm) || null;
     var CR = (window.weld && window.weld.crew) || null;
     var sb = (window.weld && window.weld.skybridge) || null;
-    var APP_BUILD = 'swarm-app/2026-06-05.24';
+    var APP_BUILD = 'swarm-app/2026-06-06.3';
     // native ai-text is slow and serialized through one broker, so multi-step ReAct runs take
     // minutes, not seconds, so give each dispatched subtask a generous ceiling before timing out.
     var TASK_TIMEOUT = 240000;
@@ -8601,13 +8601,13 @@
       // offline randomness tools (weld.dice): dice notation + weighted/random pick
       if (toolset.dice && window.weld && window.weld.dice) {
         var D = window.weld.dice;
-        crew.registerTool({ name: 'dice.roll', description: 'Roll dice using standard notation (e.g. "2d6+3", "4d6kh3", "1d20"). Use for random numbers, checks, or generating values.', args: { notation: 'string' },
+        crew.registerTool({ name: 'dice.roll', description: 'Roll dice using standard notation (e.g. "2d6+3", "4d6kh3", "1d20"). Use for random numbers, checks, or generating values.', args: { notation: 'string (optional, defaults to 1d6)' },
           run: function (a) { try { var r = D.roll(String(a.notation || '1d6')); return { ok: true, total: r.total, rolls: r.rolls, notation: r.notation }; } catch (e) { return { ok: false, reason: String(e && e.message || e) }; } } });
         crew.registerTool({ name: 'random.pick', description: 'Pick one item at random from a list. Use to choose between options.', args: { items: 'array' },
           run: function (a) { try { var arr = Array.isArray(a.items) ? a.items : String(a.items || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean); if (!arr.length) return { ok: false, reason: 'no items' }; return { ok: true, choice: D.pick(arr) }; } catch (e) { return { ok: false, reason: String(e && e.message || e) }; } } });
       }
       if (toolset.persona && window.weld && window.weld.persona) {
-        crew.registerTool({ name: 'persona.build', description: 'Build a vivid character dossier from trait sliders. Use for character creation. args: traits, an object mapping trait names (warmth, energy, conscientiousness, openness, ...) to 0..1.', args: { traits: 'object' },
+        crew.registerTool({ name: 'persona.build', description: 'Build a vivid character dossier from trait sliders. Use for character creation. args: traits, an object mapping trait names (warmth, energy, conscientiousness, openness, ...) to 0..1.', args: { traits: 'object (optional)' },
           run: function (a) { try { var p = window.weld.persona.dossier(a && a.traits ? a.traits : (a || {})); return { ok: true, archetype: p.archetype, dossier: p.text }; } catch (e) { return { ok: false, reason: String((e && e.message) || e) }; } } });
       }
       if (toolset.gen && window.weld && window.weld.gen) {
