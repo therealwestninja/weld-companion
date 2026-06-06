@@ -1,0 +1,7 @@
+$meta
+  title = Page // mission control
+  description = A self-contained multi-agent app built on the Weld suite. State an objective; it is decomposed into subtasks and dispatched to parallel worker agents, each a weld.crew ReAct loop, whose reasoning streams live into per-agent cards. Agents generate real text with Perchance's free native AI (ai-text-plugin -- no key), can generate images (text-to-image-plugin), and fetch the web. Runs in one tab (Local) or scales across tabs/generators (Hub/Node). The Weld plugin code (skybridge, sync, fetch, stream, image, crew, swarm) is INLINED in the page -- no plugin imports -- so there is no stale-import or fetch failure. With the Weld Companion you can swap in your own model, true cross-origin fetch, and cross-device history.
+  tags = weld, swarm, agents, multi-agent, ai, app
+
+aiTextPlugin       = {import:ai-text-plugin}
+textToImagePlugin  = {import:text-to-image-plugin}
