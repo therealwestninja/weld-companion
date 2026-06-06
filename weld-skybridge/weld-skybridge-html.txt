@@ -38,7 +38,7 @@ td code{font-size:12px;}
 
 <div id="page">
   <div class="hdr">
-    <div class="hdr-row"><h1>weld.skybridge</h1><span class="ver">v1.0.0</span></div>
+    <div class="hdr-row"><h1>weld.skybridge</h1><span class="ver">v1.4.0</span></div>
     <p class="lead">The bridge between a generator (sandboxed) and <strong>Weld Companion</strong> (a userscript running above the page). It lends a plugin two powers a sandbox cannot have on its own &mdash; storage that persists across every generator, and the user&rsquo;s own AI model &mdash; while never <em>requiring</em> the companion to be installed.</p>
     <p class="toc">on this page: <a href="#why">two contexts</a> &middot; <a href="#use">quick start</a> &middot; <a href="#api">api</a> &middot; <a href="#proto">protocol</a> &middot; <a href="#trust">trust</a> &middot; <a href="#fallback">fallback</a></p>
   </div>
@@ -49,22 +49,22 @@ td code{font-size:12px;}
 
   <h2 id="use">Quick start</h2>
   <p>Import the plugin, then use it. Every privileged call returns a <em>result object</em> (or a value) and never throws, so you branch on data:</p>
-  <pre><code><span class="c-c">// in your generator's $output body, after {import:weld-skybridge-plugin}</span>
+  <pre><code><span class="c-c">// in your generator's $output body, after \{import:weld-skybridge-plugin\}</span>
 <span class="c-k">var</span> sb = window.weld.skybridge;
 
-sb.<span class="c-f">onConnect</span>(<span class="c-k">function</span> (info) {            <span class="c-c">// fires if/when a companion links</span>
+sb.<span class="c-f">onConnect</span>(<span class="c-k">function</span> (info) \{            <span class="c-c">// fires if/when a companion links</span>
   console.<span class="c-f">log</span>(<span class="c-s">'linked, protocol'</span>, info.protocol);
-});
+\});
 
 <span class="c-c">// storage works with OR without a companion (it falls back)</span>
 <span class="c-k">await</span> sb.storage.<span class="c-f">set</span>(<span class="c-s">'slot1'</span>, state);
 <span class="c-k">var</span> saved = <span class="c-k">await</span> sb.storage.<span class="c-f">get</span>(<span class="c-s">'slot1'</span>);
 
 <span class="c-c">// AI needs a companion + the user's own model; check first</span>
-<span class="c-k">if</span> (sb.<span class="c-f">has</span>(<span class="c-s">'ai'</span>)) {
+<span class="c-k">if</span> (sb.<span class="c-f">has</span>(<span class="c-s">'ai'</span>)) \{
   <span class="c-k">var</span> r = <span class="c-k">await</span> sb.<span class="c-f">ai</span>(<span class="c-s">'Name a tavern.'</span>);
   <span class="c-k">if</span> (r.ok) <span class="c-f">use</span>(r.value);            <span class="c-c">// denied/absent -> r.ok is false</span>
-}</code></pre>
+\}</code></pre>
 
   <h2 id="api">API</h2>
   <span class="sig">window.weld.skybridge</span>
@@ -73,14 +73,17 @@ sb.<span class="c-f">onConnect</span>(<span class="c-k">function</span> (info) {
     <tr><td><code>connected</code></td><td>Boolean. <code>true</code> once a companion has answered the handshake.</td></tr>
     <tr><td><code>protocol</code></td><td>The negotiated protocol integer (<code>0</code> when not connected).</td></tr>
     <tr><td><code>anchorVersion</code></td><td>The companion&rsquo;s reported semver, or <code>null</code>.</td></tr>
-    <tr><td><code>has(cap)</code></td><td>Does the linked companion advertise this capability? (<code>'storage'</code>, <code>'ai'</code>). Honest: <code>false</code> when unlinked.</td></tr>
+    <tr><td><code>has(cap)</code></td><td>Does the linked companion advertise this capability? (<code>'storage'</code>, <code>'ai'</code>, <code>'bus'</code>, <code>'fetch'</code>, <code>'search'</code>, <code>'model'</code>). Honest: <code>false</code> when unlinked.</td></tr>
     <tr><td><code>onConnect(fn)</code></td><td>Call <code>fn(info)</code> when a companion links (or immediately if already linked). Returns an unsubscribe function.</td></tr>
     <tr><td><code>request(cap, payload)</code></td><td>Low-level: send a capability request up. Resolves a result object <code>\{ ok, value \}</code> or <code>\{ ok:false, reason \}</code>.</td></tr>
-    <tr><td><code>ai(prompt, opts?)</code></td><td>Run a completion on the user&rsquo;s own model. <code>opts</code>: <code>system</code>, <code>maxTokens</code>, <code>temperature</code>. Resolves <code>\{ ok, value \}</code>.</td></tr>
+    <tr><td><code>ai(prompt, opts?)</code></td><td>Run a completion on the user&rsquo;s own model. <code>opts</code>: <code>system</code>, <code>maxTokens</code>, <code>temperature</code>, <code>json</code> (request native structured output), <code>onChunk(text)</code> (stream tokens as they generate). Resolves <code>\{ ok, value \}</code>.</td></tr>
+    <tr><td><code>modelInfo()</code></td><td>Reports the configured model&rsquo;s <code>\{ name, contextWindow, maxOutput \}</code> &mdash; never the API key &mdash; so you can size prompts and output to the real model. Needs a companion advertising <code>'model'</code>.</td></tr>
     <tr><td><code>storage.get/set/list</code></td><td>Async key/value. Routes to the companion when present, else falls back (see below).</td></tr>
-    <tr><td><code>storage.backend()</code></td><td><code>'companion'</code>, <code>'persist'</code>, or <code>'memory'</code> &mdash; where storage is actually going right now.</td></tr>
+    <tr><td><code>storage.backend()</code></td><td><code>'companion'</code>, <code>'kv'</code>, <code>'persist'</code>, or <code>'memory'</code> &mdash; where storage is actually going right now (single picker; never drifts from get/set).</td></tr>
+    <tr><td><code>bus.publish(channel, message)</code></td><td>Publish a message on a named channel. The companion relays it to other subscribed generators &mdash; in this tab and (over a shared <code>BroadcastChannel</code> on the apex origin) other tabs. Resolves a result object.</td></tr>
+    <tr><td><code>bus.subscribe(channel, fn)</code></td><td>Receive messages others publish on <code>channel</code> (not your own). Returns an unsubscribe function. This is the cross-generator transport <code>weld.swarm</code> rides on; needs a companion advertising <code>'bus'</code>.</td></tr>
     <tr><td><code>reconnect()</code></td><td>Re-send the handshake (e.g. if the companion mounts very late).</td></tr>
-    <tr><td><code>version</code></td><td>This plugin&rsquo;s semver (<code>'1.0.0'</code>).</td></tr>
+    <tr><td><code>version</code></td><td>This plugin&rsquo;s semver (<code>'1.4.0'</code>).</td></tr>
   </table>
 
   <h4>Result reasons</h4>
@@ -89,8 +92,8 @@ sb.<span class="c-f">onConnect</span>(<span class="c-k">function</span> (info) {
   <h2 id="proto">Protocol versioning</h2>
   <p>The two halves ship independently and land in browsers at different times, so the handshake <strong>negotiates a protocol version</strong>. Each side advertises a <code>min</code>&ndash;<code>max</code> range; they settle on the highest both support. If there&rsquo;s no overlap, Skybridge stays <em>disconnected</em> rather than half-speaking a protocol it doesn&rsquo;t understand. This is separate from <code>version</code> (the plugin&rsquo;s own semver) &mdash; <code>protocol</code> is the wire contract.</p>
   <pre><code><span class="c-c">// the negotiation, conceptually</span>
-plugin: hello  { protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n">1</span> }
-anchor: here   { protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n">2</span>, capabilities:[<span class="c-s">'storage'</span>,<span class="c-s">'ai'</span>] }
+plugin: hello  \{ protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n">1</span> \}
+anchor: here   \{ protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n">2</span>, capabilities:\[<span class="c-s">'storage'</span>,<span class="c-s">'ai'</span>\] \}
 <span class="c-c">// agreed protocol = min(pluginMax, anchorMax) within the shared range = 1</span></code></pre>
 
   <h2 id="trust">Trust model</h2>
@@ -114,6 +117,14 @@ anchor: here   { protoMin:<span class="c-n">1</span>, protoMax:<span class="c-n"
   <div class="note">Design rule: a Skybridge-backed plugin must do something reasonable with zero companion, and something <em>better</em> with one. Build for the fallback first.</div>
 
   <h2>Changelog</h2>
+  <h3>1.4.0</h3>
+  <p>Added a <strong>model</strong> capability: <code>modelInfo()</code> reports the configured model&rsquo;s name, context window, and max output tokens (never the API key), so a plugin can size prompts and output to the actual model instead of a fixed guess. <code>has('model')</code> reports availability.</p>
+  <h3>1.3.0</h3>
+  <p><code>ai()</code> gained <strong>JSON mode</strong> (<code>opts.json</code> requests native structured output from OpenAI/Anthropic/Gemini) and <strong>token streaming</strong> (<code>opts.onChunk</code> receives the completion over the bridge as it generates), so an in-page agent or chat can show live tokens on the user&rsquo;s own model. <code>request()</code> carries the streamed partials and keeps the request open until the final reply.</p>
+  <h3>1.2.0</h3>
+  <p>Storage gained a <strong>cross-device tier</strong>: when the host imports <code>weld-kv-plugin</code> (server-side key/value), skybridge uses it ahead of the local <code>weld.persist</code> fallback, so a companion-less generator can still persist across devices. The fallback order is now companion &rarr; kv &rarr; persist &rarr; memory. Internally, all four operations and <code>storage.backend()</code> now resolve through one <code>pickBackend()</code>, so the reported backend can never drift from where data is actually written.</p>
+  <h3>1.1.0</h3>
+  <p>Added the <strong>bus</strong> capability: <code>bus.publish(channel, message)</code> / <code>bus.subscribe(channel, fn)</code> for cross-tab, cross-generator pub/sub. The companion relays messages between subscribed generators in a tab and, over a <code>BroadcastChannel</code> on the shared <code>perchance.org</code> apex origin, across tabs &mdash; the cross-origin reach <code>weld.sync</code> can't provide. <code>has('bus')</code> reports availability; gated by per-generator consent like storage and AI. This is the transport <code>weld.swarm</code> rides on for multi-agent orchestration.</p>
   <h3>1.0.0</h3>
   <p>Initial release. Handshake with protocol negotiation (v1), origin- and nonce-checked request/response, capabilities <code>storage</code> and <code>ai</code>, per-capability consent (companion-side), per-generator storage namespace, graceful fallback to <code>weld.persist</code>/memory.</p>
 </div>

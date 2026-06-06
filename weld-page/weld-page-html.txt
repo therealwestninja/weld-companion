@@ -1,9 +1,14 @@
-<!-- Page -- Page
-     A polished multi-agent app built on the Weld suite: decompose a goal, dispatch
-     parallel worker agents (each a weld.crew ReAct loop), watch them reason live, and
-     synthesize one answer. Works fully offline with a scripted reasoner; lights up with
-     real AI, web.fetch, the cross-tab bus, and cross-device storage when the Weld
-     Companion is installed. Based on weld.ui. Imports ai-text-plugin, text-to-image-plugin  -->
+<!-- Page
+     A standalone multi-agent app. Decompose a goal, dispatch parallel worker agents that
+     reason live, and synthesize one answer; or chat directly. Works fully offline with a
+     scripted reasoner and lights up with real AI, web fetch, a cross-tab bus, and
+     cross-device storage when the Companion userscript is installed.
+
+     Forked from the Weld suite: the suite plugins are inlined and self-contained here and
+     are no longer kept in lockstep with their DSL sources, so this file is free to evolve
+     on its own. The window.weld.* names are retained as the internal runtime API (and are
+     reported as-is in diagnostics); renaming that namespace is a separate refactor.
+     Imports ai-text-plugin, text-to-image-plugin. -->
 <style>
   :root {
     /* Claude-like warm light theme */
@@ -11,11 +16,11 @@
     --panel:#ffffff;                  /* cards + panels */
     --panel-2:hsl(48 30% 96.5%);      /* subtle inset */
     --raised:hsl(45 28% 93.5%);       /* code / wells */
-    --line:hsl(45 22% 90%);           /* hairline */
+    --line:hsl(45 20% 87%);           /* hairline (slightly stronger for definition on cream) */
     --line-2:hsl(44 17% 83%);         /* stronger border */
     --ink:hsl(40 8% 16%);             /* primary text */
-    --dim:hsl(40 5% 42%);             /* secondary text */
-    --faint:hsl(40 4% 60%);           /* faint text */
+    --dim:hsl(40 7% 32%);             /* secondary text (darkened for contrast on cream/white) */
+    --faint:hsl(40 6% 43%);           /* faint text (was 60% -> failed WCAG on white; now ~5:1) */
     --clay:#c96442;                   /* Claude clay accent */
     --clay-d:#a84d30;                 /* darker clay (hover) */
     --clay-soft:hsl(14 60% 96%);      /* clay tint bg */
@@ -152,6 +157,7 @@
 
   /* ---- modal ---- */
   .modal { position:fixed; inset:0; z-index:2147483600; background:rgba(40,32,24,.4); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; padding:20px; }
+  #img-modal { z-index:2147483601; }   /* opened from within Settings -> must stack above it */
   .modal-card { width:100%; max-width:372px; background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; box-shadow:var(--shadow-lg); }
   .modal-hd { font-family:var(--serif); font-size:17px; font-weight:500; color:var(--ink); margin-bottom:16px; display:flex; align-items:center; text-transform:none; letter-spacing:0; }
   .modal-x { margin-left:auto; cursor:pointer; font-size:20px; line-height:1; color:var(--faint); }
@@ -225,6 +231,17 @@
   .chat-act:disabled { opacity:.4; cursor:default; }
   .chat-take { font-family:var(--mono); font-size:10.5px; color:var(--faint); padding:0 2px; }
   .chat-bar { display:flex; gap:6px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .chat-workers { margin-top:3px; }
+  .chat-workers > summary { font-family:var(--mono); font-size:10.5px; letter-spacing:.04em; text-transform:uppercase; color:var(--faint); cursor:pointer; padding:2px 0; }
+  .chat-workers > summary:hover { color:var(--dim); }
+  .chat-workers[open] > summary { color:var(--dim); margin-bottom:4px; }
+  .cw-item { border-left:2px solid var(--line-2); padding:3px 0 3px 10px; margin:6px 0; }
+  .cw-item.err { border-left-color:var(--red); }
+  .cw-goal { font-family:var(--mono); font-size:11px; color:var(--dim); margin-bottom:3px; }
+  .cw-ans { font-size:13px; color:var(--ink); line-height:1.5; }
+  .set-opt { display:block; margin:12px 0 0; font-family:var(--sans); font-size:13px; text-transform:none; letter-spacing:0; font-weight:400; color:var(--dim); cursor:pointer; }
+  .set-opt input { width:auto; margin-right:7px; vertical-align:-1px; }
+  #settings-modal .modal-card { max-height:86vh; overflow:auto; }
   .chat-bar .hist { width:auto; flex:1; min-width:140px; margin-top:0; }
 
 
@@ -268,6 +285,7 @@
       <span class="sub">Perchance-based multi-agent orchestration</span>
     </div>
     <div class="caps" id="caps">
+      <button class="theme-tg" id="settings-btn" type="button" title="Settings" aria-label="Open settings">&#9881;</button>
       <button class="theme-tg" id="theme" type="button" title="Toggle dark mode" aria-label="Toggle dark mode">&#9789;</button>
       <span class="pill" id="cap-transport">transport &mdash;</span>
       <span class="pill" id="cap-ai">model</span>
@@ -290,38 +308,15 @@
             <textarea id="goal" placeholder="State the mission. e.g. Plan a three-stop food tour of a fictional port city."></textarea>
           </div>
 
-          <div class="row" id="cfg-decomp">
-            <label class="fld" for="decomp">decomposition</label>
-            <select id="decomp"></select>
-          </div>
-
           <div class="row" id="cfg-tasks">
             <label class="fld" for="tasks">subtasks <span class="val mono" id="task-n">0</span></label>
             <textarea id="tasks" placeholder="One subtask per line. Auto-filled by decomposition; edit freely."></textarea>
-          </div>
-
-          <div class="sliders" id="cfg-pool">
-            <div class="row">
-              <label class="fld">workers <span class="val" id="workers-v">3</span></label>
-              <input type="range" id="workers" min="1" max="6" value="3">
-            </div>
-            <div class="row">
-              <label class="fld">parallel <span class="val" id="conc-v">2</span></label>
-              <input type="range" id="conc" min="1" max="6" value="2">
-            </div>
-          </div>
-
-          <div class="row" id="cfg-tools">
-            <label class="fld">agent tools</label>
-            <div class="toggles" id="tools"></div>
-            <button class="btn gear" id="img-cfg-btn" title="Image generation defaults">&#9881; image</button>
           </div>
 
           <div class="actions">
             <button class="btn go" id="go">deploy</button>
             <button class="btn stop" id="stop" disabled>stop</button>
           </div>
-          <label class="fld" style="margin:9px 0 0; text-transform:none; letter-spacing:0; font-weight:400; color:var(--dim); cursor:pointer;"><input type="checkbox" id="audit" style="width:auto; margin-right:7px; vertical-align:-1px;"> audit pass <span class="mhint">slower; each answer is reviewed &amp; revised against its subtask (weld.director)</span></label>
           <div class="actions" style="margin-top:8px;">
             <button class="btn" id="import" title="Load settings + inputs (and view results) from a .json snapshot">import</button>
             <button class="btn" id="export-setup" title="Save current settings + inputs as a reusable .json snapshot">save setup</button>
@@ -347,7 +342,6 @@
     <div>
       <div class="stage-hd" id="stage-hd">
         <h2>worker threads</h2>
-        <span class="verbose-tg" id="verbose" title="show the raw prompt + model output">model I/O</span>
         <span class="meter" id="meter">idle</span>
       </div>
       <div id="cards"><div class="empty">No mission deployed. Set an objective and press <b>DEPLOY</b>.</div></div>
@@ -378,10 +372,12 @@
           <button class="chat-act" id="chat-del" title="Delete this conversation">delete</button>
           <button class="chat-act" id="chat-export-md" title="Export the transcript as Markdown">.md</button>
           <button class="chat-act" id="chat-export-json" title="Export the conversation as JSON">.json</button>
+          <button class="chat-act" id="chat-respond" title="Make the assistant respond now / regenerate the last reply (no new message needed)">&#8635; respond</button>
+          <span class="verbose-tg" id="chat-swarm" title="Off: one direct conversational reply. On: decompose this turn into a multi-agent mission.">page</span>
         </div>
-        <div id="chat-log" class="chat-log"><div class="empty">No messages yet. Say something to start the conversation.</div></div>
+        <div id="chat-log" class="chat-log"><div class="empty">No messages yet. Say something to start.</div></div>
         <div class="chat-composer">
-          <textarea id="chat-input" rows="2" placeholder="Message workers&hellip; (each turn runs a full mission)"></textarea>
+          <textarea id="chat-input" rows="2" placeholder="Message&hellip;"></textarea>
           <button class="btn go" id="chat-send" title="Run a mission for this turn">send</button>
           <button class="btn" id="chat-stop" title="Stop the running mission" style="display:none">stop</button>
         </div>
@@ -431,6 +427,39 @@
   </div>
 </div>
 
+<div class="modal" id="settings-modal" style="display:none;" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="modal-card">
+    <div class="modal-hd">Settings <span class="modal-x" id="settings-x" title="Close">&times;</span></div>
+    <div id="settings-body">
+      <div class="row" id="cfg-decomp">
+        <label class="fld" for="decomp">decomposition</label>
+        <select id="decomp"></select>
+      </div>
+      <div class="sliders" id="cfg-pool">
+        <div class="row">
+          <label class="fld">workers <span class="val" id="workers-v">3</span></label>
+          <input type="range" id="workers" min="1" max="6" value="3">
+        </div>
+        <div class="row">
+          <label class="fld">parallel <span class="val" id="conc-v">2</span></label>
+          <input type="range" id="conc" min="1" max="6" value="2">
+        </div>
+      </div>
+      <div class="row" id="cfg-tools">
+        <label class="fld">agent tools</label>
+        <div class="toggles" id="tools"></div>
+        <button class="btn gear" id="img-cfg-btn" title="Image generation defaults">&#9881; image</button>
+      </div>
+      <label class="set-opt"><input type="checkbox" id="audit"> audit pass <span class="mhint">slower; each answer is reviewed &amp; revised against its subtask</span></label>
+      <div class="row" id="cfg-verbose" style="margin-top:12px;">
+        <span class="verbose-tg" id="verbose" title="show the raw prompt + model output">model I/O</span>
+        <span class="mhint" style="margin-left:8px;">show the raw prompt + model output on worker cards</span>
+      </div>
+      <label class="set-opt"><input type="checkbox" id="set-dark"> dark theme</label>
+    </div>
+    <div class="modal-actions"><button class="btn" id="settings-done">done</button></div>
+  </div>
+</div>
 <div class="modal" id="priv-modal" style="display:none;" role="dialog" aria-modal="true" aria-label="How your data is handled">
   <div class="modal-card">
     <div class="modal-hd">how your data is handled <span class="modal-x" id="priv-modal-x" title="close" aria-label="Close">&times;</span></div>
@@ -822,7 +851,7 @@
   var LOADED_AT = Date.now();
   // Early, dependency-free deployment beacon: even if a later line throws, this
   // proves WHICH build actually loaded (read it from the example or console).
-  try { window.__weldSkybridge = { build: BUILD, version: '1.2.0', at: Date.now() }; } catch (e) {}
+  try { window.__weldSkybridge = { build: BUILD, version: '1.4.0', at: Date.now() }; } catch (e) {}
   // verbose console logging toggle: add ?sbdebug to the URL, or set
   // window.WELD_SKYBRIDGE_DEBUG = true before load, or call .debug(true) at runtime.
   var DEBUG = false;
@@ -1181,7 +1210,7 @@
     // a live snapshot for troubleshooting (state + recent handshake events)
     diagnostics: function () {
       return {
-        build: BUILD, version: '1.2.0', debug: DEBUG, loadedAt: LOADED_AT,
+        build: BUILD, version: '1.4.0', debug: DEBUG, loadedAt: LOADED_AT,
         connected: connected, protocol: proto, anchorVersion: anchorVersion,
         framed: (function () { try { return window.top !== window.self; } catch (e) { return null; } })(),
         origin: location.origin,
@@ -2285,7 +2314,7 @@
   //   :runs     index of run ids (most-recent-first)
   // -----------------------------------------------------------------
 
-  var BUILD = 'crew/2026-06-06.9';
+  var BUILD = 'crew/2026-06-06.10';
 
   // ---- storage: lean on skybridge (companion -> persist -> memory), else our own fallback ----
   function makeStore() {
@@ -2349,6 +2378,31 @@
     return { title: String(title).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(), text: s };
   }
 
+  // C4: when a long body must be truncated, keep the passages most relevant to the agent's query
+  // instead of blindly taking the head. No query (or short text) -> head truncation, as before.
+  function relevantExcerpt(text, query, max) {
+    var s = String(text == null ? '' : text); max = max || 8000;
+    if (s.length <= max) return s;
+    var q = String(query || '').toLowerCase().trim();
+    var terms = q ? q.split(/\s+/).filter(function (t) { return t.length > 2; }) : [];
+    if (!terms.length) return s.slice(0, max) + '\u2026[truncated]';
+    var paras = s.split(/\n{2,}/); if (paras.length < 2) paras = s.match(/[\s\S]{1,800}/g) || [String(s)];
+    var scored = paras.map(function (p, i) {
+      var lp = p.toLowerCase(), sc = 0;
+      for (var k = 0; k < terms.length; k++) { var idx = 0, t = terms[k]; while ((idx = lp.indexOf(t, idx)) !== -1) { sc++; idx += t.length; } }
+      return { i: i, p: p, sc: sc };
+    });
+    var picks = [{ i: 0, p: paras[0] }], used = paras[0].length;          // always keep the head (title/intro)
+    scored.slice(1).filter(function (x) { return x.sc > 0; })
+          .sort(function (a, b) { return b.sc - a.sc; })
+          .forEach(function (x) { if (used + x.p.length + 8 <= max) { picks.push(x); used += x.p.length + 8; } });
+    picks.sort(function (a, b) { return a.i - b.i; });
+    var out = '', last = -1;
+    for (var z = 0; z < picks.length; z++) { if (z > 0 && picks[z].i !== last + 1) out += '\n\u2026\n'; out += picks[z].p + '\n\n'; last = picks[z].i; }
+    out = out.trim(); if (out.length > max) out = out.slice(0, max) + '\u2026[truncated]';
+    return out + (picks.length < paras.length ? '\n\u2026[query-focused excerpt]' : '');
+  }
+
   // ---- the agent factory ----
   function createCrew(opts) {
     opts = opts || {};
@@ -2374,12 +2428,22 @@
       },
       search: async function (query, tags) {
         var all = await memory.list();
-        var q = String(query || '').toLowerCase();
-        return all.filter(function (m) {
-          var hitQ = !q || (m.text && m.text.toLowerCase().indexOf(q) !== -1);
-          var hitT = !tags || !tags.length || (m.tags && tags.some(function (t) { return m.tags.indexOf(t) !== -1; }));
-          return hitQ && hitT;
-        });
+        var q = String(query || '').toLowerCase().trim();
+        var terms = q ? q.split(/\s+/).filter(Boolean) : [];
+        var tagList = (tags && tags.length) ? tags : null;
+        // A6: rank by relevance (whole-phrase > per-term overlap > tag match), recency as tiebreak,
+        // instead of returning unranked substring hits. No query and no tags -> everything.
+        var scored = [];
+        for (var i = 0; i < all.length; i++) {
+          var m = all[i], text = (m.text || '').toLowerCase(), score = 0;
+          if (q && text.indexOf(q) !== -1) score += 5;
+          for (var j = 0; j < terms.length; j++) if (terms[j] && text.indexOf(terms[j]) !== -1) score += 1;
+          var tagHit = tagList && m.tags && tagList.some(function (t) { return m.tags.indexOf(t) !== -1; });
+          if (tagHit) score += 3;
+          if ((!terms.length && !tagList) || score > 0) scored.push({ m: m, score: score });
+        }
+        scored.sort(function (a, b) { return (b.score - a.score) || ((b.m.t || 0) - (a.m.t || 0)); });
+        return scored.map(function (s) { return s.m; });
       },
       clear: async function () { await store.set(key('mem'), []); return true; }
     };
@@ -2431,7 +2495,7 @@
       run: async function () { return new Date().toISOString(); } });
     // web.fetch: companion 'fetch' capability if present, else weld.fetch (superFetch
     // proxy, CORS-free) when the host imported it, else reports unavailable.
-    registerTool({ name: 'web.fetch', description: 'Fetch a URL. Uses the companion web-access capability if present, else weld.fetch (superFetch) if the host imported weld-fetch-plugin.', args: { url: 'string', method: 'string (optional)' },
+    registerTool({ name: 'web.fetch', description: 'Fetch a URL. Uses the companion web-access capability if present, else weld.fetch (superFetch) if the host imported weld-fetch-plugin. Pass query to focus a long page on relevant passages.', args: { url: 'string', method: 'string (optional)', query: 'string (optional) -- focus terms for excerpting a long page' },
       run: async function (a) {
         var sb = window.weld && window.weld.skybridge;
         if (sb && sb.connected && typeof sb.has === 'function' && sb.has('fetch') && typeof sb.request === 'function') {
@@ -2443,7 +2507,7 @@
             var res = await wf.request(a.url, { method: a.method || 'GET' });
             var ct = ''; try { var _h = res.headers; ct = _h ? ((typeof _h.get === 'function' ? _h.get('content-type') : (_h['content-type'] || _h['Content-Type'])) || '') : ''; } catch (e) {} if (ct && !/text|html|json|xml|javascript|csv|plain|urlencoded/i.test(ct)) { var nt = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, contentType: ct, note: 'non-text content (' + ct + '); body omitted' }; fetchCache[ck] = nt; return nt; } var body = '';
             try { body = await res.text(); } catch (e) {}
-            var _ht = null; if (typeof body === 'string' && (/html/i.test(ct) || (!ct && /^\s*<(?:!doctype|html)/i.test(body)))) { _ht = htmlToText(body); body = _ht.text; } if (typeof body === 'string' && body.length > 8000) body = body.slice(0, 8000) + '\u2026[truncated]';
+            var _ht = null; if (typeof body === 'string' && (/html/i.test(ct) || (!ct && /^\s*<(?:!doctype|html)/i.test(body)))) { _ht = htmlToText(body); body = _ht.text; } if (typeof body === 'string' && body.length > 8000) body = relevantExcerpt(body, a.query, 8000);   // C4: query-aware truncation
             var out = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, title: _ht ? _ht.title : undefined, body: body }; if (out.ok) fetchCache[ck] = out; return out;
           } catch (e) {
             return { ok: false, reason: 'weld.fetch error: ' + (e && e.message ? e.message : String(e)) };
@@ -2476,7 +2540,7 @@
         if (r && r.ok) return r.value;
         throw new Error('model call failed: ' + (r && r.reason ? r.reason : 'unknown'));
       }
-      throw new Error('no model available -- configure your own model in Weld Companion, or pass opts.reason');
+      throw new Error('no model available -- configure a model via the Companion, or pass opts.reason');
     }
 
     function toolDocs() {
@@ -2504,6 +2568,11 @@
         '- If the task is answerable from your own knowledge or reasoning, reply with a final answer; do not call tools you do not need.',
         '- Prefer the most specific tool, and pass complete, self-contained arguments.',
         '- If a tool result is unsatisfactory, call it again with adjusted arguments before finalizing.',
+        '',
+        'Approach:',
+        '- For a multi-step goal, take a brief planning step first (use think) before acting.',
+        '- Before finalizing, check your answer actually addresses the goal; do not finalize on weak or unverified evidence.',
+        '- Steps are limited: once you can answer, finalize promptly rather than over-exploring.',
         '',
         'Long-term memory (durable across runs):',
         (memText || '(empty)'),
@@ -2624,7 +2693,7 @@
   window.weld.crew = {
     create: createCrew,
     extractJSON: extractJSON,   // exported for tests / reuse
-    version: '1.0.1',
+    version: '1.1.0',
     build: BUILD
   };
 
@@ -2639,7 +2708,7 @@
   if (window.weld.swarm) return window.weld.swarm;
 
   // -----------------------------------------------------------------
-  // weld.swarm: the generator-side half of orchestration. The heavy routing
+  // The generator-side half of orchestration. The heavy routing
   // logic is shared with the companion's orchestrator core; here every peer
   // runs it locally over a broadcast transport, so the tab that calls
   // dispatch() acts as the orchestrator for that exchange.
@@ -8068,11 +8137,16 @@
       return n;
     }
     function showModal(id, on) { var m = $(id); if (m) m.style.display = on ? 'flex' : 'none'; }
+    // ---- small shared DOM/number helpers ----
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(v, hi)); }
+    function numVal(id, def) { var e = $(id), v = e ? parseInt(e.value, 10) : NaN; return isNaN(v) ? def : v; }
+    function wire(id, evt, fn) { var e = $(id); if (e) e['on' + evt] = fn; return e; }   // null-safe single-handler binding
+    function show(id, on, disp) { var e = $(id); if (e) e.style.display = on ? (disp || '') : 'none'; return e; }
     function beginRun() { $('go').disabled = true; $('stop').disabled = false; if ($('agg')) $('agg').style.display = 'none'; }
     var SW = (window.weld && window.weld.swarm) || null;
     var CR = (window.weld && window.weld.crew) || null;
     var sb = (window.weld && window.weld.skybridge) || null;
-    var APP_BUILD = 'swarm-app/2026-06-06.18';
+    var APP_BUILD = 'page/2026-06-06.28';
     // native ai-text is slow and serialized through one broker, so multi-step ReAct runs take
     // minutes, not seconds, so give each dispatched subtask a generous ceiling before timing out.
     var TASK_TIMEOUT = 240000;
@@ -8390,7 +8464,7 @@
       var ctx = modelMeta && modelMeta.contextWindow;
       if (!ctx) return SYNTH_BUDGET;                                   // native / unknown -> the fixed default
       var reserve = Math.min((modelMeta.maxOutput || 4096), 8192);     // leave room for the answer
-      return Math.max(1500, Math.min(ctx - reserve - 1000, 24000));    // floor for small models, ceiling for cost
+      return clamp(ctx - reserve - 1000, 1500, 24000);    // floor for small models, ceiling for cost
     }
     // D4: a per-call OUTPUT cap for synthesis (luminara-style task sizing); honored by the companion.
     function synthOutCap() { return Math.min((modelMeta && modelMeta.maxOutput) || 1536, 2048); }
@@ -8507,6 +8581,12 @@
       var tb = $('theme'); if (tb) { tb.innerHTML = themePref === 'dark' ? '\u2600' : '\u263D'; tb.setAttribute('aria-pressed', themePref === 'dark' ? 'true' : 'false'); }
     }
     function toggleTheme() { applyTheme(themePref === 'dark' ? 'light' : 'dark'); saveDraft(); }
+    // #2: a single Settings menu that surfaces the run/agent options. It does not duplicate state --
+    // each control drives the real input (dispatching its event), so existing logic and saveDraft run.
+    function openSettings() {
+      var dk = $('set-dark'); if (dk) dk.checked = (themePref === 'dark');
+      showModal('settings-modal', true);
+    }
 
     // autopilot: declarative rules that watch a run and intervene (weld.rules). Recreated each run so state resets.
     function makeAutopilot() {
@@ -8686,6 +8766,11 @@
         crew.registerTool({ name: 'gen.search', description: 'Search the host generator\'s lists for items matching a query. args: query, a search string.', args: { query: 'string' },
           run: function (a) { try { var hits = window.weld.gen.search(String((a && a.query) || '')); return { ok: true, hits: Array.isArray(hits) ? hits.slice(0, 20) : [] }; } catch (e) { return { ok: false, reason: String((e && e.message) || e) }; } } });
       }
+      // B4: shared blackboard -- let parallel workers post findings and read peers' (also fed into synthesis).
+      crew.registerTool({ name: 'note.share', description: 'Post a brief finding to the shared run blackboard so other agents and the final synthesis can see it. Use for facts or partial results worth sharing.', args: { note: 'string' },
+        run: function (a) { var t = String((a && a.note) || '').trim(); if (!t) return { ok: false, reason: 'empty note' }; blackboard.push({ worker: workerId, note: t, t: Date.now() }); if (blackboard.length > 60) blackboard.shift(); return { ok: true, shared: true, total: blackboard.length }; } });
+      crew.registerTool({ name: 'note.peers', description: 'Read findings other agents have posted to the shared run blackboard this run.', args: {},
+        run: function () { var peers = blackboard.filter(function (n) { return n.worker !== workerId; }); return { ok: true, notes: peers.slice(-20).map(function (n) { return { worker: n.worker, note: n.note }; }) }; } });
       return crew;
     }
 
@@ -8884,6 +8969,17 @@
     }
     // pull a task list out of a model reply that may be a JSON array, a {subtasks:[...]}-style object,
     // or messy text. Returns a non-empty string[] or null. Tolerant of any characters inside the strings.
+    // B2: drop near-duplicate subtasks (normalize case/whitespace/punctuation) so workers don't
+    // grind the same ground. Order-preserving; keeps the first occurrence.
+    function dedupeTasks(list) {
+      var seen = {}, out = [];
+      for (var i = 0; i < list.length; i++) {
+        var t = String(list[i] == null ? '' : list[i]).trim(); if (!t) continue;
+        var key = t.toLowerCase().replace(/[^\w ]+/g, '').replace(/\s+/g, ' ').trim();
+        if (key && seen[key]) continue; if (key) seen[key] = true; out.push(t);
+      }
+      return out;
+    }
     function parseTaskList(txt, n) {
       var s = String(txt == null ? '' : txt), best = null;
       function consider(a) { if (Array.isArray(a) && (!best || a.length > best.length)) best = a; }
@@ -8912,18 +9008,18 @@
           sys = 'You plan a set of images. Output strictly a JSON array of ' + n + ' short, distinct image briefs (vary the pose, angle, scene, or mood) for the requested subject. Nothing else.';
           p = 'Give ' + n + ' distinct image briefs for: ' + goal;
         } else {
-          sys = 'You decompose objectives into parallelizable subtasks that do NOT overlap. Output strictly a JSON array of short strings, nothing else.';
-          p = 'Break this objective into exactly ' + n + ' concise subtasks that are independent and non-overlapping (each a distinct part, no duplication) and that together fully cover the objective. Reply with ONLY a JSON array of strings.\n\nObjective: ' + goal;
+          sys = 'You decompose objectives into the FEWEST independent, non-overlapping (MECE) subtasks actually needed -- never more than asked. Output strictly a JSON array of short strings, nothing else.';
+          p = 'Break this objective into independent, non-overlapping subtasks: use as FEW as it naturally needs and AT MOST ' + n + ' (do not pad with redundant or overlapping subtasks -- a simple objective may need just one or two). Together they must fully cover the objective with no duplication. Reply with ONLY a JSON array of short strings.\n\nObjective: ' + goal;
         }
         var txt = await genText(p, sys, 768);   // D4: a decomposition is a short JSON list -> cap output
         var list = parseTaskList(txt, n);
-        if (list) return list;
+        if (list) { list = dedupeTasks(list); if (list.length) return list; }   // B1/B2: adaptive count, no duplicates
       } catch (e) {}
       return autoSplit(goal, n);
     }
     async function decompose() {
       var goal = $('goal').value.trim(); if (!goal) return;
-      var n = parseInt($('workers').value, 10) || 3;
+      var n = numVal('workers', 3);
       var strat = DECOMP[parseInt($('decomp').value, 10)].id;
       if (strat === 'manual') { if (!$('tasks').value.trim()) $('tasks').value = autoSplit(goal, n).join('\n'); }
       else if (strat === 'split') $('tasks').value = autoSplit(goal, n).join('\n');
@@ -9008,6 +9104,7 @@
       var ok = results.filter(function (r) { return r && r.ok; });
       if (!silent) $('agg').style.display = '';
       var joined = results.map(function (r, i) { return (i + 1) + '. ' + (r && r.ok ? r.answer : ('(failed) ' + ((r && (r.reason || r.error)) || ''))); }).join('\n');
+      var bbNotes = blackboard.length ? ('\n\nShared notes the agents posted (use to reconcile and fill gaps):\n' + blackboard.slice(-20).map(function (n) { return '- (' + n.worker + ') ' + n.note; }).join('\n')) : '';   // B4
       if (!(aiAvailable() && ok.length)) {
         $('agg-syn').textContent = 'collected'; $('agg-tag').textContent = ok.length + '/' + results.length; $('agg-body').textContent = joined;
         return joined;
@@ -9024,8 +9121,8 @@
       var timer = setInterval(function () { paint('synthesizing with ' + who + '\u2026 ' + Math.round((Date.now() - t0s) / 1000) + 's' + (streamed ? ' \u00b7 ' + streamed.length + ' chars' : '')); }, 400);
       try {
         var txt = await genTextStream(
-          'Synthesize these worker results into one cohesive answer to the objective "' + obj + '":\n\n' + joined,
-          'You merge several agent results into ONE cohesive answer to the objective. Output only the answer itself: no title, no preamble, no header like "Final ... Profile:", do not re-number or restate the inputs, and never restate these instructions. Begin directly with the answer.',
+          'Synthesize these worker results into one cohesive answer to the objective "' + obj + '":\n\n' + joined + bbNotes,
+          'You merge several agent results into ONE cohesive answer to the objective. Reconcile any disagreement between the results (prefer the better-supported claim; do not silently average contradictory facts), and if the results leave an important part of the objective unanswered, briefly note that gap rather than inventing detail. Output only the answer itself: no title, no preamble, no header like "Final ... Profile:", do not re-number or restate the inputs, and never restate these instructions. Begin directly with the answer.',
           function (chunk) { streamed += chunk; $('agg-body').textContent = streamed; if (onStream) { try { onStream(streamed); } catch (e) {} } },   // live: text grows as it generates
           synthOutCap()
         );
@@ -9046,6 +9143,7 @@
     // ---------- run lifecycle ----------
     var active = [];      // swarms to tear down
     var running = [];     // crews we can stop()
+    var blackboard = [];  // B4: per-run shared notes -- workers post findings, peers + synthesis read them
     var stopped = false;
     var runGen = 0;   // bumped on each run start AND on stop, so a stale in-flight run no-ops its tail
     var meterPoll = null;
@@ -9112,7 +9210,7 @@
     function renderTranscript(thinking) {
       var log = $('chat-log'); if (!log) return;
       var tl = (chatSession && chatSession.timeline) ? chatSession.timeline() : [];
-      if (!tl.length && !thinking) { log.innerHTML = '<div class="empty">No messages yet. Say something to start the conversation.</div>'; return; }
+      if (!tl.length && !thinking) { log.innerHTML = '<div class="empty">No messages yet. Say something to start. Each reply records the agents\u2019 work and can be branched into alternate threads.</div>'; return; }
       log.innerHTML = '';
       tl.forEach(function (t) {
         var role = (t.role === 'user') ? 'user' : 'assistant';
@@ -9122,6 +9220,15 @@
         if (role === 'user') { b.textContent = String(t.content || ''); return; }
         b.classList.add('md'); b.dataset.md = String(t.content || ''); b.innerHTML = mdRender(String(t.content || ''));
         if (t.meta && typeof t.meta.ok !== 'undefined') el('div', 'chat-meta', 'agents: ' + t.meta.ok + '/' + t.meta.agents, wrap);
+        if (t.meta && t.meta.workers && t.meta.workers.length) {   // #3: persisted worker activity, collapsible
+          var det = el('details', 'chat-workers', null, wrap);
+          el('summary', null, 'agent activity \u00b7 ' + t.meta.workers.filter(function (w) { return w.ok; }).length + '/' + t.meta.workers.length + ' agents', det);
+          t.meta.workers.forEach(function (w, wi) {
+            var item = el('div', 'cw-item' + (w.ok ? '' : ' err'), null, det);
+            el('div', 'cw-goal', (wi + 1) + '. ' + (w.goal || '(subtask)'), item);
+            var ca = el('div', 'cw-ans md', null, item); ca.innerHTML = mdRender(String(w.answer || ''));
+          });
+        }
         var tk = (chatSession && chatSession.takes) ? chatSession.takes(t.id) : { index: 0, count: 1 };
         var actions = el('div', 'chat-actions', null, wrap);
         if (tk.count > 1) {
@@ -9130,20 +9237,40 @@
           var nxt = el('button', 'chat-act', '\u25b6', actions); nxt.title = 'Next variant'; nxt.disabled = chatBusy || tk.index >= tk.count - 1; nxt.onclick = function () { swipeTurn(t.id, 1); };
         }
         var regen = el('button', 'chat-act', '\u21bb regenerate', actions); regen.title = 'Run the mission again for this turn (adds a variant)'; regen.disabled = chatBusy; regen.onclick = function () { regenTurn(t.id); };
+        var br = el('button', 'chat-act', '\u2387 branch', actions); br.title = 'Fork an alternate thread from here (your next message continues this branch; the old one stays as a variant)'; br.disabled = chatBusy; br.onclick = function () { branchTurn(t.id); };
       });
       if (thinking) {
         var tw = el('div', 'chat-msg assistant', null, log);
-        el('div', 'chat-who', 'swarm', tw);
+        el('div', 'chat-who', 'Page', tw);
         var lb = el('div', 'chat-bubble', null, tw); lb.id = 'chat-live';
-        lb.innerHTML = '<span class="spin"></span> running mission\u2026';
+        lb.innerHTML = '<span class="spin"></span> thinking\u2026';
       }
       log.scrollTop = log.scrollHeight;
     }
+    function chatSwarmOn() { return !!($('chat-swarm') && $('chat-swarm').classList.contains('on')); }
+    // A conversational turn: one streamed reasoner pass over the running conversation. No decomposition,
+    // no worker fan-out, no analytical synthesis -- the model replies AS a participant. This is the chat
+    // default; the multi-agent mission is opt-in via the chat 'swarm' toggle.
+    async function chatReply(context, text, onStream) {
+      var sys = 'You are the assistant in an ongoing conversation. Reply directly and naturally as a participant. '
+        + 'If the user is roleplaying or writing fiction, stay in character and advance the scene in the same voice and tense; otherwise answer plainly. '
+        + 'Never analyze, summarize, critique, or describe the user\u2019s message, and never mention missing or unresolved context \u2014 just respond.';
+      var prompt = (context ? context + '\n\n' : '') + 'User: ' + text + '\n\nAssistant:';
+      var streamed = '', full = '';
+      try { full = await genTextStream(prompt, sys, function (chunk) { streamed += chunk; if (onStream) { try { onStream(streamed); } catch (e) {} } }, synthOutCap()); }
+      catch (e) { full = ''; }
+      return (full || streamed || '').trim();
+    }
     // run the existing Page engine for one chat turn and return the synthesized reply text
     async function runMissionForTurn(text, context, onStream) {
-      var myGen = ++runGen; teardown(); running = []; stopped = false;
-      var nWorkers = parseInt($('workers').value, 10) || 3;
-      var conc = parseInt($('conc').value, 10) || 2;
+      var myGen = ++runGen; teardown(); running = []; stopped = false; blackboard = [];
+      if (!chatSwarmOn()) {                                    // conversational default: one direct streamed reply
+        var direct = await chatReply(context, text, onStream);
+        if (stopped || myGen !== runGen) return { text: '', meta: null };
+        return { text: direct || '(no reply \u2014 is a model configured? open Settings)', meta: null };
+      }
+      var nWorkers = numVal('workers', 3);
+      var conc = numVal('conc', 2);
       var tools = currentTools(); lastToolset = tools;
       var basis = context ? (context + '\n\nUser: ' + text) : text;
       var subtasks = null;
@@ -9152,7 +9279,8 @@
       clearCards(); subtasks.forEach(function (g, i) { makeCard(i, g); });   // scratch cards (hidden in chat) so serveOne works unchanged
       var results = [];
       try {
-        var driver = deployLocalAgents(nWorkers);
+        var nDeploy = clamp(subtasks.length, 1, nWorkers);   // B1: deploy only as many agents as there are subtasks
+        var driver = deployLocalAgents(nDeploy);
         await new Promise(function (r) { setTimeout(r, 40); });
         if (stopped || myGen !== runGen) return { text: '', meta: null };
         var tasks = subtasks.map(function (g, i) { return { goal:g, idx:i, tools:tools }; });
@@ -9162,7 +9290,13 @@
       var final = '';
       try { final = await aggregate(results, text, true, onStream); } catch (e) { final = ''; }   // silent: synthesize without the batch agg panel, but stream into the chat bubble
       var nOk = results.filter(function (r) { return r && r.ok; }).length;
-      return { text: final || '(the agents returned nothing usable)', meta: { agents: results.length, ok: nOk } };
+      // #3: keep a compact per-worker breakdown on the turn so worker output persists in the
+      // transcript (a collapsible block) instead of vanishing when the synthesis replaces it.
+      var workers = results.slice().sort(function (a, b) { return ((a && a.idx) || 0) - ((b && b.idx) || 0); }).map(function (r) {
+        var ans = (r && r.ok) ? String(r.answer || '') : ('(failed) ' + ((r && (r.reason || r.error)) || ''));
+        return { goal: String((r && subtasks[r.idx] != null) ? subtasks[r.idx] : ((r && r.goal) || '')), ok: !!(r && r.ok), answer: ans.length > 700 ? (ans.slice(0, 700) + '\u2026') : ans };
+      });
+      return { text: final || '(the agents returned nothing usable)', meta: { agents: results.length, ok: nOk, workers: workers } };
     }
     function stopChat() {
       if (!chatBusy) return;
@@ -9173,6 +9307,44 @@
       if ($('chat-meter')) $('chat-meter').textContent = 'stopping\u2026';
       feed('info', 'chat mission stopped by user');
     }
+    // One streaming sink for the live "thinking" bubble. It re-queries #chat-live on every call,
+    // so a re-render mid-run can never leave us writing into a detached node (the vanishing-text race).
+    function makeChatStream() {
+      var streaming = false;
+      return function (textSoFar) {
+        var lb = document.getElementById('chat-live'); if (!lb) return;
+        if (!streaming) { streaming = true; lb.classList.add('md'); }
+        lb.innerHTML = mdRender(textSoFar);
+        var lg = $('chat-log'); if (lg) lg.scrollTop = lg.scrollHeight;
+      };
+    }
+    // #4: make the swarm respond without typing a new message. If the last turn is a dangling user
+    // message (a prior run was stopped/errored), run a mission for it; if it's an assistant reply,
+    // regenerate it.
+    async function respondLast() {
+      if (chatBusy || !chatSession) return;
+      var tl = chatSession.timeline(); if (!tl.length) return;
+      var last = tl[tl.length - 1];
+      if (last.role === 'assistant') return regenTurn(last.id);
+      var ctx = await buildContext(tl.slice(0, tl.length - 1));
+      setChatBusy(true); renderTranscript(true);
+      var onStream = makeChatStream();
+      var reply;
+      try { reply = await runMissionForTurn(last.content, ctx, onStream); }
+      catch (e) { reply = { text: '(the mission failed: ' + ((e && e.message) || e) + ')', meta: null }; }
+      if (reply && reply.text === '' && reply.meta === null) { setChatBusy(false, 'stopped'); renderTranscript(); return; }
+      try { await chatSession.addAssistant(reply.text, reply.meta || null); } catch (e) { try { chatSession.addAssistant(reply.text); } catch (e2) {} }
+      setChatBusy(false); renderTranscript(); saveChatSession();
+    }
+    // #5: fork an alternate thread from a turn. The old continuation is preserved as a sibling
+    // (reachable via the variant arrows); the next message continues this new branch.
+    function branchTurn(turnId) {
+      if (chatBusy || !chatSession || !chatSession.branchFrom) return;
+      chatSession.branchFrom(turnId);
+      renderTranscript(); saveChatSession();
+      var ta = $('chat-input'); if (ta) ta.focus();
+      toast('info', 'branched \u2014 your next message starts a new thread from here');
+    }
     async function submitTurn() {
       if (chatBusy) return;
       var ta = $('chat-input'); var text = (ta ? ta.value : '').trim(); if (!text) return;
@@ -9181,13 +9353,7 @@
       s.addUser(text);
       setChatBusy(true);
       renderTranscript(true);
-      var live = $('chat-live'), streaming = false;
-      function onStream(textSoFar) {
-        if (!live) return;
-        if (!streaming) { streaming = true; live.classList.add('md'); }
-        live.innerHTML = mdRender(textSoFar);
-        var lg = $('chat-log'); if (lg) lg.scrollTop = lg.scrollHeight;
-      }
+      var onStream = makeChatStream();   // re-queries #chat-live each call -> no stale-node race
       var reply;
       try { var ctx = await chatContext(s); reply = await runMissionForTurn(text, ctx, onStream); }
       catch (e) { reply = { text: '(the mission failed: ' + ((e && e.message) || e) + ')', meta: null }; }
@@ -9305,7 +9471,7 @@
       var lines = [ '# ' + (chatSessionName || 'Page conversation'), '' ];
       tl.forEach(function (t) {
         if (t.role === 'user') lines.push('**You:** ' + String(t.content || ''));
-        else if (t.role === 'assistant') lines.push('**Swarm:** ' + String(t.content || ''));
+        else if (t.role === 'assistant') lines.push('**Page:** ' + String(t.content || '')); // Edit here (the text string between the ** :**) to change the default Ai Assistant name
         else return;
         lines.push('');
       });
@@ -9348,22 +9514,23 @@
     }
     async function runLocal() {
       var myGen = ++runGen;
-      teardown(); running = []; stopped = false;
+      teardown(); running = []; stopped = false; blackboard = [];
       await decompose();
       var subtasks = readTasks(); if (!subtasks.length) { feed('error', 'no subtasks -- set an objective'); return; }
-      var nWorkers = parseInt($('workers').value, 10) || 3;
-      var conc = parseInt($('conc').value, 10) || 2;
+      var nWorkers = numVal('workers', 3);
+      var conc = numVal('conc', 2);
       var tools = currentTools(); lastToolset = tools;
       beginRun();
       clearCards(); subtasks.forEach(function (g, i) { makeCard(i, g); }); setMeter();
       runT0 = Date.now(); autopilot = makeAutopilot();
       meterPoll = null;
       try {
-        var driver = deployLocalAgents(nWorkers);
+        var nDeploy = clamp(subtasks.length, 1, nWorkers);   // B1: deploy only as many agents as there are subtasks
+        var driver = deployLocalAgents(nDeploy);
         await new Promise(function (r) { setTimeout(r, 40); });
         if (stopped || myGen !== runGen) return;
         refreshPresence(driver);
-        feed('start', 'deploying ' + subtasks.length + ' subtasks to ' + nWorkers + ' agents (parallel ' + conc + ')');
+        feed('start', 'deploying ' + subtasks.length + ' subtasks to ' + nDeploy + ' agents (parallel ' + conc + ')');
         var tasks = subtasks.map(function (g, i) { return { goal:g, idx:i, tools:tools }; });
         meterPoll = setInterval(setMeter, 300);
         var results = await driver.dispatchMany(tasks, { concurrency:conc, timeoutMs:TASK_TIMEOUT });
@@ -9446,7 +9613,7 @@
       await decompose();
       var subtasks = readTasks(); if (!subtasks.length) { feed('error', 'no subtasks'); return; }
       if (!roleSwarm.workers().length) { feed('error', 'no worker tabs found -- open this app in another tab, switch it to NODE, and Start serving'); return; }
-      var conc = parseInt($('conc').value, 10) || 2; var tools = currentTools();
+      var conc = numVal('conc', 2); var tools = currentTools();
       beginRun();
       clearCards(); subtasks.forEach(function (g, i) { makeCard(i, g); cardStatus(i, 'running', 'remote'); });
       feed('start', 'dispatching ' + subtasks.length + ' subtasks to ' + roleSwarm.workers().length + ' node(s)');
@@ -9519,26 +9686,20 @@
     function applyMode(m) {
       mode = m;
       var isWorker = (m === 'worker'), isChat = (m === 'chat');
-      $('cfg-pool').style.display = (isWorker) ? 'none' : 'flex';
-      $('cfg-tasks').style.display = (isWorker || isChat) ? 'none' : '';
-      $('cfg-goal').style.display = (isWorker || isChat) ? 'none' : '';
-      $('cfg-decomp').style.display = (isWorker) ? 'none' : '';
-      $('cfg-tools').style.display = (isWorker) ? 'none' : '';
-      $('go').style.display = (isWorker || isChat) ? 'none' : '';
-      $('stop').style.display = (isWorker || isChat) ? 'none' : '';
-      $('serve').style.display = (isWorker) ? '' : 'none';
+      var setup = !(isWorker || isChat);
+      show('cfg-tasks', setup); show('cfg-goal', setup); show('go', setup); show('stop', setup);
+      show('serve', isWorker);
       // worker-stage vs chat panel
-      if ($('stage-hd')) $('stage-hd').style.display = isChat ? 'none' : '';
-      $('cards').style.display = isChat ? 'none' : '';
-      if (isChat && $('agg')) $('agg').style.display = 'none';
-      if ($('chat-panel')) $('chat-panel').style.display = isChat ? '' : 'none';
+      show('stage-hd', !isChat); show('cards', !isChat);
+      if (isChat) show('agg', false);
+      show('chat-panel', isChat);
       $('role-tag').textContent = isChat ? 'chat' : (m === 'local' ? 'local' : (m === 'user' ? 'user' : 'worker'));
       Array.prototype.forEach.call(document.querySelectorAll('#modes button'), function (b) { var on = b.getAttribute('data-m') === m; b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
       teardown(); roleSwarm = null; if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
       stopKeepAwake();
       $('peer-n').textContent = '0'; $('presence').innerHTML = '<div class="hint">No peers yet.</div>';
       $('hint').textContent = isChat
-        ? 'Chat mode: each message runs a full Page mission and the synthesis becomes the reply. Worker count, tools, and decomposition above shape every turn.'
+        ? 'Chat replies directly in the conversation. Runs as a multi-agent mission. Type something to get started. Chat, search, generate an image. It\'s an Ai, so expect it to be wrong. Don\'t take any advice from it.'
         : (m === 'local'
           ? 'All agents run in this tab over an in-page bus. Fully self-contained.'
           : (m === 'user' ? 'This tab dispatches to NODE tabs over ' + (caps.bus ? 'the companion bus (any generator)' : 'weld.sync (same-origin tabs)') + '. Open another tab as NODE and Start serving. Timed-out nodes are auto-reassigned.'
@@ -9556,7 +9717,7 @@
       $('modes').setAttribute('role', 'tablist'); $('modes').setAttribute('aria-label', 'Run mode');
       MODES.forEach(function (m) { var b = document.createElement('button'); b.textContent = m.label; b.setAttribute('data-m', m.id); b.setAttribute('role', 'tab'); b.onclick = function () { applyMode(m.id); }; $('modes').appendChild(b); });
       // ---- accessibility: label the controls a screen reader would otherwise read as bare text ----
-      var ARIA = { 'go':'Deploy swarm', 'stop':'Stop run', 'import':'Import setup from file', 'export-setup':'Export setup', 'share-link':'Copy a shareable link', 'diag':'Copy diagnostics', 'data':'How your data is handled', 'feed-clear':'Clear activity log', 'img-cfg-btn':'Image defaults', 'agg-copy':'Copy synthesis', 'agg-export':'Export synthesis as Markdown', 'agg-export-json':'Export run as JSON', 'theme':'Toggle dark mode', 'verbose':'Toggle raw model input/output' };
+      var ARIA = { 'go':'Deploy Page', 'stop':'Stop run', 'import':'Import setup from file', 'export-setup':'Export setup', 'share-link':'Copy a shareable link', 'diag':'Copy diagnostics', 'data':'How your data is handled', 'feed-clear':'Clear activity log', 'img-cfg-btn':'Image defaults', 'agg-copy':'Copy synthesis', 'agg-export':'Export synthesis as Markdown', 'agg-export-json':'Export run as JSON', 'theme':'Toggle dark mode', 'verbose':'Toggle raw model input/output' };
       Object.keys(ARIA).forEach(function (id) { var el = $(id); if (el) el.setAttribute('aria-label', ARIA[id]); });
       var im = $('img-modal'); if (im) { im.setAttribute('role', 'dialog'); im.setAttribute('aria-modal', 'true'); im.setAttribute('aria-label', 'Image defaults'); }
       // ---- keyboard shortcuts: Cmd/Ctrl+Enter = deploy or stop; Esc = close modal or stop ----
@@ -9564,53 +9725,61 @@
         if (e.key === 'Escape') { if (im && im.style.display === 'flex') { closeImgModal(); } else if ($('priv-modal') && $('priv-modal').style.display === 'flex') { closeDataModal(); } else if ($('stop') && !$('stop').disabled) { stopAll(); } return; }
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); if ($('go') && !$('go').disabled) $('go').click(); else if ($('stop') && !$('stop').disabled) $('stop').click(); }
       });
-      $('theme').onclick = toggleTheme;
+      wire('theme', 'click', toggleTheme);
+      wire('settings-btn', 'click', openSettings);
+      wire('settings-x', 'click', function () { showModal('settings-modal', false); });
+      wire('settings-done', 'click', function () { showModal('settings-modal', false); });
+      if ($('settings-modal')) $('settings-modal').addEventListener('click', function (e) { if (e.target === $('settings-modal')) showModal('settings-modal', false); });
+      wire('set-dark', 'change', function () { applyTheme($('set-dark').checked ? 'dark' : 'light'); saveDraft(); });
       // decomposition + tools
       fillSelect($('decomp'), DECOMP);
       TOOLS.forEach(function (t) { var b = document.createElement('span'); b.className = 'tg' + (t.on ? ' on' : ''); b.setAttribute('data-tool', t.id); b.textContent = t.label; b.onclick = function () { b.classList.toggle('on'); }; $('tools').appendChild(b); });
       // sliders + inputs (debounced persistence so typing doesn't slam the db)
-      $('workers').oninput = function () { $('workers-v').textContent = $('workers').value; saveDraft(); };
-      $('conc').oninput = function () { $('conc-v').textContent = $('conc').value; saveDraft(); };
-      $('tasks').oninput = function () { syncTaskN(); saveDraft(); };
-      $('goal').oninput = saveDraft;
-      $('decomp').onchange = function () { if (DECOMP[parseInt($('decomp').value, 10)].id !== 'manual') decompose(); saveDraft(); };
+      wire('workers', 'input', function () { $('workers-v').textContent = $('workers').value; saveDraft(); });
+      wire('conc', 'input', function () { $('conc-v').textContent = $('conc').value; saveDraft(); });
+      wire('tasks', 'input', function () { syncTaskN(); saveDraft(); });
+      wire('goal', 'input', saveDraft);
+      wire('decomp', 'change', function () { if (DECOMP[parseInt($('decomp').value, 10)].id !== 'manual') decompose(); saveDraft(); });
       // actions
-      $('go').onclick = function () { autoEnableImage(); t0 = Date.now(); $('feed').innerHTML = ''; if (mode === 'local') runLocal(); else runUser(); };
-      $('serve').onclick = function () { t0 = Date.now(); $('feed').innerHTML = ''; startServing(); };
-      $('stop').onclick = stopAll;
-      $('feed-clear').onclick = function () { $('feed').innerHTML = ''; };
-      $('diag').onclick = copyDiagnostics;
-      $('share-link').onclick = shareLink;
-      if ($('chat-send')) $('chat-send').onclick = submitTurn;
-      if ($('chat-stop')) $('chat-stop').onclick = stopChat;
+      wire('go', 'click', function () { autoEnableImage(); t0 = Date.now(); $('feed').innerHTML = ''; if (mode === 'local') runLocal(); else runUser(); });
+      wire('serve', 'click', function () { t0 = Date.now(); $('feed').innerHTML = ''; startServing(); });
+      wire('stop', 'click', stopAll);
+      wire('feed-clear', 'click', function () { $('feed').innerHTML = ''; });
+      wire('diag', 'click', copyDiagnostics);
+      wire('share-link', 'click', shareLink);
+      wire('chat-send', 'click', submitTurn);
+      wire('chat-stop', 'click', stopChat);
       if ($('chat-input')) $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitTurn(); } });
-      if ($('chat-sessions')) $('chat-sessions').onchange = function () { if (this.value) loadChatSession(this.value); };
-      if ($('chat-new')) $('chat-new').onclick = newChatSession;
-      if ($('chat-rename')) $('chat-rename').onclick = renameChatSession;
-      if ($('chat-del')) $('chat-del').onclick = deleteChatSession;
-      if ($('chat-export-md')) $('chat-export-md').onclick = chatExportMd;
-      if ($('chat-export-json')) $('chat-export-json').onclick = chatExportJson;
+      wire('chat-sessions', 'change', function () { if (this.value) loadChatSession(this.value); });
+      wire('chat-new', 'click', newChatSession);
+      wire('chat-rename', 'click', renameChatSession);
+      wire('chat-del', 'click', deleteChatSession);
+      wire('chat-export-md', 'click', chatExportMd);
+      wire('chat-export-json', 'click', chatExportJson);
+      wire('chat-respond', 'click', respondLast);
+      wire('chat-swarm', 'click', function () { $('chat-swarm').classList.toggle('on'); });
       try { window.__shareCodec = { encode: encodeShare, decode: decodeShare, unwrap: unwrapEnvelope }; } catch (e) {}   // harness hook
       try { window.__auditAnswer = auditAnswer; } catch (e) {}   // harness hook
       registerPrivacy();
-      $('data').onclick = openDataModal;
-      $('priv-modal-x').onclick = closeDataModal; $('priv-ok').onclick = closeDataModal;
-      $('priv-modal').onclick = function (e) { if (e.target === $('priv-modal')) closeDataModal(); };
-      $('verbose').onclick = function () { $('verbose').classList.toggle('on'); };
-      $('hist').onchange = function () { restoreRun($('hist').value); };
-      $('agg-copy').onclick = function () { try { navigator.clipboard.writeText($('agg-body').textContent); $('agg-copy').textContent = 'copied'; setTimeout(function () { $('agg-copy').textContent = 'copy'; }, 1200); } catch (e) {} };
-      $('agg-export').onclick = exportMd;
-      $('agg-export-json').onclick = exportJson;
-      $('export-setup').onclick = exportJson;   // settings + inputs snapshot (works before a run too)
-      $('import').onclick = function () { $('importfile').value = ''; $('importfile').click(); };
-      $('importfile').onchange = function (e) { importFile(e.target.files && e.target.files[0]); };
+      wire('data', 'click', openDataModal);
+      wire('priv-modal-x', 'click', closeDataModal);
+      wire('priv-ok', 'click', closeDataModal);
+      wire('priv-modal', 'click', function (e) { if (e.target === $('priv-modal')) closeDataModal(); });
+      wire('verbose', 'click', function () { $('verbose').classList.toggle('on'); });
+      wire('hist', 'change', function () { restoreRun($('hist').value); });
+      wire('agg-copy', 'click', function () { try { navigator.clipboard.writeText($('agg-body').textContent); $('agg-copy').textContent = 'copied'; setTimeout(function () { $('agg-copy').textContent = 'copy'; }, 1200); } catch (e) {} });
+      wire('agg-export', 'click', exportMd);
+      wire('agg-export-json', 'click', exportJson);
+      wire('export-setup', 'click', exportJson);   // settings + inputs snapshot (works before a run too)
+      wire('import', 'click', function () { $('importfile').value = ''; $('importfile').click(); });
+      wire('importfile', 'change', function (e) { importFile(e.target.files && e.target.files[0]); });
       // image-defaults popup
       imgStyleOptions();
-      $('img-cfg-btn').onclick = openImgModal;
-      $('img-modal-x').onclick = closeImgModal;
-      $('img-modal').onclick = function (e) { if (e.target === $('img-modal')) closeImgModal(); };
-      $('img-g').oninput = function () { $('img-g-v').textContent = (+$('img-g').value) ? $('img-g').value : 'default'; };
-      $('img-save').onclick = function () { readImgCfgUI(); saveDraft(); closeImgModal(); feed('info', 'image defaults saved'); };
+      wire('img-cfg-btn', 'click', openImgModal);
+      wire('img-modal-x', 'click', closeImgModal);
+      wire('img-modal', 'click', function (e) { if (e.target === $('img-modal')) closeImgModal(); });
+      wire('img-g', 'input', function () { $('img-g-v').textContent = (+$('img-g').value) ? $('img-g').value : 'default'; });
+      wire('img-save', 'click', function () { readImgCfgUI(); saveDraft(); closeImgModal(); feed('info', 'image defaults saved'); });
       applyMode('local');
       try { if (window.weld && window.weld.tokens && window.weld.tokens.preload) window.weld.tokens.preload().catch(function () {}); } catch (e) {}   // warm the tokenizer; estimate fallback if it can't load
       refreshQuota(true);   // storage-usage line for diag + one-time near-full warning
