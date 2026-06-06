@@ -2267,7 +2267,7 @@
   //   :runs     index of run ids (most-recent-first)
   // -----------------------------------------------------------------
 
-  var BUILD = 'crew/2026-06-06.3';
+  var BUILD = 'crew/2026-06-06.4';
 
   // ---- storage: lean on skybridge (companion -> persist -> memory), else our own fallback ----
   function makeStore() {
@@ -2498,7 +2498,7 @@
 
         var transcript = 'GOAL: ' + rec.goal + '\n\n' + rec.steps.map(function (s, i) {
           var line = '[step ' + (i + 1) + '] thought: ' + (s.thought || '');
-          if (s.tool) line += '\naction: ' + s.tool + ' ' + JSON.stringify(s.args || {}) + '\nobservation: ' + JSON.stringify(s.observation);
+          if (s.tool) { var _o = JSON.stringify(s.observation), _cap = (i >= rec.steps.length - 2) ? 1000 : 200; if (typeof _o === 'string' && _o.length > _cap) _o = _o.slice(0, _cap) + '\u2026[+' + (_o.length - _cap) + ' chars]'; line += '\naction: ' + s.tool + ' ' + JSON.stringify(s.args || {}) + '\nobservation: ' + _o; }
           return line;
         }).join('\n\n');
         transcript += '\n\nSteps remaining: ' + (cap - rec.steps.length) + '. ' + ((cap - rec.steps.length) <= 1 ? 'Reply now with your final answer.' : 'Finalize as soon as you can answer; do not waste steps.') + '\n\nReply with the next JSON step.';
@@ -8018,7 +8018,7 @@
     var SW = (window.weld && window.weld.swarm) || null;
     var CR = (window.weld && window.weld.crew) || null;
     var sb = (window.weld && window.weld.skybridge) || null;
-    var APP_BUILD = 'swarm-app/2026-06-06.3';
+    var APP_BUILD = 'swarm-app/2026-06-06.5';
     // native ai-text is slow and serialized through one broker, so multi-step ReAct runs take
     // minutes, not seconds, so give each dispatched subtask a generous ceiling before timing out.
     var TASK_TIMEOUT = 240000;
@@ -8833,8 +8833,8 @@
           sys = 'You plan a set of images. Output strictly a JSON array of ' + n + ' short, distinct image briefs (vary the pose, angle, scene, or mood) for the requested subject. Nothing else.';
           p = 'Give ' + n + ' distinct image briefs for: ' + goal;
         } else {
-          sys = 'You decompose objectives into parallelizable subtasks. Output strictly a JSON array of short strings, nothing else.';
-          p = 'Break this objective into exactly ' + n + ' concise, independent subtasks. Reply with ONLY a JSON array of strings.\n\nObjective: ' + goal;
+          sys = 'You decompose objectives into parallelizable subtasks that do NOT overlap. Output strictly a JSON array of short strings, nothing else.';
+          p = 'Break this objective into exactly ' + n + ' concise subtasks that are independent and non-overlapping (each a distinct part, no duplication) and that together fully cover the objective. Reply with ONLY a JSON array of strings.\n\nObjective: ' + goal;
         }
         var txt = await genText(p, sys);
         var list = parseTaskList(txt, n);
