@@ -368,7 +368,7 @@
       <div id="chat-panel" style="display:none;">
         <div class="stage-hd">
           <h2>conversation</h2>
-          <span class="meter" id="chat-meter">ready</span>
+          <span class="meter" id="chat-meter" role="status" aria-live="polite">ready</span>
         </div>
         <div class="chat-bar">
           <select id="chat-sessions" class="hist" title="Switch conversation"><option value="">no saved conversations</option></select>
@@ -394,7 +394,7 @@
       </div>
       <div class="panel" style="margin-top:14px;">
         <div class="hd">activity <span class="tag mini" id="diag" title="copy a diagnostics report">diag</span> <span class="tag mini" id="data" title="how your data is handled">data</span> <span class="tag mini" id="feed-clear">clear</span></div>
-        <div class="bd"><div class="feed" id="feed"></div></div>
+        <div class="bd"><div class="feed" id="feed" role="log" aria-live="polite"></div></div>
       </div>
     </div>
   </div>
@@ -2267,7 +2267,7 @@
   //   :runs     index of run ids (most-recent-first)
   // -----------------------------------------------------------------
 
-  var BUILD = 'crew/2026-06-06.4';
+  var BUILD = 'crew/2026-06-06.5';
 
   // ---- storage: lean on skybridge (companion -> persist -> memory), else our own fallback ----
   function makeStore() {
@@ -2486,7 +2486,7 @@
         await scratchpad.clear();
       }
       await saveRun(rec);
-      onStep({ type: 'start', runId: rec.id, goal: rec.goal });
+      onStep({ type: 'start', runId: rec.id, goal: rec.goal }); var badParses = 0;
 
       while (rec.steps.length < cap) {
         if (stopped) { rec.status = 'stopped'; await saveRun(rec); return { ok: false, reason: 'stopped', runId: rec.id, steps: rec.steps }; }
@@ -2512,11 +2512,19 @@
         onStep({ type: 'raw', reply: String(reply) });
         var parsed = extractJSON(reply);
         if (!parsed) {
-          // model answered in prose; treat as the final answer
+          if (badParses < 1) {
+            badParses++;
+            rec.steps.push({ thought: '', tool: '(format-reminder)', args: {}, observation: 'Your previous reply was not valid JSON. Reply with EXACTLY one JSON object and nothing else: either a tool call with keys thought, tool, args; or a final answer with keys thought, final.', t: Date.now() });
+            await saveRun(rec);
+            onStep({ type: 'observation', tool: '(format-reminder)', observation: 'invalid JSON; re-asking (attempt ' + badParses + ')' });
+            continue;
+          }
+          // retries exhausted: accept the prose reply as the final answer (original fallback)
           rec.status = 'done'; rec.result = String(reply).trim(); await saveRun(rec);
           onStep({ type: 'final', answer: rec.result });
           return { ok: true, answer: rec.result, runId: rec.id, steps: rec.steps };
         }
+        badParses = 0;
 
         var step = { thought: parsed.thought || '', tool: null, args: null, observation: null, t: Date.now() };
         if (parsed.thought) { await scratchpad.write(parsed.thought); onStep({ type: 'thought', thought: parsed.thought }); }
@@ -2544,7 +2552,7 @@
 
       rec.status = 'maxsteps'; await saveRun(rec);
       onStep({ type: 'maxsteps', steps: rec.steps.length });
-      return { ok: false, reason: 'maxsteps', runId: rec.id, steps: rec.steps };
+      return { ok: false, answer: '', reason: 'maxsteps', runId: rec.id, steps: rec.steps };
     }
 
     return {
@@ -8018,7 +8026,7 @@
     var SW = (window.weld && window.weld.swarm) || null;
     var CR = (window.weld && window.weld.crew) || null;
     var sb = (window.weld && window.weld.skybridge) || null;
-    var APP_BUILD = 'swarm-app/2026-06-06.5';
+    var APP_BUILD = 'swarm-app/2026-06-06.7';
     // native ai-text is slow and serialized through one broker, so multi-step ReAct runs take
     // minutes, not seconds, so give each dispatched subtask a generous ceiling before timing out.
     var TASK_TIMEOUT = 240000;
