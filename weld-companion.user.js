@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.0.0
+// @version      1.6.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -16,7 +16,9 @@
 // @connect      api.openai.com
 // @connect      api.anthropic.com
 // @connect      generativelanguage.googleapis.com
+// @connect      api.duckduckgo.com
 // @connect      perchance.org
+// @connect      *
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -721,38 +723,127 @@
       label: 'OpenAI (GPT)', keyHint: 'sk-\u2026', defaultModel: 'gpt-4o',
       url: function () { return 'https://api.openai.com/v1/chat/completions'; },
       headers: function (key) { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }; },
-      body: function (model, sys, user) { return JSON.stringify({ model: model, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.7 }); },
+      body: function (model, sys, user, json) { var b = { model: model, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.7 }; if (json) b.response_format = { type: 'json_object' }; return JSON.stringify(b); },
       extract: function (j) { return j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content; }
     },
     anthropic: {
       label: 'Anthropic (Claude)', keyHint: 'sk-ant-\u2026', defaultModel: 'claude-sonnet-4-20250514',
       url: function () { return 'https://api.anthropic.com/v1/messages'; },
       headers: function (key) { return { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }; },
-      body: function (model, sys, user) { return JSON.stringify({ model: model, max_tokens: 4096, system: sys, messages: [{ role: 'user', content: user }] }); },
-      extract: function (j) { return j && j.content && j.content[0] && j.content[0].text; }
+      body: function (model, sys, user, json) { var msgs = [{ role: 'user', content: user }]; if (json) msgs.push({ role: 'assistant', content: '{' }); return JSON.stringify({ model: model, max_tokens: 4096, system: sys, messages: msgs }); },
+      extract: function (j, json) { var t = j && j.content && j.content[0] && j.content[0].text; return (json && typeof t === 'string') ? ('{' + t) : t; }
     },
     google: {
       label: 'Google (Gemini)', keyHint: 'AIza\u2026', defaultModel: 'gemini-1.5-pro',
       url: function (model, key) { return 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key); },
       headers: function () { return { 'Content-Type': 'application/json' }; },
-      body: function (model, sys, user) { return JSON.stringify({ systemInstruction: { parts: [{ text: sys }] }, contents: [{ role: 'user', parts: [{ text: user }] }] }); },
+      body: function (model, sys, user, json) { var b = { systemInstruction: { parts: [{ text: sys }] }, contents: [{ role: 'user', parts: [{ text: user }] }] }; if (json) b.generationConfig = { responseMimeType: 'application/json' }; return JSON.stringify(b); },
       extract: function (j) { try { return j.candidates[0].content.parts[0].text; } catch (e) { return null; } }
     }
   };
   function aiConfig() { return gget('ai', { provider: 'builtin', keys: {}, models: {}, instruction: '' }); }
-  function callOwnAI(cfg, sys, user, cb) {
+  // D4 consumer: apply a per-call output cap. The bridge has always forwarded maxTokens; the
+  // companion now honors it (provider-specific field). Merges, so it co-exists with json mode.
+  function sbApplyMaxTokens(provider, b, n) {
+    n = n | 0; if (n <= 0 || !b) return;
+    if (provider === 'openai') b.max_tokens = n;
+    else if (provider === 'anthropic') b.max_tokens = n;          // overrides the default 4096
+    else if (provider === 'google') { b.generationConfig = b.generationConfig || {}; b.generationConfig.maxOutputTokens = n; }
+  }
+  function callOwnAI(cfg, sys, user, cb, json, maxTokens) {
     var p = PROVIDERS[cfg.provider]; if (!p) return cb('Unknown provider', null);
     var key = (cfg.keys || {})[cfg.provider]; if (!key) return cb('No API key set for ' + p.label, null);
     var model = (cfg.models || {})[cfg.provider] || p.defaultModel;
+    var bodyStr = p.body(model, sys, user, json);
+    if (maxTokens) { try { var bo = JSON.parse(bodyStr); sbApplyMaxTokens(cfg.provider, bo, maxTokens); bodyStr = JSON.stringify(bo); } catch (e) {} }
     GM_xmlhttpRequest({
-      method: 'POST', url: p.url(model, key), headers: p.headers(key), data: p.body(model, sys, user),
+      method: 'POST', url: p.url(model, key), headers: p.headers(key), data: bodyStr,
       onload: function (res) {
-        try { var j = JSON.parse(res.responseText); var txt = p.extract(j);
+        try { var j = JSON.parse(res.responseText); var txt = p.extract(j, json);
           if (txt) cb(null, txt); else cb('No text in response: ' + res.responseText.slice(0, 200), null);
         } catch (e) { cb('Parse error: ' + e.message, null); }
       },
       onerror: function () { cb('Network error contacting ' + p.label, null); }
     });
+  }
+
+  // ---- D3: streaming the own-model completion over the bridge ----------------
+  // Per-provider streaming: reuse the D2 body() (incl. json prefill) and add the
+  // provider's stream switch; Gemini streams via a different ENDPOINT, not a body flag.
+  var STREAM = {
+    openai: {
+      url: function (m, k) { return PROVIDERS.openai.url(); },
+      body: function (m, s, u, j) { var b = JSON.parse(PROVIDERS.openai.body(m, s, u, j)); b.stream = true; return JSON.stringify(b); }
+    },
+    anthropic: {
+      url: function (m, k) { return PROVIDERS.anthropic.url(); },
+      body: function (m, s, u, j) { var b = JSON.parse(PROVIDERS.anthropic.body(m, s, u, j)); b.stream = true; return JSON.stringify(b); }
+    },
+    google: {
+      url: function (m, k) { return 'https://generativelanguage.googleapis.com/v1beta/models/' + m + ':streamGenerateContent?alt=sse&key=' + encodeURIComponent(k); },
+      body: function (m, s, u, j) { return PROVIDERS.google.body(m, s, u, j); }
+    }
+  };
+  // Pure: pull the text delta out of one parsed SSE data object, per provider. Unit-tested.
+  function sbStreamDelta(provider, obj) {
+    if (!obj) return '';
+    if (provider === 'openai') return (obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content) || '';
+    if (provider === 'anthropic') return (obj.type === 'content_block_delta' && obj.delta && obj.delta.type === 'text_delta') ? (obj.delta.text || '') : '';
+    if (provider === 'google') { try { return obj.candidates[0].content.parts[0].text || ''; } catch (e) { return ''; } }
+    return '';
+  }
+  // Pure: split an SSE buffer into complete 'data:' payload strings + the unparsed tail.
+  // [DONE] and non-data lines are dropped; an incomplete trailing line is returned as rest.
+  function sbSSEData(buffer) {
+    var parts = String(buffer || '').split('\n');
+    var rest = parts.pop();
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var line = parts[i].replace(/\r$/, '').trim();
+      if (line.indexOf('data:') !== 0) continue;
+      var d = line.slice(5).trim();
+      if (d && d !== '[DONE]') out.push(d);
+    }
+    return { data: out, rest: rest };
+  }
+  // Stream a completion: emit(delta) per token chunk, then cb(null, fullText). GM_xmlhttpRequest
+  // delivers responseText cumulatively in onprogress; we parse only newly-completed SSE lines.
+  function callOwnAIStream(cfg, sys, user, json, maxTokens, emit, cb) {
+    var prov = cfg.provider;
+    var p = PROVIDERS[prov]; if (!p) return cb('Unknown provider', null);
+    var key = (cfg.keys || {})[prov]; if (!key) return cb('No API key set for ' + p.label, null);
+    var st = STREAM[prov]; if (!st) return callOwnAI(cfg, sys, user, cb, json, maxTokens);   // no stream cfg -> fall back to single-shot
+    var model = (cfg.models || {})[prov] || p.defaultModel;
+    var bodyStr = st.body(model, sys, user, json);
+    if (maxTokens) { try { var bo = JSON.parse(bodyStr); sbApplyMaxTokens(prov, bo, maxTokens); bodyStr = JSON.stringify(bo); } catch (e) {} }
+    var acc = '', buf = '', lastLen = 0, done = false;
+    function pump(text) {
+      text = text || '';
+      if (text.length <= lastLen) return;
+      buf += text.slice(lastLen); lastLen = text.length;
+      var r = sbSSEData(buf); buf = r.rest;
+      for (var i = 0; i < r.data.length; i++) {
+        var obj = null; try { obj = JSON.parse(r.data[i]); } catch (e) { continue; }
+        var delta = sbStreamDelta(prov, obj);
+        if (delta) { acc += delta; try { emit(delta); } catch (e) {} }
+      }
+    }
+    function finish(err) {
+      if (done) return; done = true;
+      if (err) return cb(err, null);
+      var val = (json && prov === 'anthropic') ? ('{' + acc) : acc;   // mirror the D2 prefill: chunks are the continuation
+      cb(null, val);
+    }
+    try {
+      GM_xmlhttpRequest({
+        method: 'POST', url: st.url(model, key), headers: p.headers(key), data: bodyStr,
+        timeout: 120000, anonymous: true,
+        onprogress: function (res) { try { pump(res.responseText); } catch (e) {} },
+        onload: function (res) { try { pump(res.responseText); } catch (e) {} finish(null); },
+        onerror: function () { finish('Network error contacting ' + p.label); },
+        ontimeout: function () { finish('timeout'); }
+      });
+    } catch (e) { finish(String((e && e.message) || e)); }
   }
   function renderAI(body) {
     var cfg = aiConfig();
@@ -846,7 +937,7 @@
   // call here and post only the completion back down.
   var SB = 'weld.skybridge';
   var SB_PROTO_MIN = 1, SB_PROTO_MAX = 1;
-  var SB_CAPS = ['storage', 'ai'];          // what this companion offers
+  var SB_CAPS = ['storage', 'ai', 'fetch', 'search', 'model'];  // what this companion offers
 
   // The userscript manager runs us in a sandbox where `window` is a wrapper:
   // a 'message' listener placed on it may NOT receive the page's real
@@ -857,7 +948,7 @@
   var SB_WIN = (function () {
     try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; } catch (e) { return window; }
   })();
-  var SB_BUILD = 'sb-anchor/2026-06-04.2';   // bump on every change; printed at mount so a stale userscript is obvious
+  var SB_BUILD = 'sb-anchor/2026-06-06.6';   // bump on every change; printed at mount so a stale userscript is obvious
   // verbose-logging toggle: ?sbdebug in the URL, or window.WELD_SKYBRIDGE_DEBUG = true
   var SB_DEBUG = false;
   try {
@@ -887,7 +978,7 @@
       var prior = sbPermFor(gen, cap);
       if (prior === true) return resolve(true);
       if (prior === false) return resolve(false);   // remembered "no"
-      var labels = { storage: 'save data that persists across generators', ai: 'use your own AI model' };
+      var labels = { storage: 'save data that persists across generators', ai: 'use your own AI model', fetch: 'fetch pages from the web on its behalf', search: 'search the web on its behalf', model: 'read which AI model you have configured (name only -- never your API key)' };
       var what = labels[cap] || ('use the "' + cap + '" capability');
       var msg = 'This generator (' + (gen || 'unknown') + ') wants to ' + what + ' via Weld Companion.\n\nAllow it? (remembered for this generator)';
       var ok = false;
@@ -929,7 +1020,7 @@
     });
   }
 
-  function sbServiceAI(payload) {
+  function sbServiceAI(payload, emit) {
     return new Promise(function (resolve) {
       var cfg = aiConfig();
       if (!cfg || cfg.provider === 'builtin' || !cfg.provider) {
@@ -937,11 +1028,164 @@
       }
       var sys = payload.system || 'You are a helpful assistant inside a Perchance generator.';
       var user = String(payload.prompt || '');
-      // callOwnAI uses the user's stored key HERE; only the completion goes back.
-      callOwnAI(cfg, sys, user, function (err, txt) {
+      function done(err, txt) {
         if (err) resolve({ ok: false, reason: String(err).slice(0, 120) });
-        else resolve({ ok: true, value: txt });
+        else resolve({ ok: true, value: txt });   // terminal reply still carries the full text
+      }
+      // D3: stream when the caller wired onChunk (payload.stream) AND we can emit partials down.
+      // The stored key is used HERE; only completion text (chunks + full) goes back, never the key.
+      var maxTokens = (payload.maxTokens != null) ? (payload.maxTokens | 0) : 0;
+      if (payload.stream && typeof emit === 'function') callOwnAIStream(cfg, sys, user, !!payload.json, maxTokens, emit, done);
+      else callOwnAI(cfg, sys, user, done, !!payload.json, maxTokens);
+    });
+  }
+
+  // D1: 'fetch' capability -- the companion runs OUTSIDE the sandbox, so GM_xmlhttpRequest can
+  // reach URLs the in-sandbox weld.fetch cannot (CORS-blocked, arbitrary hosts). Consent-gated per
+  // generator. Defense in depth: http(s) only, private/loopback/link-local hosts blocked, cookies
+  // never sent (anonymous), body size + time capped. (It cannot stop DNS-rebinding to a private IP
+  // -- the guard only inspects the literal hostname.)
+  function sbParseHeaders(raw) {
+    var h = {};
+    try {
+      String(raw || '').split(/\r?\n/).forEach(function (line) {
+        var i = line.indexOf(':'); if (i <= 0) return;
+        var k = line.slice(0, i).trim().toLowerCase(); var v = line.slice(i + 1).trim();
+        if (k) h[k] = v;
       });
+    } catch (e) {}
+    return h;
+  }
+  function sbFetchGuard(rawUrl) {
+    var u;
+    try { u = new URL(String(rawUrl)); } catch (e) { return { ok: false, reason: 'bad-url' }; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, reason: 'scheme-blocked' };
+    var host = (u.hostname || '').toLowerCase();
+    if (!host) return { ok: false, reason: 'no-host' };
+    if (host === 'localhost' || host === '0.0.0.0' || host === '::1' || host === '[::1]') return { ok: false, reason: 'local-blocked' };
+    if (/\.local$|\.internal$|\.localhost$/.test(host)) return { ok: false, reason: 'local-blocked' };
+    var m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      var a = +m[1], b = +m[2];
+      if (a === 0 || a === 127 || a === 10 || (a === 169 && b === 254) || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)) return { ok: false, reason: 'private-ip-blocked' };
+    }
+    if (host.indexOf(':') !== -1 && /^\[?(?:::1|fe80|fc|fd)/i.test(host)) return { ok: false, reason: 'private-ip-blocked' };
+    return { ok: true, url: u.href };
+  }
+  function sbServiceFetch(payload) {
+    return new Promise(function (resolve) {
+      var guard = sbFetchGuard(payload && payload.url);
+      if (!guard.ok) { resolve({ ok: false, reason: guard.reason }); return; }   // no numeric status -> caller falls through to its own tiers
+      var method = String((payload && payload.method) || 'GET').toUpperCase();
+      if (['GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'PATCH'].indexOf(method) === -1) method = 'GET';
+      var headers = (payload && payload.headers && typeof payload.headers === 'object') ? payload.headers : undefined;
+      var CAP = 200 * 1024;   // cap the body so a huge page can't blow up the agent's context
+      try {
+        GM_xmlhttpRequest({
+          method: method, url: guard.url, headers: headers,
+          data: (payload && payload.body != null) ? payload.body : undefined,
+          timeout: 15000, anonymous: true,                 // never send the user's cookies to arbitrary sites
+          onload: function (res) {
+            var body = String(res.responseText || ''); var truncated = false;
+            if (body.length > CAP) { body = body.slice(0, CAP); truncated = true; }
+            resolve({ ok: res.status >= 200 && res.status < 400, status: res.status || 0, url: res.finalUrl || guard.url, headers: sbParseHeaders(res.responseHeaders), body: body, truncated: truncated });
+          },
+          onerror: function () { resolve({ ok: false, reason: 'network-error' }); },
+          ontimeout: function () { resolve({ ok: false, reason: 'timeout' }); }
+        });
+      } catch (e) { resolve({ ok: false, reason: String((e && e.message) || e).slice(0, 120) }); }
+    });
+  }
+
+  // C2: 'search' capability -- a keyless web search for in-page agents. Backed by DuckDuckGo's
+  // Instant Answer JSON API (documented + account-free), so results are sparse for arbitrary
+  // queries (it favors entities/definitions) but need no key. A richer keyed backend can be added
+  // later. Parsing is split into a pure function so it is unit-testable without a browser.
+  function sbParseSearch(data, max) {
+    var out = []; max = max || 5;
+    function push(title, url, snippet) {
+      if (!url || typeof url !== 'string') return;
+      out.push({ title: String(title || url).slice(0, 200), url: url, snippet: String(snippet || '').slice(0, 400) });
+    }
+    try {
+      if (data.AbstractText && data.AbstractURL) push(data.Heading || data.AbstractText, data.AbstractURL, data.AbstractText);
+      var rt = [].concat(data.Results || [], data.RelatedTopics || []);
+      for (var i = 0; i < rt.length && out.length < max + 4; i++) {
+        var t = rt[i];
+        if (t && t.Topics && t.Topics.length) {
+          for (var j = 0; j < t.Topics.length && out.length < max + 4; j++) {
+            var sub = t.Topics[j]; if (sub && sub.FirstURL) push(String(sub.Text || '').split(' - ')[0], sub.FirstURL, sub.Text);
+          }
+        } else if (t && t.FirstURL) {
+          push(String(t.Text || '').split(' - ')[0], t.FirstURL, t.Text);
+        }
+      }
+    } catch (e) {}
+    var seen = {}, res = [];
+    for (var k = 0; k < out.length && res.length < max; k++) { if (!seen[out[k].url]) { seen[out[k].url] = 1; res.push(out[k]); } }
+    return res;
+  }
+  function sbServiceSearch(payload) {
+    return new Promise(function (resolve) {
+      var q = String((payload && payload.query) || '').trim();
+      if (!q) { resolve({ ok: false, reason: 'empty-query' }); return; }
+      var max = Math.max(1, Math.min(10, (payload && +payload.max) || 5));
+      var url = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(q) + '&format=json&no_html=1&skip_disambig=1&t=weldcompanion';
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: url, timeout: 15000, anonymous: true,
+          onload: function (res) {
+            var data = null; try { data = JSON.parse(res.responseText || '{}'); } catch (e) {}
+            if (!data) { resolve({ ok: false, reason: 'bad-response' }); return; }
+            resolve({ ok: true, query: q, source: 'duckduckgo-instant-answer', results: sbParseSearch(data, max) });
+          },
+          onerror: function () { resolve({ ok: false, reason: 'network-error' }); },
+          ontimeout: function () { resolve({ ok: false, reason: 'timeout' }); }
+        });
+      } catch (e) { resolve({ ok: false, reason: String((e && e.message) || e).slice(0, 120) }); }
+    });
+  }
+
+  // D4: best-effort context/output limits by model-name prefix. Approximate and
+  // time-sensitive (providers revise these); a miss returns nulls, never a guess.
+  var MODEL_CTX = {
+    'gpt-4o':          { context: 128000,  maxOut: 16384 },
+    'gpt-4.1':         { context: 1000000, maxOut: 32768 },
+    'gpt-4-turbo':     { context: 128000,  maxOut: 4096 },
+    'gpt-4':           { context: 8192,    maxOut: 4096 },
+    'gpt-3.5':         { context: 16385,   maxOut: 4096 },
+    'o1':              { context: 200000,  maxOut: 100000 },
+    'o3':              { context: 200000,  maxOut: 100000 },
+    'o4':              { context: 200000,  maxOut: 100000 },
+    'claude-3-5':      { context: 200000,  maxOut: 8192 },
+    'claude-3.5':      { context: 200000,  maxOut: 8192 },
+    'claude-3-7':      { context: 200000,  maxOut: 64000 },
+    'claude-sonnet-4': { context: 200000,  maxOut: 64000 },
+    'claude-opus-4':   { context: 200000,  maxOut: 32000 },
+    'claude-haiku-4':  { context: 200000,  maxOut: 32000 },
+    'claude-3':        { context: 200000,  maxOut: 4096 },
+    'gemini-1.5-pro':  { context: 2000000, maxOut: 8192 },
+    'gemini-1.5':      { context: 1000000, maxOut: 8192 },
+    'gemini-2':        { context: 1000000, maxOut: 8192 }
+  };
+  function lookupModelLimits(model) {
+    var m = String(model || '').toLowerCase();
+    var best = null, bestLen = -1;
+    for (var k in MODEL_CTX) {
+      if (MODEL_CTX.hasOwnProperty(k) && m.indexOf(k) === 0 && k.length > bestLen) { best = MODEL_CTX[k]; bestLen = k.length; }
+    }
+    return best || { context: null, maxOut: null };
+  }
+  // D4 capability: report which own-model is configured + its (approx) limits.
+  // Pure metadata -- no network call, and crucially NO API key ever crosses the bridge.
+  function sbServiceModel() {
+    return new Promise(function (resolve) {
+      var cfg = aiConfig();
+      var prov = cfg && cfg.provider;
+      if (!prov || prov === 'builtin' || !PROVIDERS[prov]) { resolve({ ok: false, reason: 'no own model configured' }); return; }
+      var model = (cfg.models || {})[prov] || PROVIDERS[prov].defaultModel;
+      var lim = lookupModelLimits(model);
+      resolve({ ok: true, provider: prov, model: model, contextWindow: lim.context, maxOutput: lim.maxOut });
     });
   }
 
@@ -1005,8 +1249,12 @@
         var gen = genName() || 'unknown';
         sbConsent(gen, cap).then(function (allowed) {
           if (!allowed) { sbReply(source, ev.origin, nonce, { ok: false, reason: 'denied' }); return; }
+          var emitChunk = function (chunk) { sbReply(source, ev.origin, nonce, { partial: true, chunk: String(chunk == null ? '' : chunk) }); };
           var work = (cap === 'storage') ? sbServiceStorage(gen, d.payload || {})
-                   : (cap === 'ai')      ? sbServiceAI(d.payload || {})
+                   : (cap === 'ai')      ? sbServiceAI(d.payload || {}, emitChunk)
+                   : (cap === 'fetch')   ? sbServiceFetch(d.payload || {})
+                   : (cap === 'search')  ? sbServiceSearch(d.payload || {})
+                   : (cap === 'model')   ? sbServiceModel()
                    : Promise.resolve({ ok: false, reason: 'unsupported' });
           work.then(function (result) { sbReply(source, ev.origin, nonce, result || { ok: false, reason: 'error' }); });
         });

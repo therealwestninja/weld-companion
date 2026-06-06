@@ -106,6 +106,7 @@
   .card .ch { display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--line); font-size:12px; }
   .card .ch .idx { color:var(--clay); font-weight:600; font-family:var(--mono); }
   .card .ch .who { margin-left:8px; color:var(--faint); font-size:10.5px; font-family:var(--mono); }
+  .card .ch .ctype { font-size:9px; letter-spacing:.04em; text-transform:uppercase; font-family:var(--mono); color:var(--faint); border:1px solid var(--line); border-radius:999px; padding:0 6px; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--faint); flex:0 0 auto; }
   .dot.queued { background:var(--queue); }
   .dot.running { background:var(--clay); animation:beat 1s ease-in-out infinite; }
@@ -382,6 +383,7 @@
         <div class="chat-composer">
           <textarea id="chat-input" rows="2" placeholder="Message workers&hellip; (each turn runs a full mission)"></textarea>
           <button class="btn go" id="chat-send" title="Run a mission for this turn">send</button>
+          <button class="btn" id="chat-stop" title="Stop the running mission" style="display:none">stop</button>
         </div>
       </div>
     </div>
@@ -816,7 +818,7 @@
   var MSG = 'weld.skybridge';          // envelope tag, both directions
   var HELLO_TIMEOUT = 4000;            // ms to wait for the anchor to answer
   var REQUEST_TIMEOUT = 30000;         // ms before a pending request gives up
-  var BUILD = 'sb-plugin/2026-06-04.4';  // bump on every change; printed at load so a stale deploy is obvious
+  var BUILD = 'sb-plugin/2026-06-06.3';  // bump on every change; printed at load so a stale deploy is obvious
   var LOADED_AT = Date.now();
   // Early, dependency-free deployment beacon: even if a later line throws, this
   // proves WHICH build actually loaded (read it from the example or console).
@@ -844,7 +846,7 @@
   var caps = {};                       // capability name -> true (advertised)
   var anchorVersion = null;            // the companion's reported semver
   var onConnectFns = new Array();
-  var pending = {};                    // nonce -> { resolve, timer }
+  var pending = {};                    // nonce -> { resolve, timer, onChunk, onTimeout }
   var busSubs = {};                    // bus channel -> [fn, ...] (cross-tab pub/sub via companion)
   var helloTimer = null;
 
@@ -940,11 +942,17 @@
     if (d.type === 'reply') {
       var p = Reflect.get(pending, String(d.nonce));
       if (!p) return;                  // unknown / replayed / spoofed nonce -> drop
-      Reflect.deleteProperty(pending, String(d.nonce));
-      if (p.timer) clearTimeout(p.timer);
       var result = (d.result && typeof d.result === 'object')
         ? d.result
         : { ok: false, reason: 'malformed' };
+      if (result.partial && typeof p.onChunk === 'function') {   // D3: a streaming token chunk -- keep the request open
+        try { p.onChunk(result); } catch (e) {}
+        if (p.timer) clearTimeout(p.timer);                      // refresh the idle timeout: a live stream may run past REQUEST_TIMEOUT
+        p.timer = setTimeout(p.onTimeout, REQUEST_TIMEOUT);
+        return;
+      }
+      Reflect.deleteProperty(pending, String(d.nonce));
+      if (p.timer) clearTimeout(p.timer);
       p.resolve(result);
       return;
     }
@@ -958,18 +966,19 @@
   }
 
   // ---- send a capability request up; resolve with a result object ----
-  function request(capability, payload) {
+  function request(capability, payload, onChunk) {
     return new Promise(function (resolve) {
       if (!connected) { resolve({ ok: false, reason: 'disconnected' }); return; }
       if (!Reflect.get(caps, String(capability))) { resolve({ ok: false, reason: 'unsupported' }); return; }
       var id = nonce();
-      var timer = setTimeout(function () {
+      function onTimeout() {
         if (Reflect.get(pending, id)) {
           Reflect.deleteProperty(pending, id);
           resolve({ ok: false, reason: 'timeout' });
         }
-      }, REQUEST_TIMEOUT);
-      Reflect.set(pending, id, { resolve: resolve, timer: timer });
+      }
+      var timer = setTimeout(onTimeout, REQUEST_TIMEOUT);
+      Reflect.set(pending, id, { resolve: resolve, timer: timer, onChunk: (typeof onChunk === 'function' ? onChunk : null), onTimeout: onTimeout });
       postUp({
         channel: MSG, type: 'request', proto: proto, nonce: id,
         cap: String(capability),
@@ -1105,12 +1114,20 @@
 
   function ai(prompt, options) {
     var payload = { prompt: String(prompt != null ? prompt : '') };
+    var onChunk = null;
     if (options && typeof options === 'object') {
       if (options.system != null) payload.system = String(options.system);
       if (options.maxTokens != null) payload.maxTokens = options.maxTokens | 0;
       if (options.temperature != null) payload.temperature = +options.temperature;
+      if (options.json != null) payload.json = !!options.json;
+      if (typeof options.onChunk === 'function') { onChunk = options.onChunk; payload.stream = true; }   // D3: opt into live tokens
     }
-    return request('ai', payload);     // resolves { ok, value } or { ok:false, reason }
+    // resolves { ok, value } or { ok:false, reason }; if onChunk is set, it fires per token delta first
+    return request('ai', payload, onChunk ? function (partial) { try { onChunk(String(partial.chunk == null ? '' : partial.chunk)); } catch (e) {} } : null);
+  }
+
+  function modelInfo() {
+    return request('model', {});       // D4: resolves { ok, provider, model, contextWindow, maxOutput } or { ok:false }
   }
 
   // ---- start the handshake ----
@@ -1146,13 +1163,14 @@
     // privileged calls (each resolves a result object, never throws)
     request: request,
     ai: ai,
+    modelInfo: modelInfo,    // D4: which own-model is configured + approx limits (no key)
     // storage: graceful fallback, honest backend
     storage: { get: storageGet, set: storageSet, list: storageList, backend: storageBackend },
     // bus: cross-tab / cross-generator pub/sub (only live when the companion advertises 'bus')
     bus: { publish: busPublish, subscribe: busSubscribe },
     // protocol range this sandbox end speaks
     protocolRange: { min: PROTO_MIN, max: PROTO_MAX },
-    version: '1.2.0',
+    version: '1.4.0',
     build: BUILD,
     // verbose-logging toggle. on()/off; returns the new state.
     debug: function (on) {
@@ -2267,7 +2285,7 @@
   //   :runs     index of run ids (most-recent-first)
   // -----------------------------------------------------------------
 
-  var BUILD = 'crew/2026-06-06.5';
+  var BUILD = 'crew/2026-06-06.9';
 
   // ---- storage: lean on skybridge (companion -> persist -> memory), else our own fallback ----
   function makeStore() {
@@ -2318,6 +2336,17 @@
       start = s.indexOf('{', start + 1);
     }
     return null;
+  }
+
+  // ---- HTML -> readable text (C1): drop scripts/styles/tags, decode common entities, collapse space ----
+  function htmlToText(html) {
+    var s = String(html || '');
+    var title = (s.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+    s = s.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ');
+    s = s.replace(/<\/(?:p|div|li|tr|h[1-6]|section|article|header|footer)>/gi, '\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ');
+    s = s.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;/g, "'").replace(/&#0*34;/g, '"');
+    s = s.replace(/[ \t\f\v]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    return { title: String(title).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(), text: s };
   }
 
   // ---- the agent factory ----
@@ -2414,13 +2443,23 @@
             var res = await wf.request(a.url, { method: a.method || 'GET' });
             var ct = ''; try { var _h = res.headers; ct = _h ? ((typeof _h.get === 'function' ? _h.get('content-type') : (_h['content-type'] || _h['Content-Type'])) || '') : ''; } catch (e) {} if (ct && !/text|html|json|xml|javascript|csv|plain|urlencoded/i.test(ct)) { var nt = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, contentType: ct, note: 'non-text content (' + ct + '); body omitted' }; fetchCache[ck] = nt; return nt; } var body = '';
             try { body = await res.text(); } catch (e) {}
-            if (typeof body === 'string' && body.length > 8000) body = body.slice(0, 8000) + '\u2026[truncated]';
-            var out = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, body: body }; if (out.ok) fetchCache[ck] = out; return out;
+            var _ht = null; if (typeof body === 'string' && (/html/i.test(ct) || (!ct && /^\s*<(?:!doctype|html)/i.test(body)))) { _ht = htmlToText(body); body = _ht.text; } if (typeof body === 'string' && body.length > 8000) body = body.slice(0, 8000) + '\u2026[truncated]';
+            var out = { ok: !!res.ok, status: res.status, url: res.url, via: res.via, title: _ht ? _ht.title : undefined, body: body }; if (out.ok) fetchCache[ck] = out; return out;
           } catch (e) {
             return { ok: false, reason: 'weld.fetch error: ' + (e && e.message ? e.message : String(e)) };
           }
         }
         return { ok: false, reason: 'web access unavailable (no companion fetch capability, and weld.fetch not imported)' };
+      } });
+
+    // web.search: companion 'search' capability if present, else reports unavailable.
+    registerTool({ name: 'web.search', description: 'Search the web for a query; returns a short list of results (title, url, snippet) to help you pick pages worth fetching. Requires the companion search capability.', args: { query: 'string', max: 'number (optional)' },
+      run: async function (a) {
+        var sb = window.weld && window.weld.skybridge;
+        if (sb && sb.connected && typeof sb.has === 'function' && sb.has('search') && typeof sb.request === 'function') {
+          return await sb.request('search', { query: a.query, max: a.max });
+        }
+        return { ok: false, reason: 'web search unavailable (no companion search capability)' };
       } });
 
     if (opts.tools && opts.tools.length) opts.tools.forEach(registerTool);
@@ -2432,6 +2471,7 @@
       if (sb && sb.connected && typeof sb.has === 'function' && sb.has('ai') && typeof sb.ai === 'function') {
         var aiArgs = { system: system };
         for (var k in aiOpts) if (aiOpts.hasOwnProperty(k)) aiArgs[k] = aiOpts[k];
+        if (aiArgs.json === undefined) aiArgs.json = true;   // D2: a crew step is always one JSON object -> ask the model for JSON mode
         var r = await sb.ai(prompt, aiArgs);
         if (r && r.ok) return r.value;
         throw new Error('model call failed: ' + (r && r.reason ? r.reason : 'unknown'));
@@ -2458,6 +2498,12 @@
         '',
         'Available tools:',
         toolDocs(),
+        '',
+        'Routing:',
+        '- If a tool can directly produce what the task asks for (an image, a fetched page, a dice roll, a pick), CALL that tool with concrete arguments -- do not describe in prose how it could be done.',
+        '- If the task is answerable from your own knowledge or reasoning, reply with a final answer; do not call tools you do not need.',
+        '- Prefer the most specific tool, and pass complete, self-contained arguments.',
+        '- If a tool result is unsatisfactory, call it again with adjusted arguments before finalizing.',
         '',
         'Long-term memory (durable across runs):',
         (memText || '(empty)'),
@@ -8026,7 +8072,7 @@
     var SW = (window.weld && window.weld.swarm) || null;
     var CR = (window.weld && window.weld.crew) || null;
     var sb = (window.weld && window.weld.skybridge) || null;
-    var APP_BUILD = 'swarm-app/2026-06-06.7';
+    var APP_BUILD = 'swarm-app/2026-06-06.18';
     // native ai-text is slow and serialized through one broker, so multi-step ReAct runs take
     // minutes, not seconds, so give each dispatched subtask a generous ceiling before timing out.
     var TASK_TIMEOUT = 240000;
@@ -8257,6 +8303,7 @@
 
     // ---------- capability probe ----------
     var caps = { ai:false, stream:false, image:false, fetch:false, bus:false, store:false, transport:'memory' };
+    var modelMeta = null;   // D4: { provider, model, contextWindow, maxOutput } from sb.modelInfo(); primed in probe()
     function setPill(id, on, text, cls) { var p = $(id); p.textContent = text; p.className = 'pill ' + (cls || '') + (on ? ' on' : ''); }
     function rootObj() { try { if (typeof root !== 'undefined' && root) return root; } catch (e) {} return (typeof window !== 'undefined' && window.root) ? window.root : null; }
     function builtinAI() { var r = rootObj(); return (r && typeof r.aiTextPlugin === 'function') ? r.aiTextPlugin : null; }
@@ -8273,6 +8320,10 @@
       caps.transport = caps.bus ? 'bus' : ((window.weld && window.weld.sync) ? 'sync' : 'memory');
       if (connected && sb.has && sb.has('ai') && typeof sb.ai === 'function') {
         try { var r = await sb.ai('ok', { system: 'Reply with the single word ok.' }); caps.ai = !!(r && r.ok); } catch (e) { caps.ai = false; }
+      }
+      modelMeta = null;   // D4: cache the configured model's limits so synthesis/context sizing can use them
+      if (caps.ai && sb && typeof sb.modelInfo === 'function') {
+        try { var mi = await sb.modelInfo(); if (mi && mi.ok) modelMeta = mi; } catch (e) {}
       }
       // model source: your own model (companion) > Perchance native > scripted echo
       var modelText = caps.ai ? 'model: yours' : (caps.stream ? 'model: perchance' : 'model: scripted');
@@ -8306,6 +8357,7 @@
       var ch = el('div', 'ch', null, c);
       el('span', 'dot queued', null, ch).id = 'dot-' + idx;
       el('span', 'idx', 'AGENT ' + (idx + 1), ch);
+      el('span', 'ctype', subtaskType(goal), ch);
       el('span', 'who', 'queued', ch).id = 'who-' + idx;
       el('span', 'phase', '', ch).id = 'phase-' + idx;
       el('div', 'goal', goal, c);
@@ -8331,7 +8383,17 @@
       try { var T = window.weld && window.weld.tokens; if (T) { var c = T.countSync ? T.countSync(String(s || '')) : null; if (typeof c === 'number') return c; if (T.estimate) return T.estimate(String(s || '')); } } catch (e) {}
       return Math.ceil(String(s || '').length / 4);
     }
-    var SYNTH_BUDGET = 6000;   // approx ideal input budget for the native synthesis model
+    var SYNTH_BUDGET = 6000;   // approx ideal input budget for the native synthesis model (default / Perchance path)
+    // D4: when our own model's limits are known, size the synthesis INPUT budget to its context window
+    // (lower for tiny-context models so we don't overflow; modestly higher for big ones, capped to bound cost).
+    function synthBudget() {
+      var ctx = modelMeta && modelMeta.contextWindow;
+      if (!ctx) return SYNTH_BUDGET;                                   // native / unknown -> the fixed default
+      var reserve = Math.min((modelMeta.maxOutput || 4096), 8192);     // leave room for the answer
+      return Math.max(1500, Math.min(ctx - reserve - 1000, 24000));    // floor for small models, ceiling for cost
+    }
+    // D4: a per-call OUTPUT cap for synthesis (luminara-style task sizing); honored by the companion.
+    function synthOutCap() { return Math.min((modelMeta && modelMeta.maxOutput) || 1536, 2048); }
     // scrub model scaffolding that the native model leaks into finals/synthesis (weld.clean):
     // dangling sentences, role/title bleed, repetition, plus rules for the specific artifacts seen
     // ("Remember - ONLY JSON", "Final ... Profile:" headers, stray leading enumerators / punctuation).
@@ -8567,7 +8629,7 @@
         if (w) {
           var opts = { prompt: p, resolution: res, into: bay, style: 'width:100%;height:100%;border:0;display:block;' };
           if (g != null) opts.guidanceScale = g; if (seed != null) opts.seed = seed;
-          return await w.generate(opts);
+          var _wr = await w.generate(opts); return Object.assign({ prompt: p, resolution: res, seed: seed }, _wr || {});
         }
         var fn = builtinT2I(); if (!fn) throw new Error('image generation unavailable');
         var data = await new Promise(function (resolve, reject) {
@@ -8577,7 +8639,7 @@
           bay.innerHTML = html;   // mount the t2i iframe into the visible bay so it actually fires
           setTimeout(function () { reject(new Error('image generation timeout')); }, 120000);
         });
-        return { dataUrl: (data && data.dataUrl) || (data && data.canvas && data.canvas.toDataURL('image/jpeg', 0.9)) || null, canvas: data && data.canvas, inputs: data && data.inputs };
+        return Object.assign({ prompt: p, resolution: res, seed: seed }, { dataUrl: (data && data.dataUrl) || (data && data.canvas && data.canvas.toDataURL('image/jpeg', 0.9)) || null, canvas: data && data.canvas, inputs: data && data.inputs });
       } finally { try { bay.remove(); } catch (e) {} }
     }
     // downscale a result's canvas for cheap transport over the flock (hub renders at card width)
@@ -8601,7 +8663,7 @@
           run: async function (a) {
             try {
               var res = await generateImage(a.prompt);
-              if (res && res.dataUrl) { if (onImg) onImg(res, a.prompt); return { ok: true, note: 'image generated for: ' + a.prompt }; }
+              if (res && res.dataUrl) { if (onImg) onImg(res, a.prompt); var _d = String(res.resolution || '').match(/(\d+)\D+(\d+)/); return { ok: true, prompt: a.prompt, width: _d ? +_d[1] : null, height: _d ? +_d[2] : null, seed: (res.seed != null ? res.seed : null), note: 'image generated' }; }
               return { ok: false, reason: 'no image produced' };
             } catch (e) { return { ok: false, reason: String(e && e.message || e) }; }
           } });
@@ -8678,6 +8740,17 @@
     // gives up or writes a meta-guide about prompting instead. These helpers let us detect an
     // image goal and, if the agent flaked, generate the image directly so the run still delivers.
     function isImageGoal(g) { return /\b(images?|pictures?|pics?|photo(?:graph)?s?|draw(?:ing|ings|n|s)?|render(?:ed|ing|s)?|illustrat\w*|portraits?|paint(?:ing|ings|ed|s)?|wallpapers?|logos?|icons?|artworks?|art|sketch(?:es|ed)?|posters?|selfies?|headshots?)\b/i.test(String(g || '')); }
+    // E6: image goals get a larger step budget so the agent can generate -> inspect the result
+    // (E2) -> refine, instead of being capped at the default 4. (Budgeting other 'iterative'
+    // task types is deferred; it overlaps with typed subtasks / E4.)
+    // E4: classify a subtask so the type is visible (card badge) and useful (step budget).
+    function subtaskType(goal) {
+      var g = String(goal || '');
+      if (isImageGoal(g)) return 'image';
+      if (/https?:\/\/|\b(?:fetch|look up|look into|research|find out|sources?|cite|browse|scrape|web ?search)\b/i.test(g)) return 'research';
+      return 'reasoning';
+    }
+    function stepBudget(goal) { var t = subtaskType(goal); return t === 'image' ? 8 : (t === 'research' ? 6 : 4); }
     function imagePromptFor(g) {
       return String(g || '')
         .replace(/^\s*aspect\s+\d+\s+of:\s*/i, '')                                   // strip auto-split prefix
@@ -8750,23 +8823,21 @@
       var toolset = (payload && payload.tools) || { web:false, time:true };
       cardStatus(idx, 'running', workerId);
       feed('action', workerId + ' \u2190 ' + payload.goal);
-      // image goal -> dedicated pipeline (describe -> generate -> report), one image per worker
-      if (caps.image && toolset.image && isImageGoal(payload.goal)) {
-        feed('info', workerId + ' image pipeline: describe \u2192 generate \u2192 report');
-        var rp = await runImagePipeline(workerId, idx, payload.goal, cardOnStep(idx),
-          function (res, prompt) { cardImage(idx, res.dataUrl, prompt); });
-        cardStatus(idx, rp.ok ? 'done' : 'error', workerId);
-        cardResult(idx, rp.ok, rp.ok ? rp.answer : ('ERROR: ' + (rp.reason || 'failed')));
-        feed(rp.ok ? 'obs' : 'error', workerId + ' \u2192 ' + (rp.ok ? ('image \u00b7 ' + String(rp.prompt || '').slice(0, 60)) : (rp.reason || 'failed')));
-        return { worker: workerId, answer: rp.answer || rp.reason, ok: rp.ok, idx: idx };
-      }
+      // E1: image goals run through the agent (composable image.generate); the fallback below
+      // guarantees an image if the agent produced none for a clear image goal.
+      var madeImage = false;
       var crew = buildCrew(workerId, idx, toolset,
         function (ch) { liveToken(idx, ch); },                          // live token stream into the card
-        function (res, prompt) { cardImage(idx, res.dataUrl, prompt); });// render generated image on the card
+        function (res, prompt) { madeImage = true; cardImage(idx, res.dataUrl, prompt); });// render generated image on the card
       running.push(crew);
-      var out = await crew.run(payload.goal, { onStep: cardOnStep(idx) });
+      var out = await crew.run(payload.goal, { onStep: cardOnStep(idx), maxSteps: stepBudget(payload.goal) });
       var ok = !!out.ok;
       if (ok) out.answer = cleanText(out.answer);
+      if (caps.image && toolset.image && !stopped && !madeImage && isImageGoal(payload.goal)) {   // agent produced no image for an image goal -> fallback pipeline
+        feed('info', workerId + ' image fallback: agent produced no image');
+        try { var fb = await runImagePipeline(workerId, idx, payload.goal, cardOnStep(idx), function (r, pr) { madeImage = true; cardImage(idx, r.dataUrl, pr); });
+          if (fb.ok) { ok = true; out.answer = fb.answer; } } catch (e) {}
+      }
       if (ok && auditOn()) { setPhase(idx, 'audit'); feed('info', workerId + ' audit pass\u2026'); out.answer = await auditAnswer(payload.goal, out.answer); }
       cardStatus(idx, ok ? 'done' : 'error', workerId);
       cardResult(idx, ok, ok ? out.answer : ('ERROR: ' + (out.reason || out.error || 'failed')));
@@ -8785,8 +8856,8 @@
     ];
     // unified text generation: your own model (companion) -> Perchance native (weld.stream) -> none
     function aiAvailable() { return caps.ai || caps.stream; }
-    async function genText(prompt, system) {
-      if (caps.ai) { try { var r = await sb.ai(prompt, { system: system }); if (r && r.ok && r.text) return r.text; } catch (e) {} }
+    async function genText(prompt, system, maxTokens) {
+      if (caps.ai) { try { var r = await sb.ai(prompt, { system: system, maxTokens: maxTokens || undefined }); if (r && r.ok) { var v = (r.value != null) ? r.value : r.text; if (v) return v; } } catch (e) {} }
       if (caps.stream) { var t = await aiTextRun({ instruction: system, startWith: prompt }); if (t) return t; }
       return '';
     }
@@ -8844,7 +8915,7 @@
           sys = 'You decompose objectives into parallelizable subtasks that do NOT overlap. Output strictly a JSON array of short strings, nothing else.';
           p = 'Break this objective into exactly ' + n + ' concise subtasks that are independent and non-overlapping (each a distinct part, no duplication) and that together fully cover the objective. Reply with ONLY a JSON array of strings.\n\nObjective: ' + goal;
         }
-        var txt = await genText(p, sys);
+        var txt = await genText(p, sys, 768);   // D4: a decomposition is a short JSON list -> cap output
         var list = parseTaskList(txt, n);
         if (list) return list;
       } catch (e) {}
@@ -8897,8 +8968,19 @@
 
     // ---------- aggregate / synthesis ----------
     // synthesis with live progress: stream tokens (native path) and run a spinner + elapsed timer
-    async function genTextStream(prompt, system, onToken) {
-      if (caps.ai) { try { var r = await sb.ai(prompt, { system: system }); if (r && r.ok && r.text) { if (onToken) onToken(r.text); return r.text; } } catch (e) {} }
+    async function genTextStream(prompt, system, onToken, maxTokens) {
+      if (caps.ai) {
+        try {
+          var streamedAny = false;
+          // D3: opt into streaming -- onChunk fires per token delta, so synthesis paints live (same as the native path)
+          var r = await sb.ai(prompt, { system: system, maxTokens: maxTokens || undefined, onChunk: function (c) { streamedAny = true; if (onToken && c) { try { onToken(c); } catch (e) {} } } });
+          if (r && r.ok) {
+            var val = (r.value != null) ? r.value : r.text;                          // bridge returns .value; tolerate legacy .text
+            if (!streamedAny && onToken && val) { try { onToken(val); } catch (e) {} }  // old companion w/o streaming -> single paint
+            if (val || streamedAny) return val || '';
+          }
+        } catch (e) {}
+      }
       if (caps.stream) { var t = await aiTextRun({ instruction: system, startWith: prompt, onToken: onToken }); if (t) return t; }
       return '';
     }
@@ -8908,7 +8990,7 @@
       var S = window.weld && window.weld.summarize;
       if (!S || !S.summarize) return results;
       var total = tokenCount(results.map(function (r) { return (r && r.answer) || ''; }).join('\n'));
-      if (total <= SYNTH_BUDGET) return results;
+      if (total <= synthBudget()) return results;
       feed('info', 'condensing oversized agent answers before synthesis (weld.summarize)');
       var out = [];
       for (var i = 0; i < results.length; i++) {
@@ -8937,13 +9019,15 @@
       function paint(label) { $('agg-syn').innerHTML = '<span class="spin"></span> ' + label; }
       paint('synthesizing with ' + who + '\u2026 0s');
       var promptTokens = tokenCount(joined);
-      if (promptTokens > SYNTH_BUDGET) feed('info', 'synthesis input ~' + promptTokens + ' tokens (over budget ' + SYNTH_BUDGET + ') \u2014 will condense');
+      var synBud = synthBudget();
+      if (promptTokens > synBud) feed('info', 'synthesis input ~' + promptTokens + ' tokens (over budget ' + synBud + ') \u2014 will condense');
       var timer = setInterval(function () { paint('synthesizing with ' + who + '\u2026 ' + Math.round((Date.now() - t0s) / 1000) + 's' + (streamed ? ' \u00b7 ' + streamed.length + ' chars' : '')); }, 400);
       try {
         var txt = await genTextStream(
           'Synthesize these worker results into one cohesive answer to the objective "' + obj + '":\n\n' + joined,
           'You merge several agent results into ONE cohesive answer to the objective. Output only the answer itself: no title, no preamble, no header like "Final ... Profile:", do not re-number or restate the inputs, and never restate these instructions. Begin directly with the answer.',
-          function (chunk) { streamed += chunk; $('agg-body').textContent = streamed; if (onStream) { try { onStream(streamed); } catch (e) {} } }   // live: text grows as it generates
+          function (chunk) { streamed += chunk; $('agg-body').textContent = streamed; if (onStream) { try { onStream(streamed); } catch (e) {} } },   // live: text grows as it generates
+          synthOutCap()
         );
         clearInterval(timer); $('agg').classList.remove('working');
         var final = cleanText(txt || streamed);
@@ -9009,7 +9093,8 @@
     async function buildContext(turns) {
       if (!turns || !turns.length) return '';
       var text = turns.map(turnLine).join('\n');
-      if (tokenCount(text) <= SYNTH_BUDGET) return text;
+      var ctxBud = synthBudget();
+      if (tokenCount(text) <= ctxBud) return text;
       var keep = 4;
       if (turns.length > keep && window.weld && window.weld.summarize && window.weld.summarize.summarize) {
         var older = turns.slice(0, turns.length - keep), recent = turns.slice(turns.length - keep);
@@ -9018,7 +9103,7 @@
           if (r && r.ok && r.summary) return 'Summary of earlier conversation: ' + r.summary + '\n\n' + recent.map(turnLine).join('\n');
         } catch (e) {}
       }
-      return text.slice(-SYNTH_BUDGET * 4);
+      return text.slice(-ctxBud * 4);
     }
     function chatContext(s) {
       var tl = (s && s.timeline) ? s.timeline() : [];
@@ -9079,6 +9164,15 @@
       var nOk = results.filter(function (r) { return r && r.ok; }).length;
       return { text: final || '(the agents returned nothing usable)', meta: { agents: results.length, ok: nOk } };
     }
+    function stopChat() {
+      if (!chatBusy) return;
+      stopped = true; runGen++;                                   // invalidate the in-flight turn (runMissionForTurn guards on stopped/runGen)
+      running.forEach(function (c) { try { c.stop(); } catch (e) {} });
+      try { if (window.weld && window.weld.stream && window.weld.stream.stopAll) window.weld.stream.stopAll(); } catch (e) {} // abort in-flight streaming AI
+      if ($('chat-stop')) $('chat-stop').disabled = true;
+      if ($('chat-meter')) $('chat-meter').textContent = 'stopping\u2026';
+      feed('info', 'chat mission stopped by user');
+    }
     async function submitTurn() {
       if (chatBusy) return;
       var ta = $('chat-input'); var text = (ta ? ta.value : '').trim(); if (!text) return;
@@ -9097,6 +9191,7 @@
       var reply;
       try { var ctx = await chatContext(s); reply = await runMissionForTurn(text, ctx, onStream); }
       catch (e) { reply = { text: '(the mission failed: ' + ((e && e.message) || e) + ')', meta: null }; }
+      if (reply && reply.text === '' && reply.meta === null) { setChatBusy(false, 'stopped'); renderTranscript(); return; }
       try { await s.addAssistant(reply.text, reply.meta || null); } catch (e) { try { s.addAssistant(reply.text); } catch (e2) {} }
       setChatBusy(false);
       renderTranscript(); saveChatSession();
@@ -9105,6 +9200,7 @@
     function setChatBusy(on, label) {
       chatBusy = !!on;
       if ($('chat-send')) $('chat-send').disabled = !!on;
+      var _st = $('chat-stop'); if (_st) { _st.style.display = on ? '' : 'none'; _st.disabled = false; }
       if ($('chat-meter')) $('chat-meter').textContent = label || (on ? 'working\u2026' : 'ready');
     }
     function chatFileName(ext) { return (chatSessionName || 'conversation').replace(/[^\w.-]+/g, '_').slice(0, 40) + '.' + ext; }
@@ -9309,10 +9405,10 @@
     function makeServeRemote(workerId) {
       return async function (payload, msg) {
         var hub = msg && msg.from;
-        var toks = hubTokens(hub, payload.idx);
+        var toks = hubTokens(hub, payload.idx); var madeImage = false;
         feed('action', workerId + ' \u2190 ' + payload.goal);
         function shipImage(res, prompt) {                                          // ship the finished image to the hub
-          feed('obs', workerId + ' generated image: ' + (prompt || ''));
+          madeImage = true; feed('obs', workerId + ' generated image: ' + (prompt || ''));
           if (hub) { try { roleSwarm.send(hub, 'image', { idx:payload.idx, worker:workerId, dataUrl:shrinkDataUrl(res, 512), prompt:prompt }); } catch (e) {} }
         }
         function shipStep(s) {
@@ -9320,22 +9416,19 @@
           if (s.type === 'final') feed('obs', workerId + ' \u2192 ' + s.answer);
         }
         var tools = payload.tools || { time:true };
-        // image goal -> dedicated pipeline; steps + finished image stream to the hub
-        if (caps.image && tools.image && isImageGoal(payload.goal)) {
-          feed('info', workerId + ' image pipeline: describe \u2192 generate \u2192 report');
-          var rp = await runImagePipeline(workerId, payload.idx, payload.goal, shipStep, shipImage);
-          toks.done();
-          return { worker:workerId, answer:rp.answer || rp.reason, ok:rp.ok, idx:payload.idx };
-        }
         var crew = buildCrew(workerId, payload.idx, tools,
           function (ch) { toks.push(ch); },                                        // stream live tokens to the hub
           shipImage);
         running.push(crew);
-        var out = await crew.run(payload.goal, { onStep: shipStep });
-        var ans = out.ok ? cleanText(out.answer) : out.answer;
+        var out = await crew.run(payload.goal, { onStep: shipStep, maxSteps: stepBudget(payload.goal) });
+        var ans = out.ok ? cleanText(out.answer) : out.answer; var rok = !!out.ok;
+        if (caps.image && tools.image && !stopped && !madeImage && isImageGoal(payload.goal)) {   // agent produced no image -> fallback
+          feed('info', workerId + ' image fallback: agent produced no image');
+          try { var fbr = await runImagePipeline(workerId, payload.idx, payload.goal, shipStep, shipImage); if (fbr.ok) { rok = true; ans = fbr.answer; } } catch (e) {}
+        }
         if (out.ok && auditOn()) { feed('info', workerId + ' audit pass\u2026'); ans = await auditAnswer(payload.goal, ans); }
         toks.done();
-        return { worker:workerId, answer: ans, ok:!!out.ok, idx:payload.idx };
+        return { worker:workerId, answer: ans, ok:rok, idx:payload.idx };
       };
     }
     async function runUser() {
@@ -9489,6 +9582,7 @@
       $('diag').onclick = copyDiagnostics;
       $('share-link').onclick = shareLink;
       if ($('chat-send')) $('chat-send').onclick = submitTurn;
+      if ($('chat-stop')) $('chat-stop').onclick = stopChat;
       if ($('chat-input')) $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitTurn(); } });
       if ($('chat-sessions')) $('chat-sessions').onchange = function () { if (this.value) loadChatSession(this.value); };
       if ($('chat-new')) $('chat-new').onclick = newChatSession;
