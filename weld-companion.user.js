@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.6.0
+// @version      1.7.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -937,7 +937,7 @@
   // call here and post only the completion back down.
   var SB = 'weld.skybridge';
   var SB_PROTO_MIN = 1, SB_PROTO_MAX = 1;
-  var SB_CAPS = ['storage', 'ai', 'fetch', 'search', 'model'];  // what this companion offers
+  var SB_CAPS = ['storage', 'ai', 'fetch', 'search', 'model', 'bus'];  // what this companion offers
 
   // The userscript manager runs us in a sandbox where `window` is a wrapper:
   // a 'message' listener placed on it may NOT receive the page's real
@@ -948,7 +948,7 @@
   var SB_WIN = (function () {
     try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; } catch (e) { return window; }
   })();
-  var SB_BUILD = 'sb-anchor/2026-06-06.6';   // bump on every change; printed at mount so a stale userscript is obvious
+  var SB_BUILD = 'sb-anchor/2026-06-06.7';   // bump on every change; printed at mount so a stale userscript is obvious
   // verbose-logging toggle: ?sbdebug in the URL, or window.WELD_SKYBRIDGE_DEBUG = true
   var SB_DEBUG = false;
   try {
@@ -978,7 +978,7 @@
       var prior = sbPermFor(gen, cap);
       if (prior === true) return resolve(true);
       if (prior === false) return resolve(false);   // remembered "no"
-      var labels = { storage: 'save data that persists across generators', ai: 'use your own AI model', fetch: 'fetch pages from the web on its behalf', search: 'search the web on its behalf', model: 'read which AI model you have configured (name only -- never your API key)' };
+      var labels = { storage: 'save data that persists across generators', ai: 'use your own AI model', fetch: 'fetch pages from the web on its behalf', search: 'search the web on its behalf', model: 'read which AI model you have configured (name only -- never your API key)', bus: 'relay messages between your open generators (cross-tab pub/sub)' };
       var what = labels[cap] || ('use the "' + cap + '" capability');
       var msg = 'This generator (' + (gen || 'unknown') + ') wants to ' + what + ' via Weld Companion.\n\nAllow it? (remembered for this generator)';
       var ok = false;
@@ -1220,6 +1220,50 @@
       try { sbAnnounce(f); } catch (e) {}                // nested frames (cross-origin ones are skipped via the guard)
     }
   }
+  // D5: 'bus' capability -- cross-generator / cross-tab pub-sub. The companion is the broker: a
+  // published message fans out to every subscribed frame in THIS tab and, via a same-origin
+  // BroadcastChannel, to other perchance tabs. Lights up weld.swarm's cross-generator transport.
+  var sbBusSubs = {};   // channel -> [{ source, origin }]
+  var sbBusBC = null;   // lazy BroadcastChannel('weld-bus') for cross-tab fan-out
+  function sbBusChannel() {
+    if (sbBusBC || typeof BroadcastChannel === 'undefined') return sbBusBC;
+    try {
+      sbBusBC = new BroadcastChannel('weld-bus');
+      sbBusBC.onmessage = function (e) { var m = e && e.data; if (m && m.channel) sbBusDeliverLocal(m.channel, m.message); };   // from other tabs -> local only (no re-broadcast)
+    } catch (e) { sbBusBC = null; }
+    return sbBusBC;
+  }
+  function sbBusPush(source, origin, channel, message) {
+    try { source.postMessage({ channel: SB, type: 'bus', busChannel: channel, message: message }, origin && origin !== 'null' ? origin : '*'); } catch (e) {}
+  }
+  function sbBusDeliverLocal(channel, message) {
+    var subs = sbBusSubs[channel]; if (!subs) return;
+    for (var i = 0; i < subs.length; i++) sbBusPush(subs[i].source, subs[i].origin, channel, message);
+  }
+  function sbServiceBus(payload, source, origin) {
+    return new Promise(function (resolve) {
+      var op = payload && payload.op, channel = String((payload && payload.channel) || '');
+      if (!channel) return resolve({ ok: false, reason: 'no-channel' });
+      if (op === 'subscribe') {
+        sbBusChannel();
+        var arr = sbBusSubs[channel] || (sbBusSubs[channel] = []);
+        if (!arr.some(function (x) { return x.source === source; })) arr.push({ source: source, origin: origin });
+        return resolve({ ok: true, subscribed: channel });
+      }
+      if (op === 'unsubscribe') {
+        var a = sbBusSubs[channel];
+        if (a) { sbBusSubs[channel] = a.filter(function (x) { return x.source !== source; }); if (!sbBusSubs[channel].length) delete sbBusSubs[channel]; }
+        return resolve({ ok: true, unsubscribed: channel });
+      }
+      if (op === 'publish') {
+        sbBusDeliverLocal(channel, payload.message);                                      // same-tab subscribers
+        var bc = sbBusChannel(); if (bc) { try { bc.postMessage({ channel: channel, message: payload.message }); } catch (e) {} }   // other tabs
+        return resolve({ ok: true, published: channel });
+      }
+      resolve({ ok: false, reason: 'bad-op' });
+    });
+  }
+
   function sbHandleMessage(ev) {
       var d = ev && ev.data;
       var isSb = d && typeof d === 'object' && d.channel === SB;
@@ -1255,6 +1299,7 @@
                    : (cap === 'fetch')   ? sbServiceFetch(d.payload || {})
                    : (cap === 'search')  ? sbServiceSearch(d.payload || {})
                    : (cap === 'model')   ? sbServiceModel()
+                   : (cap === 'bus')     ? sbServiceBus(d.payload || {}, source, ev.origin)
                    : Promise.resolve({ ok: false, reason: 'unsupported' });
           work.then(function (result) { sbReply(source, ev.origin, nonce, result || { ok: false, reason: 'error' }); });
         });
