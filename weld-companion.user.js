@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.8.4
+// @version      1.9.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -95,6 +95,24 @@
     var path = String(tpl).replace(/\{name\}/g, name);
     return 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/refs/heads/' + cfg.branch + '/' + path + '?_=' + Date.now();
   }
+  // Parse a GitHub file URL into { owner, repo, branch, path }. Accepts raw URLs
+  // (raw.githubusercontent.com, with or without the /refs/heads/ segment) and web
+  // URLs (github.com/.../blob|tree|raw/...). Query/hash are stripped. Returns null
+  // when the string isn't a recognizable GitHub URL (e.g. a plain path).
+  function parseGitHubUrl(u) {
+    u = String(u || '').trim();
+    if (!/^https?:\/\//i.test(u)) return null;
+    u = u.split('#')[0].split('?')[0];
+    var m = u.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/refs\/heads\/([^/]+)\/(.+)$/i);
+    if (m) return { owner: m[1], repo: m[2], branch: m[3], path: m[4] };
+    m = u.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/i);
+    if (m) return { owner: m[1], repo: m[2], branch: m[3], path: m[4] };
+    m = u.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|tree|raw)\/([^/]+)\/(.+)$/i);
+    if (m) return { owner: m[1], repo: m[2], branch: m[3], path: m[4] };
+    m = u.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/?$/i);
+    if (m) return { owner: m[1], repo: m[2], branch: '', path: '' };
+    return null;
+  }
   // global defaults overlaid with per-slug override from the 'githubMap' config
   // ({ slug: { dslPath, htmlPath, owner?, repo?, branch? } }).
   function ghResolve(name) {
@@ -118,7 +136,17 @@
   function cmText(elx) { try { return (elx.innerText || elx.textContent || ''); } catch (e) { return ''; } }
   // Drive CM6's own input pipeline: synthetic paste first (CM6 reads clipboardData and
   // preventDefaults), then execCommand insertText as a fallback. Returns which fired.
+  // Resolve the live CodeMirror 6 EditorView behind a .cm-content element.
+  function cmViewFor(elx) {
+    try { var v = elx && elx.cmView && elx.cmView.view; if (v && v.state && v.state.doc && typeof v.dispatch === 'function') return v; } catch (e) {}
+    return null;
+  }
+  // Write text into a CM6 pane. Primary: a real EditorView transaction -- reliable, and
+  // recorded in the editor's own undo history, so Ctrl+Z reverts a pull. Fallbacks: a
+  // synthetic paste, then execCommand, for any build that doesn't expose the view.
   function cmSet(elx, text) {
+    var view = cmViewFor(elx);
+    if (view) { try { view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: String(text) } }); return 'view'; } catch (e) {} }
     elx.focus();
     function selectAll() { try { var s = window.getSelection(), r = document.createRange(); r.selectNodeContents(elx); s.removeAllRanges(); s.addRange(r); } catch (e) {} }
     selectAll();
@@ -132,6 +160,9 @@
     return 'failed';
   }
   function ghPanes() {
+    // Prefer Perchance's named editor views: modelText = DSL/top panel, outputTemplate = HTML.
+    var mt = window.modelTextEditor, ot = window.outputTemplateEditor;
+    if (mt && mt.contentDOM && ot && ot.contentDOM) return { dsl: mt.contentDOM, html: ot.contentDOM, all: [mt.contentDOM, ot.contentDOM] };
     var panes = Array.prototype.slice.call(document.querySelectorAll('.cm-content'));
     if (panes.length < 2) return null;
     var dsl = null, html = null;
@@ -143,6 +174,58 @@
     if (!dsl) dsl = panes[0];
     if (!html) html = (panes[1] === dsl ? panes[0] : panes[1]);
     return { dsl: dsl, html: html, all: panes };
+  }
+  // Perchance's own backup hooks (confirmed via probe on the #edit page):
+  //   window.downloadLocalBackup(i)  -- downloads an EXISTING backup at index i in
+  //     localBackupsArray (NOT a current-source snapshot), so we roll our own below.
+  //   window.revisionsModal.openModal()  -- opens Perchance's revision history modal.
+  function findRevButton() {
+    var els = document.querySelectorAll('button, a, [role="button"]');
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].textContent || '').trim().toLowerCase();
+      if (t.length < 40 && /load backup\/revision history|revision history/.test(t)) return els[i];
+    }
+    return null;
+  }
+  function openRevisions() {
+    if (window.revisionsModal && typeof window.revisionsModal.openModal === 'function') { try { window.revisionsModal.openModal(); return; } catch (e) {} }
+    var btn = findRevButton();
+    if (btn) { try { btn.click(); return; } catch (e) {} }
+    toast('Perchance revision history not found here');
+  }
+  // A current-source backup: read both editor docs and download them as one .txt, so the
+  // pre-pull state is recoverable (the pull itself is also Ctrl+Z-undoable).
+  function backupCurrentSource(name) {
+    try {
+      var mt = window.modelTextEditor, ot = window.outputTemplateEditor;
+      if (!mt || !ot || !mt.state || !ot.state) return false;
+      var dsl = mt.state.doc.toString(), html = ot.state.doc.toString();
+      var body = '<<<<< Weld Companion backup of "' + name + '" -- ' + new Date().toISOString() + '\n'
+        + 'Perchance lists / top panel first, HTML panel below >>>>>\n\n\n\n'
+        + dsl + '\n\n\n\n===== HTML PANEL =====\n\n' + html;
+      var blob = new Blob([body], { type: 'text/plain' });
+      var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'weld-backup-' + (name || 'generator') + '-' + Date.now() + '.txt';
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 1500);
+      return true;
+    } catch (e) { return false; }
+  }
+  // Save the generator. The current editor exposes no saveGenerator(); it autosaves and
+  // binds Ctrl/Cmd+S, so we trigger that keybinding (legacy saveGenerator() first, if present).
+  // window.perchanceSaveState reflects the outcome ('saved' / 'saving' / 'unsaved').
+  function doSave() {
+    if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); return; } catch (e) {} }
+    var mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+    function press(t) { try { t.dispatchEvent(new KeyboardEvent('keydown', { key: 's', code: 'KeyS', keyCode: 83, which: 83, ctrlKey: !mac, metaKey: mac, bubbles: true, cancelable: true })); } catch (e) {} }
+    // The editor's save keybinding is bound at the document level (it fires
+    // for keydowns dispatched to the editor, body, or document), so a SINGLE
+    // dispatch is enough. Dispatching to all three triggered saveGenerator
+    // multiple times -> a redundant double save + double output reload.
+    var ed = (window.modelTextEditor && window.modelTextEditor.contentDOM) || document.querySelector('.cm-content');
+    if (ed) { try { ed.focus(); } catch (e) {} }
+    press(ed || document);
+    setTimeout(function () { var st = window.perchanceSaveState; toast(st ? 'Save: ' + st : 'Sent Ctrl/Cmd+S \u2014 watch Perchance\u2019s save indicator'); }, 600);
   }
   function pullFromGitHub(over) {
     var name = genName();
@@ -166,12 +249,15 @@
         return;
       }
       var dslP = R.cfg.dslPath.replace(/\{name\}/g, name), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, name);
-      var msg = 'Update "' + name + '" from GitHub?' + (R.overridden ? '  [custom mapping]' : '') + '\n\n'
+      var dirty = false;
+      try { dirty = (window.modelTextEditor && window.modelTextEditor.state.doc.toString() !== window.lastModelTextSaved) || (window.outputTemplateEditor && window.outputTemplateEditor.state.doc.toString() !== window.lastOutputTemplateSaved); } catch (e) {}
+      var msg = (dirty ? '\u26A0 You have UNSAVED edits that this will overwrite.\n\n' : '') + 'Update "' + name + '" from GitHub?' + (R.overridden ? '  [custom mapping]' : '') + '\n\n'
         + 'repo: ' + R.cfg.owner + '/' + R.cfg.repo + '@' + R.cfg.branch + '\n'
         + 'DSL  <- ' + dslP + '   (' + got.dsl.text.length + ' chars)\n'
         + 'HTML <- ' + htmlP + '   (' + got.html.text.length + ' chars)\n\n'
         + 'This REPLACES the editor contents. You will still need to click Save.';
       if (!confirm(msg)) { toast('Cancelled'); return; }
+      if (gget('ghBackupBeforePull', true)) { if (backupCurrentSource(name)) toast('Backed up current source first'); }
       var sDsl = cmSet(panes.dsl, got.dsl.text), sHtml = cmSet(panes.html, got.html.text);
       console.log('[weld github] wrote panes', { name: name, dsl: sDsl, html: sHtml, dslChars: got.dsl.text.length, htmlChars: got.html.text.length, panes: panes.all.length, overridden: R.overridden });
       if (sDsl === 'failed' || sHtml === 'failed') toast('Wrote with issues (DSL:' + sDsl + ' HTML:' + sHtml + ') -- see console');
@@ -621,7 +707,22 @@
     var ownerIn = field(ov.owner || '', 'owner override for this generator', base.owner ? 'owner = ' + base.owner : 'owner');
     var repoIn = field(ov.repo || '', 'repo override for this generator', base.repo ? 'repo = ' + base.repo : 'repo');
     var branchIn = field(ov.branch || '', 'branch override for this generator', base.branch ? 'branch = ' + base.branch : 'branch');
+    // Smart paste: if a path field holds a full GitHub URL (raw or blob), parse
+    // it -> fill the owner/repo/branch override + reduce the field to the bare
+    // path. Returns true if a URL was applied; a no-op for plain paths.
+    function applyUrlToField(inp) {
+      var p = parseGitHubUrl(inp.value);
+      if (!p) return false;
+      if (p.owner) ownerIn.value = p.owner;
+      if (p.repo) repoIn.value = p.repo;
+      if (p.branch) branchIn.value = p.branch;
+      if (p.path) inp.value = p.path;
+      return true;
+    }
+    dslIn.addEventListener('change', function () { if (applyUrlToField(dslIn)) toast('Filled owner / repo / branch + DSL path from the URL'); });
+    htmlIn.addEventListener('change', function () { if (applyUrlToField(htmlIn)) toast('Filled owner / repo / branch + HTML path from the URL'); });
     function liveOver() {
+      applyUrlToField(dslIn); applyUrlToField(htmlIn);   // catch paste-then-Pull without blurring a field
       var o = { dslPath: dslIn.value.trim(), htmlPath: htmlIn.value.trim() };
       if (ownerIn.value.trim()) o.owner = ownerIn.value.trim();
       if (repoIn.value.trim()) o.repo = repoIn.value.trim();
@@ -637,6 +738,20 @@
     var gBranch = field(base.branch, 'default branch', 'main');
     var gDsl = field(base.dslPath, 'default DSL path template ({name} = slug)');
     var gHtml = field(base.htmlPath, 'default HTML path template ({name} = slug)');
+    // Smart paste for the global templates: a pasted URL fills owner/repo/branch
+    // AND turns the path into a reusable template by swapping this generator's
+    // slug for {name}, so the one template applies to every generator.
+    function applyUrlToTemplate(inp) {
+      var p = parseGitHubUrl(inp.value);
+      if (!p) return false;
+      if (p.owner) gOwner.value = p.owner;
+      if (p.repo) gRepo.value = p.repo;
+      if (p.branch) gBranch.value = p.branch;
+      if (p.path) inp.value = name ? p.path.split(name).join('{name}') : p.path;
+      return true;
+    }
+    gDsl.addEventListener('change', function () { if (applyUrlToTemplate(gDsl)) toast('Filled defaults + made a {name} template from the URL'); });
+    gHtml.addEventListener('change', function () { if (applyUrlToTemplate(gHtml)) toast('Filled defaults + made a {name} template from the URL'); });
     function saveDefaults() {
       gset('github', {
         owner: gOwner.value.trim() || GH_DEFAULTS.owner, repo: gRepo.value.trim() || GH_DEFAULTS.repo,
@@ -657,16 +772,34 @@
     // advanced (collapsible)
     var adv = el('div', { class: 'wc-adv', style: { display: gget('ghExpanded', false) ? 'flex' : 'none' } });
     adv.appendChild(head('Files for this generator'));
+    adv.appendChild(note('Where this generator\u2019s two files live in your repo. Paste a path \u2014 or paste a full raw.githubusercontent.com / github.com file URL and it auto-fills the owner / repo / branch below. \u201C{name}\u201D = this slug (' + name + ').'));
+    adv.appendChild(el('div', { class: 'wc-section-note', text: 'DSL / top panel \u2014 path or raw URL:' }));
     adv.appendChild(dslIn);
+    adv.appendChild(el('div', { class: 'wc-section-note', text: 'HTML panel \u2014 path or raw URL:' }));
     adv.appendChild(htmlIn);
+    adv.appendChild(note('Owner / repo / branch \u2014 optional. Fill these only to point THIS generator at a different repo than your defaults.'));
     adv.appendChild(row([ownerIn, repoIn, branchIn]));
     adv.appendChild(row([
       el('button', { class: 'wc-btn', text: 'Save mapping', title: 'Remember these paths for this slug', onclick: saveMapping }),
       el('button', { class: 'wc-btn', text: 'Reset', title: 'Use the global defaults', onclick: resetMapping })
     ]));
+    if (window.modelTextEditor || window.revisionsModal || findRevButton()) {
+      adv.appendChild(head('Backup'));
+      var bchk = el('input', { type: 'checkbox', id: 'wc-gh-backup', style: { margin: '0 8px 0 0' } });
+      bchk.checked = gget('ghBackupBeforePull', true);
+      bchk.onchange = function () { gset('ghBackupBeforePull', !!bchk.checked); };
+      adv.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center' } }, [
+        bchk,
+        el('label', { class: 'wc-section-note', for: 'wc-gh-backup', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Download a local backup before each Pull' }),
+        el('button', { class: 'wc-btn', text: 'Revisions\u2026', title: 'Open Perchance\u2019s backup / revision history', onclick: openRevisions })
+      ]));
+    }
     adv.appendChild(head('Repo defaults (all generators)'));
+    adv.appendChild(note('Set once and every generator uses them. Tip: paste a raw file URL into a template box below \u2014 it fills owner / repo / branch and rewrites the path as a {name} template that works for all your generators.'));
     adv.appendChild(row([gOwner, gRepo, gBranch]));
+    adv.appendChild(el('div', { class: 'wc-section-note', text: 'DSL path template \u2014 path or raw URL:' }));
     adv.appendChild(gDsl);
+    adv.appendChild(el('div', { class: 'wc-section-note', text: 'HTML path template \u2014 path or raw URL:' }));
     adv.appendChild(gHtml);
     adv.appendChild(row([el('button', { class: 'wc-btn', text: 'Save defaults', title: 'Owner / repo / branch + path templates for every generator', onclick: saveDefaults })]));
     sec.appendChild(adv);
@@ -687,6 +820,7 @@
     var filter = '';
     var search = el('input', { class: 'wc-field', type: 'text', placeholder: 'Search your generators\u2026   \u2191\u2193 move \u00b7 \u21b5 open' });
     var sortSel = el('select', { class: 'wc-field', style: { maxWidth: '128px', flex: 'none' } }, [['recent', 'Recent'], ['name', 'A\u2192Z'], ['fav', 'Favorites']].map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === sort) op.selected = true; return op; }));
+    var clearBtn = el('button', { class: 'wc-btn wc-mini', text: 'Clear', title: 'Clear your visited-generator history (favorites are kept)', onclick: function () { if (confirm('Clear your visited-generator history? Favorites are kept.')) { gset('recent', []); build(); toast('History cleared'); } } });
     var listEl = el('ul', { class: 'wc-list' });
     var rows = [], sel = 0;
     function model() {
@@ -725,13 +859,13 @@
       el('div', { class: 'wc-row' }, [
         el('button', { class: 'wc-btn wc-btn-accent', text: '\uFF0B New', onclick: function () { window.open('https://perchance.org/minimal#edit', '_blank'); } }),
         el('button', { class: 'wc-btn', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '#edit'; else toast('Open a generator first'); } }),
-        el('button', { class: 'wc-btn', text: 'Save', title: 'Trigger Perchance save (edit mode)', onclick: function () { if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); } catch (e) { toast('Save failed'); } } else toast('Open the editor to save'); } }),
+        el('button', { class: 'wc-btn', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave }),
         el('button', { class: 'wc-btn', text: 'Delete\u2026', title: 'Delete current generator (edit mode)', onclick: function () { if (window.settingsModal && typeof window.settingsModal.deleteGenerator === 'function') { if (confirm('Delete ' + genName() + '? This uses Perchance\u2019s own delete and cannot be undone.')) window.settingsModal.deleteGenerator(); } else toast('Open the editor settings to delete'); } })
       ]),
       el('div', { class: 'wc-section-note', text: 'Generators you\u2019ve opened or starred.' })
     ]);
     renderThisGenerator(body);
-    body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel ]));
+    body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel, clearBtn ]));
     body.appendChild(listEl);
     body.appendChild(crud);
     build();
