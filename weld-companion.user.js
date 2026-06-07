@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.22.0
+// @version      1.23.1
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -572,6 +572,30 @@
   // Save the generator. The current editor exposes no saveGenerator(); it autosaves and
   // binds Ctrl/Cmd+S, so we trigger that keybinding (legacy saveGenerator() first, if present).
   // window.perchanceSaveState reflects the outcome ('saved' / 'saving' / 'unsaved').
+  // Read a property off the real page window (window first, then unsafeWindow).
+  function pageProp(name) {
+    try { if (typeof window !== 'undefined' && typeof window[name] !== 'undefined') return window[name]; } catch (e) {}
+    try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow && typeof unsafeWindow[name] !== 'undefined') return unsafeWindow[name]; } catch (e) {}
+    return undefined;
+  }
+  // "Why won't this save?" preflight -- read-only, creds-free. Works out what Save
+  // will do from: ownership (window.userOwnsThisGenerator), a collab link in the hash
+  // (#edit:collab=KEY grants edit+save), and a stored edit password
+  // (localStorage['perchance_generatorEditKey_<name>']).
+  function savePreflight() {
+    var owns = pageProp('userOwnsThisGenerator');
+    var name = genName() || '';
+    var collabKey = null, editKey = null;
+    try { var m = (location.hash || '').match(/[#:]collab=([^;&]+)/); if (m) collabKey = decodeURIComponent(m[1]); } catch (e) {}
+    try { editKey = localStorage.getItem('perchance_generatorEditKey_' + name); } catch (e) {}
+    if (owns === true) return { mode: 'owner', label: 'Save writes in place (you own this)', detail: 'You own this generator, so Save updates it directly.' };
+    if (collabKey) return { mode: 'collab', label: 'Save writes in place (collab link)', detail: 'You\u2019re editing through a shared collab link. Save updates the owner\u2019s generator until they regenerate or revoke the link.' };
+    if (editKey) return { mode: 'editkey', label: 'Save writes in place (edit password)', detail: 'An edit password is stored for this generator, so Save updates it directly.' };
+    if (owns === false) return { mode: 'copy', label: 'Save may ask for a password or make a copy', detail: 'You don\u2019t own this and no edit password is stored. Save will prompt for the edit password if the generator has one, otherwise it saves a copy under your own account.' };
+    return { mode: 'unknown', label: 'Save mode unknown', detail: 'Couldn\u2019t read ownership state. If this is your own #edit page, Save writes in place.' };
+  }
+  function explainSave() { var p = savePreflight(); alert('Save preflight \u2014 ' + p.label + '\n\n' + p.detail); }
+
   function doSave() {
     if (gget('lintOnSave', true)) { var lp = lintHtmlScripts(); if (lp.length && !confirmLint('Save', lp)) { toast('Save cancelled'); return; } }
     if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); return; } catch (e) {} }
@@ -782,6 +806,7 @@
       GM_registerMenuCommand('Weld: Insert core plugin imports at cursor', function () { insertSnippet(snippetById('imports-core')); });
       GM_registerMenuCommand('Weld: Lint JS in HTML pane now', lintNow);
       GM_registerMenuCommand('Weld: Find bugs in active pane (AI)', aiBugCheck);
+      GM_registerMenuCommand('Weld: Explain Save (what will Save do?)', explainSave);
       GM_registerMenuCommand('Weld: Lint-before-Save (toggle)', function () { var on = !gget('lintOnSave', true); gset('lintOnSave', on); toast('Lint before Save: ' + (on ? 'ON' : 'OFF')); });
       GM_registerMenuCommand('Weld: Edit GitHub mapping (JSON)', ghEditMap);
     }
@@ -978,7 +1003,6 @@
     // ---- comfort body classes (host page) ----
     'body.wc-focus :is(.menu-bar,#adCtn,.adCtn,[id*="ad" i][class*="ad" i],aside,nav){display:none !important;}',
 
-
     // ---- pins (a tidy tray, bottom-left, below the bar) ----
     '.wc-pin-tray{position:fixed;left:14px;bottom:14px;z-index:var(--wc-z);width:248px;max-height:calc(100vh - 80px);overflow:auto;',
     '  display:flex;flex-direction:column;gap:8px;background:var(--wc-surface);border:1px solid var(--wc-line);border-radius:14px;',
@@ -1017,25 +1041,6 @@
   ].join('\n'));
 
   // (modules B–H appended below)
-
-  // ============================================================ B. favorites & recently-used
-  function recordVisit() {
-    var name = genName();
-    if (!name) return;
-    if (isEditMode()) return; // only count viewer visits
-    var recent = gget('recent', []);
-    recent = recent.filter(function (r) { return r.name !== name; });
-    recent.unshift({ name: name, t: Date.now(), title: (document.title || name).replace(/ ― Perchance.*$/, '').trim() });
-    if (recent.length > 60) recent = recent.slice(0, 60);
-    gset('recent', recent);
-  }
-  function favorites() { return gget('favorites', []); }
-  function isFav(name) { return favorites().indexOf(name) !== -1; }
-  function toggleFav(name) {
-    var f = favorites(); var i = f.indexOf(name);
-    if (i === -1) f.push(name); else f.splice(i, 1);
-    gset('favorites', f); return i === -1;
-  }
 
   // ============================================================ TOP NAVIGATION BAR + DRAWER
   // We add our tabs to the page's top navigation. Perchance already has its own
@@ -1185,6 +1190,11 @@
     if (sm0 && typeof sm0.changeGeneratorName === 'function') actions.appendChild(el('button', { class: 'wc-btn', text: 'Rename\u2026', title: 'Rename this generator (Perchance\u2019s own rename)', onclick: renameThisGenerator }));
     if (sm0 && typeof sm0.deleteGenerator === 'function') actions.appendChild(el('button', { class: 'wc-btn', style: { color: '#e70000', borderColor: '#e70000' }, text: 'Delete\u2026', title: 'Delete this generator \u2014 permanent (Perchance\u2019s own delete)', onclick: deleteThisGenerator }));
     sec.appendChild(actions);
+    if (isEditMode()) {
+      var pf = savePreflight();
+      sec.appendChild(el('div', { class: 'wc-section-note', style: { marginTop: '6px', cursor: 'pointer' },
+        title: 'What will Save do? (click for detail)', text: '\u24D8 ' + pf.label, onclick: explainSave }));
+    }
     body.appendChild(sec);
   }
 
