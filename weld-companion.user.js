@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.13.0
+// @version      1.17.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -193,6 +193,89 @@
     var btn = findRevButton();
     if (btn) { try { btn.click(); return; } catch (e) {} }
     toast('Perchance revision history not found here');
+  }
+  // ---- backup browser ---------------------------------------------------------
+  // Perchance keeps local editor backups in window.kv.localBackups (an idb-keyval
+  // Proxy), keyed by generator name, newest first; each entry is
+  // {modelText, outputTemplate, time}. Perchance only DOWNLOADS them -- we add a
+  // browsable list plus RESTORE-into-editor (via the same pane writer Pull uses,
+  // so it's Ctrl+Z-undoable). All local; no credentials, no network.
+  function pageKv() { return window.kv || (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow.kv) || null; }
+  function loadBackups(name, cb) {
+    var kv = pageKv();
+    if (!kv || !kv.localBackups || typeof kv.localBackups.get !== 'function') { cb(new Error('no-store')); return; }
+    try {
+      var p = kv.localBackups.get(name);
+      if (p && typeof p.then === 'function') p.then(function (a) { cb(null, Array.isArray(a) ? a : []); }, function (e) { cb(e || new Error('read')); });
+      else cb(null, Array.isArray(p) ? p : []);
+    } catch (e) { cb(e); }
+  }
+  function downloadBlobText(filename, text) {
+    try {
+      var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a.download = filename;
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 1500);
+    } catch (e) { toast('Download failed'); }
+  }
+  function backupFilename(name, t) {
+    var d; try { d = new Date(t).toString().toLowerCase().split(' ').slice(0, 5).join('-').replace(/:/g, '-'); } catch (e) { d = String(t); }
+    return (name || 'generator') + '-revision-' + d + '.txt';
+  }
+  function downloadBackup(name, b) {
+    var intro = '<<<<< this file contains your perchance lists first, and your HTML code underneath it >>>>>\n\n\n\n';
+    downloadBlobText(backupFilename(name, b.time), intro + (b.modelText || '') + Array(21).join('\n') + (b.outputTemplate || ''));
+  }
+  function restoreBackup(name, b) {
+    var panes = ghPanes();
+    if (!panes) { toast('Open the editor (#edit) to restore a backup'); return; }
+    var when = (function () { try { return new Date(b.time).toLocaleString(); } catch (e) { return String(b.time); } })();
+    if (!confirm('Restore the backup from ' + when + '?\n\nThis REPLACES the editor contents (undoable with Ctrl+Z). You still need to click Save afterwards.')) return;
+    var unmute = muteBugFinderError();
+    var sDsl = cmSet(panes.dsl, b.modelText || ''), sHtml = cmSet(panes.html, b.outputTemplate || '');
+    setTimeout(unmute, 2000);
+    console.log('[weld backup] restored', { name: name, time: b.time, dsl: sDsl, html: sHtml });
+    toast('Restored backup (DSL:' + sDsl + ', HTML:' + sHtml + ') \u2014 review and Save');
+  }
+  function openBackupBrowser() {
+    var name = genName() || window.generatorName;
+    if (!name) { toast('Open a generator (#edit) to browse its backups'); return; }
+    loadBackups(name, function (err, arr) {
+      if (err) { toast(err.message === 'no-store' ? 'No local backup store found on this page' : 'Couldn\u2019t read local backups'); return; }
+      renderBackupModal(name, arr || []);
+    });
+  }
+  function renderBackupModal(name, arr) {
+    var prev = document.getElementById('wc-backup-modal'); if (prev) prev.remove();
+    var ov = el('div', { id: 'wc-backup-modal', class: 'wc-root', style: { position: 'fixed', inset: '0', zIndex: '2147483646', background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' } });
+    function close() { ov.remove(); document.removeEventListener('keydown', onEsc, true); }
+    function onEsc(e) { if (e.key === 'Escape') { e.stopPropagation(); close(); } }
+    ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+    document.addEventListener('keydown', onEsc, true);
+    var panel = el('div', { style: { width: '92%', maxWidth: '540px', maxHeight: '80vh', overflow: 'auto', padding: '16px', borderRadius: '12px', background: 'var(--wc-surface,#1c1c20)', color: 'var(--wc-ink,#eee)', border: '1px solid var(--wc-line,#333)', boxShadow: 'var(--wc-shadow,0 12px 40px rgba(0,0,0,0.5))' } });
+    panel.appendChild(el('div', { class: 'wc-label', text: 'Local backups \u2014 ' + name }));
+    panel.appendChild(el('div', { class: 'wc-section-note', text: arr.length + ' backup' + (arr.length === 1 ? '' : 's') + ' in this browser, newest first. Perchance saves these automatically as you edit; Restore fills the editor (undoable), then you Save.' }));
+    if (!arr.length) {
+      panel.appendChild(el('div', { class: 'wc-gslug', style: { padding: '12px 0' }, text: 'No local backups for this generator yet.' }));
+    } else {
+      var list = el('ul', { class: 'wc-list' });
+      arr.forEach(function (b) {
+        var size = (b.modelText || '').length + (b.outputTemplate || '').length;
+        var when = (function () { try { return new Date(b.time).toLocaleString(); } catch (e) { return String(b.time); } })();
+        list.appendChild(el('li', {}, [
+          el('span', { class: 'wc-gname', style: { flex: '1' }, text: when }),
+          el('span', { class: 'wc-gslug', text: (size > 999 ? (size / 1000).toFixed(1) + 'k' : size) + ' chars' }),
+          el('button', { class: 'wc-btn wc-mini', text: 'download', title: 'Save this backup as a .txt', onclick: function () { downloadBackup(name, b); } }),
+          el('button', { class: 'wc-btn wc-mini', text: 'restore', title: 'Replace the editor with this backup (undoable)', onclick: function () { restoreBackup(name, b); } })
+        ]));
+      });
+      panel.appendChild(list);
+    }
+    panel.appendChild(el('div', { class: 'wc-row', style: { marginTop: '12px', justifyContent: 'space-between' } }, [
+      el('button', { class: 'wc-btn wc-mini', text: 'Perchance revisions\u2026', title: 'Open Perchance\u2019s own server-side revision history', onclick: function () { close(); openRevisions(); } }),
+      el('button', { class: 'wc-btn', text: 'Close', onclick: close })
+    ]));
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
   }
   // ---- owner actions (rename / delete) ----------------------------------------
   // We drive Perchance's OWN settingsModal so this script never reads or transmits
@@ -484,6 +567,7 @@
     if (typeof GM_registerMenuCommand !== 'undefined') {
       GM_registerMenuCommand('Weld: Update editor from GitHub', pullFromGitHub);
       GM_registerMenuCommand('Weld: Push editor to GitHub', function () { pushToGitHub(); });
+      GM_registerMenuCommand('Weld: Browse local backups', openBackupBrowser);
       GM_registerMenuCommand('Weld: Map THIS generator -> GitHub files', ghMapThis);
       GM_registerMenuCommand('Weld: Load my generator directory', function () { loadDirectory(); });
       GM_registerMenuCommand('Weld: Rename THIS generator', renameThisGenerator);
@@ -602,7 +686,7 @@
     '.wc-weld-item.wc-on::after{content:"";position:absolute;left:4px;right:4px;bottom:0;height:2px;background:var(--wc-arc);border-radius:2px 2px 0 0;}',
     // ---- drawer (hangs beneath Perchance\'s bar; never covers it) ----
     '.wc-scrim{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483540;background:transparent;}',
-    '.wc-drawer{position:fixed;top:8px;right:12px;width:min(440px,calc(100vw - 24px));z-index:2147483550;',
+    '.wc-drawer{position:fixed;top:8px;right:12px;width:min(700px,calc(100vw - 24px));z-index:2147483550;',
     '  display:flex;flex-direction:column;background:var(--wc-surface);border:1px solid var(--wc-line);',
     '  border-radius:14px;box-shadow:var(--wc-shadow);overflow:hidden;opacity:0;transform:translateY(-8px);',
     '  animation:wc-drawer-in .2s cubic-bezier(.2,.8,.2,1) forwards;}',
@@ -628,6 +712,9 @@
     '.wc-tab.wc-on{color:var(--wc-ink);background:var(--wc-surface-3);box-shadow:inset 0 -2px 0 var(--wc-arc);}',
     '.wc-tab .wc-ti{font-size:14px;}',
     '.wc-body{overflow:auto;padding:16px;scrollbar-width:thin;scrollbar-color:var(--wc-faint) transparent;}',
+    '.wc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px 20px;align-items:start;}',
+    '.wc-col{display:flex;flex-direction:column;gap:8px;min-width:0;}',
+    '.wc-card{border:1px solid var(--wc-line-2);border-radius:11px;padding:12px 13px;background:var(--wc-surface-2);}',
     '.wc-body::-webkit-scrollbar{width:9px;} .wc-body::-webkit-scrollbar-thumb{background:var(--wc-line);border-radius:9px;}',
     '.wc-body::-webkit-scrollbar-track{background:transparent;}',
     // a sticky footer area inside a tab (for CRUD / actions)
@@ -668,6 +755,8 @@
     '.wc-check input:checked + .wc-sw::after{transform:translateX(16px);background:var(--wc-arc);box-shadow:0 0 8px var(--wc-arc);}',
     // ---- lists ----
     '.wc-list{list-style:none;margin:0;padding:0;}',
+    '.wc-list.wc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:2px 12px;align-content:start;}',
+    '.wc-list.wc-grid > .wc-span{grid-column:1 / -1;}',
     '.wc-list li{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;',
     '  transition:background .12s;position:relative;}',
     '.wc-list li:hover{background:var(--wc-surface-3);}',
@@ -773,6 +862,7 @@
   function tabDefs() {
     return [
       { id: 'generators', glyph: '\u2605', label: 'Generators' },
+      { id: 'github', glyph: '\u21C5', label: 'GitHub' },
       { id: 'comfort', glyph: '\u{1F441}', label: 'Comfort' },
       { id: 'ai', glyph: '\u{1F916}', label: 'AI Helper' }
     ];
@@ -833,6 +923,7 @@
     var body = $('#wc-body'); if (!body) return;
     body.innerHTML = '';
     if (WC_TAB === 'generators') renderGenerators(body);
+    else if (WC_TAB === 'github') renderGitHub(body);
     else if (WC_TAB === 'comfort') renderComfort(body);
     else if (WC_TAB === 'ai') renderAI(body);
   }
@@ -856,161 +947,149 @@
     gset('favorites', f); return i === -1;
   }
 
-  // Generators tab = the old launcher + manager, merged (they list the same data).
-  // Search + sort + filter, keyboard nav, per-row star/open/edit/forget, and the
-  // CRUD actions in a footer.
-  // Top-of-panel "This Generator" section. Compact by default (slug + one Pull button);
-  // a gear reveals the advanced editor -- this generator's GitHub file paths / repo
-  // overrides, AND the global repo defaults (owner/repo/branch + path templates). The
-  // expand state is remembered, so the common user keeps a clean, uncluttered panel.
+  // Per-generator quick actions for the OPEN generator -- real buttons, not a gear.
+  // GitHub sync has its own tab; this row is edit / save / backups / rename / delete.
   function renderThisGenerator(body) {
+    var name = genName();
+    var sec = el('div', { class: 'wc-thisgen' });
+    sec.appendChild(el('label', { class: 'wc-label', text: 'This Generator' }));
+    if (!name) {
+      sec.appendChild(el('div', { class: 'wc-section-note', text: 'Open a generator (its #edit page) for Save, Backups, Rename, Delete, and GitHub sync.' }));
+      body.appendChild(sec);
+      return;
+    }
+    sec.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center' } }, [
+      el('span', { class: 'wc-gslug', style: { flex: '1', minWidth: '0' }, text: name }),
+      el('button', { class: 'wc-btn wc-mini', text: 'edit', title: 'Open this generator\u2019s editor', onclick: function () { location.href = 'https://perchance.org/' + name + '#edit'; } }),
+      el('button', { class: 'wc-btn wc-btn-accent wc-mini', text: '\u21C5 GitHub', title: 'Pull / Push this generator (GitHub tab)', onclick: function () { setTab('github'); } })
+    ]));
+    var actions = el('div', { class: 'wc-row', style: { marginTop: '8px', flexWrap: 'wrap' } }, [
+      el('button', { class: 'wc-btn', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave }),
+      el('button', { class: 'wc-btn', text: 'Backups\u2026', title: 'Browse local backups \u2014 download or restore', onclick: openBackupBrowser })
+    ]);
+    var sm0 = pageSettingsModal();
+    if (sm0 && typeof sm0.changeGeneratorName === 'function') actions.appendChild(el('button', { class: 'wc-btn', text: 'Rename\u2026', title: 'Rename this generator (Perchance\u2019s own rename)', onclick: renameThisGenerator }));
+    if (sm0 && typeof sm0.deleteGenerator === 'function') actions.appendChild(el('button', { class: 'wc-btn', style: { color: '#e70000', borderColor: '#e70000' }, text: 'Delete\u2026', title: 'Delete this generator \u2014 permanent (Perchance\u2019s own delete)', onclick: deleteThisGenerator }));
+    sec.appendChild(actions);
+    body.appendChild(sec);
+  }
+
+  // ============================================================ B2. GitHub sync (own tab)
+  function renderGitHub(body) {
     function note(t) { return el('div', { class: 'wc-section-note', text: t }); }
     function field(val, aria, ph) { return el('input', { class: 'wc-field', type: 'text', value: val, placeholder: ph || '', 'aria-label': aria, title: aria }); }
     function row(kids, mt) { return el('div', { class: 'wc-row', style: { marginTop: (mt == null ? 8 : mt) + 'px' } }, kids); }
     function head(t) { return el('div', { class: 'wc-subhead', text: t }); }
 
     var name = genName();
-    var sec = el('div', { class: 'wc-thisgen' });
-    sec.appendChild(el('label', { class: 'wc-label', text: 'This Generator' }));
-    if (!name) {
-      sec.appendChild(note('Open a generator (its #edit page) to pull it from GitHub.'));
-      body.appendChild(sec);
-      return;
+    var map = gget('githubMap', {}) || {}, base = ghCfg();
+    body.appendChild(el('label', { class: 'wc-label', text: 'GitHub sync' }));
+
+    var cols = el('div', { class: 'wc-cols' });
+    var colA = el('div', { class: 'wc-col' });   // per-generator
+    var colB = el('div', { class: 'wc-col' });   // global settings
+
+    if (name) {
+      var ov = map[name] || {}, R = ghResolve(name);
+      var dslIn = field(R.cfg.dslPath, 'DSL / top-panel file path ({name} = slug)');
+      var htmlIn = field(R.cfg.htmlPath, 'HTML-panel file path ({name} = slug)');
+      var ownerIn = field(ov.owner || '', 'owner override for this generator', base.owner ? 'owner = ' + base.owner : 'owner');
+      var repoIn = field(ov.repo || '', 'repo override for this generator', base.repo ? 'repo = ' + base.repo : 'repo');
+      var branchIn = field(ov.branch || '', 'branch override for this generator', base.branch ? 'branch = ' + base.branch : 'branch');
+      var applyUrlToField = function (inp) {
+        var p = parseGitHubUrl(inp.value); if (!p) return false;
+        if (p.owner) ownerIn.value = p.owner; if (p.repo) repoIn.value = p.repo; if (p.branch) branchIn.value = p.branch; if (p.path) inp.value = p.path; return true;
+      };
+      dslIn.addEventListener('change', function () { if (applyUrlToField(dslIn)) toast('Filled owner / repo / branch + DSL path from the URL'); });
+      htmlIn.addEventListener('change', function () { if (applyUrlToField(htmlIn)) toast('Filled owner / repo / branch + HTML path from the URL'); });
+      var liveOver = function () {
+        applyUrlToField(dslIn); applyUrlToField(htmlIn);
+        var o = { dslPath: dslIn.value.trim(), htmlPath: htmlIn.value.trim() };
+        if (ownerIn.value.trim()) o.owner = ownerIn.value.trim();
+        if (repoIn.value.trim()) o.repo = repoIn.value.trim();
+        if (branchIn.value.trim()) o.branch = branchIn.value.trim();
+        return o;
+      };
+      var saveMapping = function () { var m = gget('githubMap', {}) || {}; m[name] = liveOver(); gset('githubMap', m); toast('Saved mapping for ' + name); renderTab(); };
+      var resetMapping = function () { var m = gget('githubMap', {}) || {}; delete m[name]; gset('githubMap', m); toast('Reset ' + name + ' to defaults'); renderTab(); };
+
+      // full-width sync row, above the columns
+      body.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginBottom: '4px' } }, [
+        el('span', { class: 'wc-gslug', style: { flex: '1', minWidth: '0' }, text: name + (map[name] ? '  \u00b7  custom' : '') }),
+        el('button', { class: 'wc-btn wc-btn-accent', text: '\u2B07 Pull', title: 'Fetch this generator\u2019s files into the editor (you then Save)', onclick: function () { pullFromGitHub(liveOver()); } }),
+        el('button', { class: 'wc-btn', text: '\u2B06 Push', title: 'Commit the editor contents to GitHub (asks first)', onclick: function () { pushToGitHub(liveOver()); } })
+      ]));
+
+      var cardA = el('div', { class: 'wc-card' });
+      cardA.appendChild(head('Files for this generator'));
+      cardA.appendChild(note('Where this generator\u2019s two files live in your repo. Paste a path \u2014 or a full raw.githubusercontent.com / github.com file URL and it auto-fills owner / repo / branch. \u201C{name}\u201D = this slug (' + name + ').'));
+      cardA.appendChild(el('div', { class: 'wc-section-note', text: 'DSL / top panel \u2014 path or raw URL:' }));
+      cardA.appendChild(dslIn);
+      cardA.appendChild(el('div', { class: 'wc-section-note', text: 'HTML panel \u2014 path or raw URL:' }));
+      cardA.appendChild(htmlIn);
+      cardA.appendChild(note('Owner / repo / branch \u2014 optional. Fill only to point THIS generator at a different repo than your defaults.'));
+      cardA.appendChild(row([ownerIn, repoIn, branchIn]));
+      cardA.appendChild(row([
+        el('button', { class: 'wc-btn', text: 'Save mapping', title: 'Remember these paths for this slug', onclick: saveMapping }),
+        el('button', { class: 'wc-btn', text: 'Reset', title: 'Use the global defaults', onclick: resetMapping })
+      ]));
+      var bchk = el('input', { type: 'checkbox', id: 'wc-gh-backup', style: { margin: '0 8px 0 0' } });
+      bchk.checked = gget('ghBackupBeforePull', true);
+      bchk.onchange = function () { gset('ghBackupBeforePull', !!bchk.checked); };
+      cardA.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginTop: '8px' } }, [
+        bchk,
+        el('label', { class: 'wc-section-note', for: 'wc-gh-backup', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Download a local backup before each Pull' })
+      ]));
+      colA.appendChild(cardA);
+    } else {
+      colA.appendChild(el('div', { class: 'wc-card' }, [note('Open a generator (its #edit page) to Pull or Push it. You can still set your token and repo defaults \u2192')]));
     }
 
-    var map = gget('githubMap', {}) || {}, ov = map[name] || {}, base = ghCfg(), R = ghResolve(name);
+    var cardTok = el('div', { class: 'wc-card' });
+    cardTok.appendChild(head('GitHub push token'));
+    cardTok.appendChild(note('Push commits the editor to GitHub, which needs a Personal Access Token. Use a fine-grained token scoped to this one repo with Contents: read & write. Stored locally; sent only to api.github.com; never logged.'));
+    var tokIn = el('input', { class: 'wc-field', type: 'password', placeholder: ghToken() ? '\u2022\u2022\u2022\u2022 token saved \u2014 type to replace' : 'github_pat_\u2026 / ghp_\u2026', 'aria-label': 'GitHub personal access token', autocomplete: 'off' });
+    cardTok.appendChild(tokIn);
+    cardTok.appendChild(row([
+      el('button', { class: 'wc-btn', text: 'Save token', title: 'Store the token locally for Push', onclick: function () { var v = tokIn.value.trim(); if (!v) { toast('Paste a token first'); return; } gset('ghToken', v); tokIn.value = ''; tokIn.placeholder = '\u2022\u2022\u2022\u2022 token saved \u2014 type to replace'; toast('GitHub token saved'); } }),
+      el('button', { class: 'wc-btn', text: 'Clear token', title: 'Remove the stored token', onclick: function () { gdel('ghToken'); tokIn.value = ''; tokIn.placeholder = 'github_pat_\u2026 / ghp_\u2026'; toast('GitHub token cleared'); } })
+    ]));
+    colB.appendChild(cardTok);
 
-    // per-generator mapping inputs
-    var dslIn = field(R.cfg.dslPath, 'DSL / top-panel file path ({name} = slug)');
-    var htmlIn = field(R.cfg.htmlPath, 'HTML-panel file path ({name} = slug)');
-    var ownerIn = field(ov.owner || '', 'owner override for this generator', base.owner ? 'owner = ' + base.owner : 'owner');
-    var repoIn = field(ov.repo || '', 'repo override for this generator', base.repo ? 'repo = ' + base.repo : 'repo');
-    var branchIn = field(ov.branch || '', 'branch override for this generator', base.branch ? 'branch = ' + base.branch : 'branch');
-    // Smart paste: if a path field holds a full GitHub URL (raw or blob), parse
-    // it -> fill the owner/repo/branch override + reduce the field to the bare
-    // path. Returns true if a URL was applied; a no-op for plain paths.
-    function applyUrlToField(inp) {
-      var p = parseGitHubUrl(inp.value);
-      if (!p) return false;
-      if (p.owner) ownerIn.value = p.owner;
-      if (p.repo) repoIn.value = p.repo;
-      if (p.branch) branchIn.value = p.branch;
-      if (p.path) inp.value = p.path;
-      return true;
-    }
-    dslIn.addEventListener('change', function () { if (applyUrlToField(dslIn)) toast('Filled owner / repo / branch + DSL path from the URL'); });
-    htmlIn.addEventListener('change', function () { if (applyUrlToField(htmlIn)) toast('Filled owner / repo / branch + HTML path from the URL'); });
-    function liveOver() {
-      applyUrlToField(dslIn); applyUrlToField(htmlIn);   // catch paste-then-Pull without blurring a field
-      var o = { dslPath: dslIn.value.trim(), htmlPath: htmlIn.value.trim() };
-      if (ownerIn.value.trim()) o.owner = ownerIn.value.trim();
-      if (repoIn.value.trim()) o.repo = repoIn.value.trim();
-      if (branchIn.value.trim()) o.branch = branchIn.value.trim();
-      return o;
-    }
-    function saveMapping() { var m = gget('githubMap', {}) || {}; m[name] = liveOver(); gset('githubMap', m); toast('Saved mapping for ' + name); renderTab(); }
-    function resetMapping() { var m = gget('githubMap', {}) || {}; delete m[name]; gset('githubMap', m); toast('Reset ' + name + ' to defaults'); renderTab(); }
-
-    // global repo defaults inputs
     var gOwner = field(base.owner, 'default owner (all generators)', 'github username');
     var gRepo = field(base.repo, 'default repo', 'repository name');
     var gBranch = field(base.branch, 'default branch', 'main');
     var gDsl = field(base.dslPath, 'default DSL path template ({name} = slug)');
     var gHtml = field(base.htmlPath, 'default HTML path template ({name} = slug)');
-    // Smart paste for the global templates: a pasted URL fills owner/repo/branch
-    // AND turns the path into a reusable template by swapping this generator's
-    // slug for {name}, so the one template applies to every generator.
-    function applyUrlToTemplate(inp) {
-      var p = parseGitHubUrl(inp.value);
-      if (!p) return false;
-      if (p.owner) gOwner.value = p.owner;
-      if (p.repo) gRepo.value = p.repo;
-      if (p.branch) gBranch.value = p.branch;
-      if (p.path) inp.value = name ? p.path.split(name).join('{name}') : p.path;
-      return true;
-    }
+    var applyUrlToTemplate = function (inp) {
+      var p = parseGitHubUrl(inp.value); if (!p) return false;
+      if (p.owner) gOwner.value = p.owner; if (p.repo) gRepo.value = p.repo; if (p.branch) gBranch.value = p.branch;
+      if (p.path) inp.value = name ? p.path.split(name).join('{name}') : p.path; return true;
+    };
     gDsl.addEventListener('change', function () { if (applyUrlToTemplate(gDsl)) toast('Filled defaults + made a {name} template from the URL'); });
     gHtml.addEventListener('change', function () { if (applyUrlToTemplate(gHtml)) toast('Filled defaults + made a {name} template from the URL'); });
-    function saveDefaults() {
+    var saveDefaults = function () {
       gset('github', {
         owner: gOwner.value.trim() || GH_DEFAULTS.owner, repo: gRepo.value.trim() || GH_DEFAULTS.repo,
         branch: gBranch.value.trim() || GH_DEFAULTS.branch, dslPath: gDsl.value.trim() || GH_DEFAULTS.dslPath,
         htmlPath: gHtml.value.trim() || GH_DEFAULTS.htmlPath
       });
       toast('Repo defaults saved'); renderTab();
-    }
-
-    // compact header: slug + Pull + Push + gear
-    var gear = el('button', { class: 'wc-btn wc-mini', text: '\u2699', title: 'Mapping & repo settings', 'aria-label': 'GitHub mapping and repo settings', 'aria-expanded': 'false' });
-    var pushBtn = el('button', { class: 'wc-btn', text: '\u2B06 Push', title: 'Commit the current editor contents to GitHub (asks first)', onclick: function () { pushToGitHub(liveOver()); } });
-    sec.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center' } }, [
-      el('span', { class: 'wc-gslug', style: { flex: '1', minWidth: '0' }, text: name + (map[name] ? '  \u00b7  custom' : '') }),
-      el('button', { class: 'wc-btn wc-btn-accent', text: '\u2B07 Pull', title: 'Fetch this generator\u2019s files and fill the editor panes (you then Save)', onclick: function () { pullFromGitHub(liveOver()); } }),
-      pushBtn,
-      gear
-    ]));
-
-    // advanced (collapsible)
-    var adv = el('div', { class: 'wc-adv', style: { display: gget('ghExpanded', false) ? 'flex' : 'none' } });
-    adv.appendChild(head('Files for this generator'));
-    adv.appendChild(note('Where this generator\u2019s two files live in your repo. Paste a path \u2014 or paste a full raw.githubusercontent.com / github.com file URL and it auto-fills the owner / repo / branch below. \u201C{name}\u201D = this slug (' + name + ').'));
-    adv.appendChild(el('div', { class: 'wc-section-note', text: 'DSL / top panel \u2014 path or raw URL:' }));
-    adv.appendChild(dslIn);
-    adv.appendChild(el('div', { class: 'wc-section-note', text: 'HTML panel \u2014 path or raw URL:' }));
-    adv.appendChild(htmlIn);
-    adv.appendChild(note('Owner / repo / branch \u2014 optional. Fill these only to point THIS generator at a different repo than your defaults.'));
-    adv.appendChild(row([ownerIn, repoIn, branchIn]));
-    adv.appendChild(row([
-      el('button', { class: 'wc-btn', text: 'Save mapping', title: 'Remember these paths for this slug', onclick: saveMapping }),
-      el('button', { class: 'wc-btn', text: 'Reset', title: 'Use the global defaults', onclick: resetMapping })
-    ]));
-    if (window.modelTextEditor || window.revisionsModal || findRevButton()) {
-      adv.appendChild(head('Backup'));
-      var bchk = el('input', { type: 'checkbox', id: 'wc-gh-backup', style: { margin: '0 8px 0 0' } });
-      bchk.checked = gget('ghBackupBeforePull', true);
-      bchk.onchange = function () { gset('ghBackupBeforePull', !!bchk.checked); };
-      adv.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center' } }, [
-        bchk,
-        el('label', { class: 'wc-section-note', for: 'wc-gh-backup', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Download a local backup before each Pull' }),
-        el('button', { class: 'wc-btn', text: 'Revisions\u2026', title: 'Open Perchance\u2019s backup / revision history', onclick: openRevisions })
-      ]));
-    }
-    var sm0 = pageSettingsModal();
-    if (sm0 && (typeof sm0.changeGeneratorName === 'function' || typeof sm0.deleteGenerator === 'function')) {
-      adv.appendChild(head('Owner actions'));
-      adv.appendChild(note('Uses Perchance\u2019s own rename / delete \u2014 your login is handled by Perchance, never by this script. Delete is permanent and asks you to type \u201Cyes\u201D.'));
-      adv.appendChild(row([
-        el('button', { class: 'wc-btn', text: 'Rename\u2026', title: 'Rename this generator (Perchance\u2019s own rename)', onclick: renameThisGenerator }),
-        el('button', { class: 'wc-btn', style: { color: '#e70000', borderColor: '#e70000' }, text: 'Delete\u2026', title: 'Delete this generator \u2014 permanent (Perchance\u2019s own delete)', onclick: deleteThisGenerator })
-      ]));
-    }
-    adv.appendChild(head('GitHub push (token)'));
-    adv.appendChild(note('Push commits the editor to GitHub, which needs a Personal Access Token. Use a fine-grained token scoped to this one repo with Contents: read & write. It is stored locally in this script and sent only to api.github.com \u2014 never logged.'));
-    var tokIn = el('input', { class: 'wc-field', type: 'password', placeholder: ghToken() ? '\u2022\u2022\u2022\u2022 token saved \u2014 type to replace' : 'github_pat_\u2026 / ghp_\u2026', 'aria-label': 'GitHub personal access token', autocomplete: 'off' });
-    adv.appendChild(tokIn);
-    adv.appendChild(row([
-      el('button', { class: 'wc-btn', text: 'Save token', title: 'Store the token locally for Push', onclick: function () { var v = tokIn.value.trim(); if (!v) { toast('Paste a token first'); return; } gset('ghToken', v); tokIn.value = ''; tokIn.placeholder = '\u2022\u2022\u2022\u2022 token saved \u2014 type to replace'; toast('GitHub token saved'); } }),
-      el('button', { class: 'wc-btn', text: 'Clear token', title: 'Remove the stored token', onclick: function () { gdel('ghToken'); tokIn.value = ''; tokIn.placeholder = 'github_pat_\u2026 / ghp_\u2026'; toast('GitHub token cleared'); } })
-    ]));
-    adv.appendChild(head('Repo defaults (all generators)'));
-    adv.appendChild(note('Set once and every generator uses them. Tip: paste a raw file URL into a template box below \u2014 it fills owner / repo / branch and rewrites the path as a {name} template that works for all your generators.'));
-    adv.appendChild(row([gOwner, gRepo, gBranch]));
-    adv.appendChild(el('div', { class: 'wc-section-note', text: 'DSL path template \u2014 path or raw URL:' }));
-    adv.appendChild(gDsl);
-    adv.appendChild(el('div', { class: 'wc-section-note', text: 'HTML path template \u2014 path or raw URL:' }));
-    adv.appendChild(gHtml);
-    adv.appendChild(row([el('button', { class: 'wc-btn', text: 'Save defaults', title: 'Owner / repo / branch + path templates for every generator', onclick: saveDefaults })]));
-    sec.appendChild(adv);
-
-    gear.onclick = function () {
-      var open = adv.style.display === 'none';
-      adv.style.display = open ? 'flex' : 'none';
-      gear.setAttribute('aria-expanded', open ? 'true' : 'false');
-      gset('ghExpanded', open);
     };
-    if (gget('ghExpanded', false)) gear.setAttribute('aria-expanded', 'true');
+    var cardDef = el('div', { class: 'wc-card' });
+    cardDef.appendChild(head('Repo defaults (all generators)'));
+    cardDef.appendChild(note('Set once and every generator uses them. Tip: paste a raw file URL into a template box \u2014 it fills owner / repo / branch and rewrites the path as a {name} template.'));
+    cardDef.appendChild(row([gOwner, gRepo, gBranch]));
+    cardDef.appendChild(el('div', { class: 'wc-section-note', text: 'DSL path template \u2014 path or raw URL:' }));
+    cardDef.appendChild(gDsl);
+    cardDef.appendChild(el('div', { class: 'wc-section-note', text: 'HTML path template \u2014 path or raw URL:' }));
+    cardDef.appendChild(gHtml);
+    cardDef.appendChild(row([el('button', { class: 'wc-btn', text: 'Save defaults', title: 'Owner / repo / branch + path templates for every generator', onclick: saveDefaults })]));
+    colB.appendChild(cardDef);
 
-    body.appendChild(sec);
+    cols.appendChild(colA);
+    cols.appendChild(colB);
+    body.appendChild(cols);
   }
 
   function renderGenerators(body) {
@@ -1021,7 +1100,7 @@
     var sortSel = el('select', { class: 'wc-field', style: { maxWidth: '128px', flex: 'none' } }, [['recent', 'Recent'], ['name', 'A\u2192Z'], ['fav', 'Favorites'], ['folder', 'Folders']].map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === sort) op.selected = true; return op; }));
     var loadBtn = el('button', { class: 'wc-btn wc-mini', title: 'Load all your generators from Perchance, grouped by your folders', text: dir ? '\u21bb ' + (dir.names ? dir.names.length : 'All') : 'Load all', onclick: function () { loadDirectory(function (ok) { if (ok) { dir = gget('directory', null); loadBtn.textContent = '\u21bb ' + (dir.names ? dir.names.length : 'All'); sort = 'folder'; sortSel.value = 'folder'; gset('mgrSort', 'folder'); build(); } }); } });
     var clearBtn = el('button', { class: 'wc-btn wc-mini', text: 'Clear', title: 'Clear your visited-generator history (favorites are kept)', onclick: function () { if (confirm('Clear your visited-generator history? Favorites are kept.')) { gset('recent', []); build(); toast('History cleared'); } } });
-    var listEl = el('ul', { class: 'wc-list' });
+    var listEl = el('ul', { class: 'wc-list wc-grid' });
     var rows = [], sel = 0;
     function fkey(f) { return f === 'uncategorized' ? '\uffff' : (f || '\ufffe'); }
     function model() {
@@ -1047,12 +1126,12 @@
     function build() {
       listEl.innerHTML = ''; rows = [];
       var items = model();
-      if (!items.length) { listEl.appendChild(el('li', { class: 'wc-gslug', text: filter ? 'No matches.' : 'Hit \u201CLoad all\u201D for your whole directory, or visit generators to populate this list.' })); return; }
+      if (!items.length) { listEl.appendChild(el('li', { class: 'wc-gslug wc-span', text: filter ? 'No matches.' : 'Hit \u201CLoad all\u201D for your whole directory, or visit generators to populate this list.' })); return; }
       var lastFolder = null;
       items.slice(0, 300).forEach(function (it, idx) {
         if (sort === 'folder' && it.folder && it.folder !== lastFolder) {
           lastFolder = it.folder;
-          listEl.appendChild(el('li', { class: 'wc-gslug', style: { fontWeight: '700', opacity: '0.65', textTransform: 'uppercase', letterSpacing: '0.04em', padding: '8px 4px 2px', cursor: 'default' }, text: it.folder }));
+          listEl.appendChild(el('li', { class: 'wc-gslug wc-span', style: { fontWeight: '700', opacity: '0.65', textTransform: 'uppercase', letterSpacing: '0.04em', padding: '8px 4px 2px', cursor: 'default' }, text: it.folder }));
         }
         var star = el('span', { class: 'wc-star' + (isFav(it.name) ? ' on' : ''), text: '\u2605', onclick: function (e) { e.stopPropagation(); var on = toggleFav(it.name); star.classList.toggle('on', on); } });
         var open = el('button', { class: 'wc-btn wc-mini', text: 'open', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name; } });
@@ -1074,12 +1153,10 @@
     });
     var crud = el('div', { class: 'wc-foot' }, [
       el('div', { class: 'wc-row' }, [
-        el('button', { class: 'wc-btn wc-btn-accent', text: '\uFF0B New', onclick: function () { window.open('https://perchance.org/minimal#edit', '_blank'); } }),
-        el('button', { class: 'wc-btn', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '#edit'; else toast('Open a generator first'); } }),
-        el('button', { class: 'wc-btn', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave }),
-        el('button', { class: 'wc-btn', text: 'Delete\u2026', title: 'Delete current generator (edit mode)', onclick: function () { if (window.settingsModal && typeof window.settingsModal.deleteGenerator === 'function') { if (confirm('Delete ' + genName() + '? This uses Perchance\u2019s own delete and cannot be undone.')) window.settingsModal.deleteGenerator(); } else toast('Open the editor settings to delete'); } })
+        el('button', { class: 'wc-btn wc-btn-accent', text: '\uFF0B New', title: 'Start a new generator', onclick: function () { window.open('https://perchance.org/minimal#edit', '_blank'); } }),
+        el('button', { class: 'wc-btn', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '#edit'; else toast('Open a generator first'); } })
       ]),
-      el('div', { class: 'wc-section-note', text: 'Favorites, generators you\u2019ve opened, and \u2014 via Load all \u2014 your whole Perchance directory grouped by your folders.' })
+      el('div', { class: 'wc-section-note', text: 'Favorites, generators you\u2019ve opened, and \u2014 via Load all \u2014 your whole Perchance directory grouped by your folders. Save / rename / delete the open one are up top; GitHub sync is its own tab.' })
     ]);
     renderThisGenerator(body);
     body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel, loadBtn, clearBtn ]));
@@ -1193,18 +1270,29 @@
     });
 
     body.appendChild(toggle(enable, 'Apply comfort layout'));
-    body.appendChild(el('label', { class: 'wc-label', text: 'Theme' }));
-    body.appendChild(swatchRow);
-    body.appendChild(el('div', { class: 'wc-row', style: { marginTop: '4px' } }, [
+
+    var cols = el('div', { class: 'wc-cols', style: { marginTop: '12px' } });
+    var cardTheme = el('div', { class: 'wc-card wc-col' });
+    cardTheme.appendChild(el('label', { class: 'wc-label', text: 'Theme & typography' }));
+    cardTheme.appendChild(swatchRow);
+    cardTheme.appendChild(el('div', { class: 'wc-row', style: { marginTop: '8px' } }, [
       el('div', { style: { flex: '1' } }, [field('Font size', font)]),
       el('div', { style: { flex: '1' } }, [field('Line height', lh)])
     ]));
-    body.appendChild(field('Max width px', width));
-    body.appendChild(el('div', { style: { marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' } }, [
+    cardTheme.appendChild(field('Max width px', width));
+
+    var cardOpts = el('div', { class: 'wc-card wc-col' });
+    cardOpts.appendChild(el('label', { class: 'wc-label', text: 'Options' }));
+    cardOpts.appendChild(el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, [
       toggle(dysCb,   'Dyslexia-friendly font'),
       toggle(editorCb, 'Also size the code editor (#edit panes)'),
       toggle(focusCb, 'Focus mode (hide menus & sidebar)')
     ]));
+
+    cols.appendChild(cardTheme);
+    cols.appendChild(cardOpts);
+    body.appendChild(cols);
+
     body.appendChild(el('div', { class: 'wc-foot' }, [
       el('div', { class: 'wc-row' }, [
         el('button', { class: 'wc-btn', text: 'Reset to defaults', onclick: function () { gdel('comfort:' + genName()); applyComfort(); renderTab(); } })
@@ -1485,12 +1573,17 @@
       cfg.provider = provider.value;
       callOwnAI(cfg, 'You are a helper. Reply with the single word: ok', 'ping', function (err, txt) { toast(err ? ('\u2717 ' + err).slice(0, 80) : ('\u2713 ' + (txt || '').trim().slice(0, 40))); });
     } });
-    body.appendChild(el('label', { class: 'wc-label', text: 'Provider' }));
-    body.appendChild(provider);
-    body.appendChild(keyWrap);
-    body.appendChild(modelWrap);
-    body.appendChild(el('label', { class: 'wc-label', text: 'Custom instruction (system prompt)' }));
-    body.appendChild(instruction);
+    var aicols = el('div', { class: 'wc-cols' });
+    var cardP = el('div', { class: 'wc-card wc-col' });
+    cardP.appendChild(el('label', { class: 'wc-label', text: 'Provider' }));
+    cardP.appendChild(provider);
+    cardP.appendChild(keyWrap);
+    cardP.appendChild(modelWrap);
+    var cardI = el('div', { class: 'wc-card wc-col' });
+    cardI.appendChild(el('label', { class: 'wc-label', text: 'Custom instruction (system prompt)' }));
+    cardI.appendChild(instruction);
+    aicols.appendChild(cardP); aicols.appendChild(cardI);
+    body.appendChild(aicols);
     body.appendChild(el('div', { class: 'wc-foot' }, [
       el('div', { class: 'wc-row' }, [ el('button', { class: 'wc-btn wc-btn-accent', text: 'Save', onclick: save }), test ]),
       el('div', { class: 'wc-section-note', text: 'Your key is stored only in this browser and sent only to the provider you pick. \u201cPerchance built-in\u201d keeps the default broker with just a custom instruction.' })
