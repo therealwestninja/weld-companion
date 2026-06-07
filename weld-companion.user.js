@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.21.0
+// @version      1.22.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -21,6 +21,7 @@
 // @connect      perchance.org
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
+// @connect      editor-copilot.perchance.org
 // @connect      *
 // @run-at       document-idle
 // @noframes
@@ -270,6 +271,75 @@
     if (!p.length) { toast('\u2713 No JavaScript problems in the HTML pane'); return; }
     console.warn('[weld lint]', p);
     alert('JavaScript problems in the HTML pane (' + p.length + '):\n\n' + p.slice(0, 20).map(fmtLintProb).join('\n') + (p.length > 20 ? '\n\u2026 and ' + (p.length - 20) + ' more (see console)' : ''));
+  }
+
+  // ---- AI bug-check: Perchance's own editor copilot, creds-free ----
+  // POST {code, contentType, generatorName} to editor-copilot; no sessionToken/email
+  // in the body (confirmed). The response SHAPE was never captured, so we parse
+  // defensively across plausible containers and always log the raw body — a real
+  // run then lets us tighten this. Cookies are sent (default) to match the page.
+  function activeEditorPane() {
+    var d = dslView(), h = htmlView();
+    try { if (h && h.hasFocus) return { v: h, docId: 'outputTemplate', name: 'HTML panel' }; } catch (e) {}
+    try { if (d && d.hasFocus) return { v: d, docId: 'modelText', name: 'DSL (top) panel' }; } catch (e) {}
+    if (d) return { v: d, docId: 'modelText', name: 'DSL (top) panel' };
+    if (h) return { v: h, docId: 'outputTemplate', name: 'HTML panel' };
+    return null;
+  }
+  function bugItems(data) {
+    if (data == null) return null;
+    var arr = Array.isArray(data) ? data
+            : Array.isArray(data.bugs) ? data.bugs
+            : Array.isArray(data.issues) ? data.issues
+            : Array.isArray(data.results) ? data.results
+            : Array.isArray(data.problems) ? data.problems
+            : null;
+    if (arr) {
+      return arr.map(function (it) {
+        if (it == null) return { line: null, message: '' };
+        if (typeof it === 'string') return { line: null, message: it };
+        var line = (it.line != null) ? it.line
+                 : (it.lineNumber != null) ? it.lineNumber
+                 : (it.from && it.from.line != null) ? it.from.line : null;
+        var msg = it.explanation || it.message || it.description || it.snippet || JSON.stringify(it);
+        return { line: line, message: String(msg) };
+      });
+    }
+    if (typeof data === 'string') return data.trim() ? [{ line: null, message: data }] : [];
+    if (typeof data.text === 'string') return data.text.trim() ? [{ line: null, message: data.text }] : [];
+    if (typeof data.result === 'string') return data.result.trim() ? [{ line: null, message: data.result }] : [];
+    if (data.bugs === false || data.hasBugs === false || data.ok === true) return [];
+    return null;   // unknown -> caller shows raw so we can tighten the parser
+  }
+  function handleBugCheck(res, paneName) {
+    var raw = (res && res.responseText) || '';
+    if (window.console) console.log('[weld bug-check] HTTP', res && res.status, 'raw:', raw);
+    if (!res || res.status < 200 || res.status >= 300) { toast('Bug check: HTTP ' + (res && res.status) + ' (see console)'); return; }
+    var data = null; try { data = JSON.parse(raw); } catch (e) {}
+    var items = (data == null) ? null : bugItems(data);
+    if (items === null) { alert('AI review of the ' + paneName + ' \u2014 unrecognized response (logged to console):\n\n' + raw.slice(0, 1200)); return; }
+    if (!items.length) { toast('\u2713 AI found no bugs in the ' + paneName); return; }
+    var lines = items.slice(0, 12).map(function (b) { return '\u2022 ' + (b.line != null ? ('line ' + b.line + ' \u2014 ') : '') + b.message; }).join('\n');
+    var more = items.length > 12 ? ('\n\u2026 and ' + (items.length - 12) + ' more (see console)') : '';
+    alert('AI review of the ' + paneName + ' \u2014 ' + items.length + ' note(s):\n\n' + lines + more);
+  }
+  function aiBugCheck() {
+    var a = activeEditorPane();
+    if (!a) { toast('Open a generator\u2019s #edit page first'); return; }
+    var code = viewText(a.v);
+    if (!code.trim()) { toast('That pane is empty'); return; }
+    toast('Asking Perchance\u2019s AI to review the ' + a.name + '\u2026');
+    try {
+      GM_xmlhttpRequest({
+        method: 'POST', url: 'https://editor-copilot.perchance.org/api/findBugsInCode',
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify({ code: code, contentType: a.docId, generatorName: genName() || '' }),
+        timeout: 30000,
+        onload: function (res) { handleBugCheck(res, a.name); },
+        onerror: function () { toast('Bug check failed (network)'); },
+        ontimeout: function () { toast('Bug check timed out'); }
+      });
+    } catch (e) { toast('Bug check error: ' + ((e && e.message) || e)); }
   }
 
   // Write text into a CM6 pane. Primary: a real EditorView transaction -- reliable, and
@@ -711,6 +781,7 @@
       GM_registerMenuCommand('Weld: Insert $meta block at cursor', function () { insertSnippet(snippetById('meta')); });
       GM_registerMenuCommand('Weld: Insert core plugin imports at cursor', function () { insertSnippet(snippetById('imports-core')); });
       GM_registerMenuCommand('Weld: Lint JS in HTML pane now', lintNow);
+      GM_registerMenuCommand('Weld: Find bugs in active pane (AI)', aiBugCheck);
       GM_registerMenuCommand('Weld: Lint-before-Save (toggle)', function () { var on = !gget('lintOnSave', true); gset('lintOnSave', on); toast('Lint before Save: ' + (on ? 'ON' : 'OFF')); });
       GM_registerMenuCommand('Weld: Edit GitHub mapping (JSON)', ghEditMap);
     }
@@ -1107,6 +1178,7 @@
     var actions = el('div', { class: 'wc-row', style: { marginTop: '8px', flexWrap: 'wrap' } }, [
       el('button', { class: 'wc-btn', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave }),
       el('button', { class: 'wc-btn', text: 'Lint JS', title: 'Check the HTML pane\u2019s <script> blocks for JavaScript errors', onclick: lintNow }),
+      el('button', { class: 'wc-btn', text: 'Find bugs (AI)', title: 'Send the active pane to Perchance\u2019s AI bug reviewer', onclick: aiBugCheck }),
       el('button', { class: 'wc-btn', text: 'Backups\u2026', title: 'Browse local backups \u2014 download or restore', onclick: openBackupBrowser })
     ]);
     var sm0 = pageSettingsModal();
@@ -1208,7 +1280,7 @@
       lchk,
       el('label', { class: 'wc-section-note', for: 'wc-lint-save', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Lint JS before each Save (warn on errors)' })
     ]));
-    cardLint.appendChild(row([ el('button', { class: 'wc-btn', text: 'Lint JS now', title: 'Check the HTML pane\u2019s <script> blocks now', onclick: lintNow }) ]));
+    cardLint.appendChild(row([ el('button', { class: 'wc-btn', text: 'Lint JS now', title: 'Check the HTML pane\u2019s <script> blocks now', onclick: lintNow }), el('button', { class: 'wc-btn', text: 'Find bugs (AI)', title: 'AI review of the active pane via Perchance\u2019s editor copilot', onclick: aiBugCheck }) ]));
     colB.appendChild(cardLint);
 
     var gOwner = field(base.owner, 'default owner (all generators)', 'github username');
@@ -1803,6 +1875,9 @@
 
   // ============================================================ bootstrap
   function shortcuts(e) {
+    var mod = e.ctrlKey || e.metaKey;
+    if (mod && e.altKey && e.code === 'KeyP') { e.preventDefault(); if (isEditMode()) pullFromGitHub(); else toast('Pull: open an #edit page first'); return; }
+    if (mod && e.altKey && e.code === 'KeyS') { e.preventDefault(); if (isEditMode()) doSave(); else toast('Save: open an #edit page first'); return; }
     var typing = /input|textarea|select/i.test((e.target.tagName || '')) || e.target.isContentEditable;
     if (e.key === '/' && !typing) { e.preventDefault(); openWindow('generators'); return; }
     if (typing) return;
@@ -1810,7 +1885,7 @@
     else if (e.key === 'c' || e.key === 'C') { var o = outputNode(); if (o) copyText(nodeToText(o)); }
     else if (e.key === '[') { if (histPos > 0) restore(histPos - 1); }
     else if (e.key === ']') { if (histPos < histStack.length - 1) restore(histPos + 1); }
-    else if (e.key === '?') { toast('/ open \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history', 4000); }
+    else if (e.key === '?') { toast('/ open \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history \u00b7 Ctrl/Cmd+Alt+P pull \u00b7 Ctrl/Cmd+Alt+S save', 4800); }
   }
 
   // ============================================================ SKYBRIDGE ANCHOR
