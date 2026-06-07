@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.23.1
+// @version      1.24.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -683,6 +683,120 @@
     ghFetch(dslUrl, function (err, text) { got.dsl = { err: err, text: text }; done(); });
     ghFetch(htmlUrl, function (err, text) { got.html = { err: err, text: text }; done(); });
   }
+  // ---- Diff vs GitHub (local-only; reads both sides, writes nothing) ----------
+  // Compares the live editor panes against the repo version. Reuses Pull's resolve
+  // + ghFetch. Direction: GitHub -> editor (a "-" line is only in GitHub, a "+" is
+  // only in your editor). LCS after trimming common prefix/suffix; coarse block
+  // diff if the changed region is too large for an O(n*m) table.
+  function lineDiffOps(aText, bText) {
+    var a = String(aText).split('\n'), b = String(bText).split('\n');
+    var n = a.length, m = b.length, ops = [];
+    var p = 0; while (p < n && p < m && a[p] === b[p]) p++;
+    var sa = n, sb = m; while (sa > p && sb > p && a[sa - 1] === b[sb - 1]) { sa--; sb--; }
+    var i;
+    for (i = 0; i < p; i++) ops.push({ t: '=', a: i, b: i });
+    var midA = a.slice(p, sa), midB = b.slice(p, sb);
+    if (midA.length || midB.length) {
+      if (midA.length * midB.length > 2000000) {
+        for (var x = 0; x < midA.length; x++) ops.push({ t: '-', a: p + x });
+        for (var y = 0; y < midB.length; y++) ops.push({ t: '+', b: p + y });
+      } else {
+        var dp = []; for (var r = 0; r <= midA.length; r++) dp.push(new Int32Array(midB.length + 1));
+        for (r = midA.length - 1; r >= 0; r--) for (var c = midB.length - 1; c >= 0; c--)
+          dp[r][c] = (midA[r] === midB[c]) ? dp[r + 1][c + 1] + 1 : Math.max(dp[r + 1][c], dp[r][c + 1]);
+        var ra = 0, rb = 0;
+        while (ra < midA.length && rb < midB.length) {
+          if (midA[ra] === midB[rb]) { ops.push({ t: '=', a: p + ra, b: p + rb }); ra++; rb++; }
+          else if (dp[ra + 1][rb] >= dp[ra][rb + 1]) { ops.push({ t: '-', a: p + ra }); ra++; }
+          else { ops.push({ t: '+', b: p + rb }); rb++; }
+        }
+        while (ra < midA.length) { ops.push({ t: '-', a: p + ra }); ra++; }
+        while (rb < midB.length) { ops.push({ t: '+', b: p + rb }); rb++; }
+      }
+    }
+    for (i = sa; i < n; i++) ops.push({ t: '=', a: i, b: sb + (i - sa) });
+    return { ops: ops, a: a, b: b };
+  }
+  function diffStats(d) { var add = 0, del = 0; d.ops.forEach(function (o) { if (o.t === '+') add++; else if (o.t === '-') del++; }); return { add: add, del: del }; }
+  function diffRows(d, maxRows) {
+    var CTX = 3, rows = [], ops = d.ops, i = 0;
+    function ctxRow(o) { return { cls: 'ctx', num: (o.a != null ? o.a + 1 : o.b + 1), text: (o.a != null ? d.a[o.a] : d.b[o.b]) }; }
+    while (i < ops.length) {
+      if (ops[i].t === '=') {
+        var run = 0; while (i + run < ops.length && ops[i + run].t === '=') run++;
+        var before = rows.length > 0, after = (i + run) < ops.length;
+        if (run > CTX * 2 && (before || after)) {
+          if (before) for (var x = 0; x < CTX; x++) rows.push(ctxRow(ops[i + x]));
+          rows.push({ cls: 'gap', text: '\u22EF ' + (run - (before ? CTX : 0) - (after ? CTX : 0)) + ' unchanged' });
+          if (after) for (var y = run - CTX; y < run; y++) rows.push(ctxRow(ops[i + y]));
+        } else { for (var z = 0; z < run; z++) rows.push(ctxRow(ops[i + z])); }
+        i += run;
+      } else if (ops[i].t === '-') { rows.push({ cls: 'del', num: ops[i].a + 1, text: d.a[ops[i].a] }); i++; }
+      else { rows.push({ cls: 'add', num: ops[i].b + 1, text: d.b[ops[i].b] }); i++; }
+      if (rows.length > maxRows) { rows.push({ cls: 'gap', text: '\u2026 diff truncated \u2014 use Pull/Push to apply' }); break; }
+    }
+    return rows;
+  }
+  function diffVsGitHub(over) {
+    var name = genName();
+    if (!name) { toast('Open a generator first'); return; }
+    var dv = dslView(), hv = htmlView();
+    if (!isCmView(dv) || !isCmView(hv)) { toast('Open the editor (#edit) first \u2014 no editor panes found'); return; }
+    var R = ghResolve(name);
+    if (over && (over.dslPath || over.htmlPath || over.owner || over.repo || over.branch)) {
+      var cfgO = { owner: over.owner || R.cfg.owner, repo: over.repo || R.cfg.repo, branch: over.branch || R.cfg.branch, dslPath: over.dslPath || R.cfg.dslPath, htmlPath: over.htmlPath || R.cfg.htmlPath };
+      R = { cfg: cfgO, overridden: true, dslUrl: ghRawUrl(cfgO, cfgO.dslPath, name), htmlUrl: ghRawUrl(cfgO, cfgO.htmlPath, name) };
+    }
+    if (!R.cfg.owner || !R.cfg.repo) { toast('Set your GitHub owner/repo first (gear \u2192 Repo defaults)'); return; }
+    toast('Fetching ' + name + ' from GitHub for diff\u2026');
+    var got = {};
+    function done() {
+      if (!('dsl' in got) || !('html' in got)) return;
+      if (got.dsl.err || got.html.err) { toast('Diff fetch failed (' + (got.dsl.err ? 'DSL ' + got.dsl.err : '') + (got.html.err ? ' HTML ' + got.html.err : '') + ')'); return; }
+      var dDsl = lineDiffOps(got.dsl.text, viewText(dv)), dHtml = lineDiffOps(got.html.text, viewText(hv));
+      renderDiffModal(name, R, over, [
+        { title: 'DSL \u00b7 modelText', d: dDsl, stats: diffStats(dDsl) },
+        { title: 'HTML \u00b7 outputTemplate', d: dHtml, stats: diffStats(dHtml) }
+      ]);
+    }
+    ghFetch(R.dslUrl, function (e, t) { got.dsl = { err: e, text: t }; done(); });
+    ghFetch(R.htmlUrl, function (e, t) { got.html = { err: e, text: t }; done(); });
+  }
+  function renderDiffModal(name, R, over, sections) {
+    var prev = document.getElementById('wc-diff-modal'); if (prev) prev.remove();
+    var ov = el('div', { id: 'wc-diff-modal', class: 'wc-root', style: { position: 'fixed', inset: '0', zIndex: '2147483646', background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' } });
+    function close() { ov.remove(); document.removeEventListener('keydown', onEsc, true); }
+    function onEsc(e) { if (e.key === 'Escape') { e.stopPropagation(); close(); } }
+    ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+    document.addEventListener('keydown', onEsc, true);
+    var panel = el('div', { style: { width: '94%', maxWidth: '820px', maxHeight: '86vh', overflow: 'auto', padding: '16px', borderRadius: '12px', background: 'var(--wc-surface,#1c1c20)', color: 'var(--wc-ink,#eee)', border: '1px solid var(--wc-line,#333)', boxShadow: 'var(--wc-shadow,0 12px 40px rgba(0,0,0,0.5))' } });
+    panel.appendChild(el('div', { class: 'wc-label', text: 'Diff vs GitHub \u2014 ' + name }));
+    panel.appendChild(el('div', { class: 'wc-section-note', text: R.cfg.owner + '/' + R.cfg.repo + '@' + R.cfg.branch + (R.overridden ? '  [custom mapping]' : '') + '  \u00b7  GitHub \u2192 editor: \u2212 only in GitHub, + only in your editor. Nothing is written here.' }));
+    sections.forEach(function (s) {
+      var changed = (s.stats.add + s.stats.del) > 0;
+      panel.appendChild(el('div', { class: 'wc-label', style: { marginTop: '12px' }, text: s.title + '  (' + (changed ? ('+' + s.stats.add + ' \u2212' + s.stats.del) : 'identical') + ')' }));
+      if (!changed) { panel.appendChild(el('div', { class: 'wc-section-note', text: 'No differences.' })); return; }
+      var box = el('div', { style: { font: '12px/1.45 ui-monospace,Menlo,Consolas,monospace', border: '1px solid var(--wc-line,#333)', borderRadius: '8px', overflow: 'auto', maxHeight: '40vh', marginTop: '4px' } });
+      diffRows(s.d, 500).forEach(function (rw) {
+        var bg = rw.cls === 'add' ? 'rgba(63,185,80,0.16)' : rw.cls === 'del' ? 'rgba(248,81,73,0.16)' : 'transparent';
+        var mark = rw.cls === 'add' ? '+' : rw.cls === 'del' ? '\u2212' : ' ';
+        box.appendChild(el('div', { style: { display: 'flex', gap: '8px', padding: '0 8px', background: bg, color: (rw.cls === 'gap' ? 'var(--wc-muted,#888)' : 'inherit'), fontStyle: (rw.cls === 'gap' ? 'italic' : 'normal'), whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, [
+          el('span', { style: { width: '44px', textAlign: 'right', opacity: '0.5', flex: '0 0 auto' }, text: (rw.num != null ? String(rw.num) : '') }),
+          el('span', { style: { width: '10px', opacity: '0.7', flex: '0 0 auto' }, text: (rw.cls === 'gap' ? '' : mark) }),
+          el('span', { text: (rw.text == null ? '' : rw.text) })
+        ]));
+      });
+      panel.appendChild(box);
+    });
+    panel.appendChild(el('div', { class: 'wc-row', style: { marginTop: '14px', justifyContent: 'flex-end', gap: '8px' } }, [
+      el('button', { class: 'wc-btn', text: 'Pull (GitHub \u2192 editor)', title: 'Overwrite the editor with the GitHub version', onclick: function () { close(); pullFromGitHub(over); } }),
+      el('button', { class: 'wc-btn', text: 'Push (editor \u2192 GitHub)', title: 'Commit the editor contents to GitHub', onclick: function () { close(); pushToGitHub(over); } }),
+      el('button', { class: 'wc-btn wc-btn-accent', text: 'Close', onclick: close })
+    ]));
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+
   // ---- GitHub push (current generator) ----------------------------------------
   // Symmetric partner to Pull: read both editor panes and commit them to the repo
   // via the GitHub Contents API. Requires a write-scoped Personal Access Token,
@@ -796,6 +910,7 @@
     if (typeof GM_registerMenuCommand !== 'undefined') {
       GM_registerMenuCommand('Weld: Update editor from GitHub', pullFromGitHub);
       GM_registerMenuCommand('Weld: Push editor to GitHub', function () { pushToGitHub(); });
+      GM_registerMenuCommand('Weld: Diff editor vs GitHub', function () { diffVsGitHub(); });
       GM_registerMenuCommand('Weld: Browse local backups', openBackupBrowser);
       GM_registerMenuCommand('Weld: Map THIS generator -> GitHub files', ghMapThis);
       GM_registerMenuCommand('Weld: Load my generator directory', function () { loadDirectory(); });
@@ -1241,7 +1356,8 @@
       body.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginBottom: '4px' } }, [
         el('span', { class: 'wc-gslug', style: { flex: '1', minWidth: '0' }, text: name + (map[name] ? '  \u00b7  custom' : '') }),
         el('button', { class: 'wc-btn wc-btn-accent', text: '\u2B07 Pull', title: 'Fetch this generator\u2019s files into the editor (you then Save)', onclick: function () { pullFromGitHub(liveOver()); } }),
-        el('button', { class: 'wc-btn', text: '\u2B06 Push', title: 'Commit the editor contents to GitHub (asks first)', onclick: function () { pushToGitHub(liveOver()); } })
+        el('button', { class: 'wc-btn', text: '\u2B06 Push', title: 'Commit the editor contents to GitHub (asks first)', onclick: function () { pushToGitHub(liveOver()); } }),
+        el('button', { class: 'wc-btn', text: '\u21C4 Diff', title: 'Compare the editor against the GitHub version (nothing is written)', onclick: function () { diffVsGitHub(liveOver()); } })
       ]));
 
       var cardA = el('div', { class: 'wc-card' });
