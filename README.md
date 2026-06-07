@@ -7,7 +7,7 @@
 Favorites · reading comfort · save & pin results · undo-reroll · generator management · an AI Helper you can edit *or point at your own GPT*.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.0.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.8.4-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/data-100%25%20local-3fb950)](#privacy--safety)
@@ -27,6 +27,8 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
   - [Quality-of-life](#quality-of-life)
   - [Generator management & CRUD](#generator-management--crud)
   - [AI Helper — edit it, or bring your own GPT](#ai-helper--edit-it-or-bring-your-own-gpt)
+  - [Skybridge — the bridge to Weld generators](#skybridge--the-bridge-to-weld-generators)
+  - [Pull from GitHub — sync generators from your repo](#pull-from-github--sync-generators-from-your-repo)
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [Privacy & safety](#privacy--safety)
 - [Compatibility & caveats](#compatibility--caveats)
@@ -50,7 +52,7 @@ Weld Companion adds a single **⚡ Weld** item to Perchance’s own menu bar —
 
 | Tab | What's in it |
 | :-- | :----------- |
-| ★ **Generators** | Favorites & recently-used, with search, sort, filter, and per-row open/edit/remove — plus New / Fork / Save / Delete actions |
+| ★ **Generators** | Favorites & recently-used, with search, sort, filter, and per-row open/edit/remove — plus New / Fork / Save / Delete actions, and a **This Generator** panel that pulls the open generator's source from your GitHub repo |
 | 👁 **Comfort** | A theme picker (eye-comfort filters), font size, line height, max width, dyslexia font, focus mode |
 | 🤖 **AI Helper** | Custom instruction, or route to your own OpenAI / Anthropic / Google model |
 
@@ -95,6 +97,43 @@ Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 A
 > [!IMPORTANT]
 > Your API key is stored **only** in this browser and is sent **only** to the provider you select. See [Privacy & safety](#privacy--safety).
 
+### Skybridge — the bridge to Weld generators
+
+Weld Companion is also the **anchor end** of `weld.skybridge`. A generator that imports the **`weld-skybridge-plugin`** can — *with your per-generator consent* — ask the companion for things it cannot do from inside the sandbox:
+
+- **Cross-generator storage** — namespaced, persistent key/value the companion holds on the generator's behalf. With no companion installed, the plugin falls back to its own storage or memory and honestly reports `has('storage') === false`.
+- **Your own AI model** — run a completion through the model **you** configured in the AI Helper tab. Your API key **never crosses the bridge**; only the prompt goes up and the text comes back.
+- **A cross-tab message bus** — `bus.publish`/`bus.subscribe` on named channels, relayed by the companion across *different generators and tabs* over a `BroadcastChannel` on the shared `perchance.org` apex origin (something `weld.sync`, being same-origin, can't do). This is the transport **`weld.swarm`** rides on for multi-agent orchestration.
+- **Web fetch** — fetch a URL on the generator's behalf (cookie-free, `http`/`https` only, never local or private-network addresses, size-capped), so an in-page agent can read pages the sandbox's CORS rules block.
+- **Web search** — a keyless DuckDuckGo Instant-Answer lookup (title / url / snippet) for lightweight grounding without an account.
+- **Model info** — the name and approximate context size of the model you configured (never the key, no network call), so an agent can size its prompts.
+
+Under the hood it's a two-way `postMessage` handshake between the companion (top frame) and the plugin (the generator's `*.perchance.org` child iframe), with a negotiated protocol, per-message nonce, and origin checks. Consent is **per-capability and per-generator**, asked once and remembered. Because the userscript runs in the manager's sandbox, the bridge binds to the real page window via `unsafeWindow` (the permission requested at install). Both ends log the handshake to the console (`[WeldCompanion]` / `[skybridge]`) so a misconnection is diagnosable rather than silent.
+
+> [!IMPORTANT]
+> **A generator must *trigger* the plugin.** Importing `{import:weld-skybridge-plugin}` only *defines* its `$output`; Perchance does not auto-run it. Call it once early in your panel JS so it initializes `window.weld.skybridge`:
+> ```js
+> if (typeof root !== 'undefined' && typeof root.weldSkybridge === 'function') root.weldSkybridge();
+> var sb = window.weld && window.weld.skybridge;   // now available
+> ```
+> The call is idempotent. Without it, `window.weld.skybridge` stays `undefined` no matter how the bridge is configured.
+
+### Pull from GitHub — sync generators from your repo
+
+If your generators' source lives in a GitHub repo — one folder per generator, in the `<name>-top-panel.txt` (DSL) / `<name>-html-panel.html` (HTML) layout — the Companion can pull the latest version straight into the editor. Because it runs as a userscript, *not* inside the sandbox, it can write directly into Perchance's editor panes — something a generator never could.
+
+It lives in a **This Generator** panel at the top of the ★ Generators tab. By default it's a single compact row: the open generator's slug and one **⬇ Pull** button. A **⚙** gear reveals the rest:
+
+- **Files for this generator** — the GitHub paths for the DSL/top panel and the HTML panel, plus optional per-generator `owner` / `repo` / `branch` overrides. Use this to re-point a generator whose Perchance slug doesn't match its file names (e.g. a random slug like `/fr5y67…`).
+- **Repo defaults (all generators)** — your `owner`, `repo`, `branch`, and the path templates (`{name}` expands to the slug). Set these once and every generator follows. (Also under your userscript manager's menu: **Weld: Configure GitHub repo**.)
+
+**The flow:** open the generator's `#edit` page → click **⬇ Pull** → the Companion fetches the two files from `raw.githubusercontent.com` and fills the editor's two CodeMirror panes (DSL on top, HTML below) → you review and click Perchance's **Save**.
+
+> [!IMPORTANT]
+> Nothing is pushed or saved automatically. **Pull only fills the editor fields — you always review and Save yourself.** There is no Perchance API that writes a generator's source from outside the editor, so the manual Save is both the safety net and the only way changes go live.
+
+The same actions are on your userscript manager's menu: **Update editor from GitHub**, **Map THIS generator → GitHub files**, **Configure GitHub repo (global)**, and **Edit GitHub mapping (JSON)** for bulk edits.
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -110,14 +149,19 @@ Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 A
 ## Privacy & safety
 
 - **100% local.** Favorites, history, comfort settings, and pins live in your userscript manager's storage, in your browser. Nothing is uploaded.
-- **Your AI key never leaves your machine** except to the provider you pick. The script's network permissions are limited to exactly four hosts:
+- **Your AI key never leaves your machine** except to the provider you pick. The script declares these `@connect` hosts:
 
   ```
-  @connect api.openai.com
-  @connect api.anthropic.com
-  @connect generativelanguage.googleapis.com
-  @connect perchance.org
+  @connect api.openai.com                       # OpenAI
+  @connect api.anthropic.com                    # Anthropic
+  @connect generativelanguage.googleapis.com    # Google
+  @connect api.duckduckgo.com                   # keyless web search, only when a Weld agent asks (consent-gated)
+  @connect perchance.org                        # generator metadata
+  @connect raw.githubusercontent.com            # GitHub updater (pulls your repo's public source files)
+  @connect *                                    # consent-gated web fetch for Weld agents, and custom model endpoints you configure
   ```
+  Out of the box, calls go only to the AI provider you choose, `perchance.org`, and your own GitHub raw files; the `*` and DuckDuckGo hosts are reached only through the per-generator, consent-gated web-fetch / web-search capabilities (see [Skybridge](#skybridge--the-bridge-to-weld-generators)) or a model endpoint you configure — never silently.
+- **`@grant unsafeWindow` is used only for Skybridge** — to attach the bridge's message listener and frame-announce to the *real* page window (a userscript manager otherwise sandboxes `window` so cross-frame messages never arrive). It is not used to read or alter page content beyond the bridge handshake.
 - **It can't break Perchance.** Every feature is *feature-detected* against Perchance's internals (the editor, save function, AI-helper elements, and `/api/*` endpoints) and **silently no-ops** if something is absent or renamed. The whole script is wrapped so it never throws into the host page.
 - **Focus mode hides *your own* clutter** (menus, sidebars) for reading and screenshots. It is **not** an ad blocker — please use it within Perchance's terms.
 
@@ -129,6 +173,7 @@ Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 A
 - **Themes use a `backdrop-filter` overlay**, so they work on any generator without touching its DOM. The "Dark" theme is an inversion (the standard dark-mode trick); like all invert-based dark modes it renders photos in negative, so the non-invert themes (Dim / Warm / Sepia / Gray) are the safer pick on image-heavy generators. Needs a current browser (`backdrop-filter` support); on a very old one the picker still works but shows no tint.
 - Perchance's internal hooks are **not a documented API** — Perchance can rename them at any time. When that happens, the affected feature quietly stops working (or falls back) rather than erroring; update the script and it resumes.
 - The **AI-Helper submit interception** is best-effort against the current helper element IDs. If a future Perchance update changes them, custom-provider routing falls back to no-op (the built-in helper still works); open an issue and it's a one-line fix.
+- **Skybridge needs both halves deployed.** Updating the userscript is only one end — the matching `weld-skybridge-plugin` generator must also be imported and **re-saved** (and any generator that imports it re-saved, to bust Perchance's import cache, which is keyed on `__generatorLastEditTime`). The console handshake logs (`[WeldCompanion]` / `[skybridge]`) tell you which end is live; missing `[skybridge]` lines mean the plugin generator is still the cached old version.
 
 ## Relationship to Weld
 
