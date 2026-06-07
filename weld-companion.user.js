@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.9.0
+// @version      1.9.1
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -227,6 +227,24 @@
     press(ed || document);
     setTimeout(function () { var st = window.perchanceSaveState; toast(st ? 'Save: ' + st : 'Sent Ctrl/Cmd+S \u2014 watch Perchance\u2019s save indicator'); }, 600);
   }
+  // Perchance's in-editor bug-finder keeps mark decorations tied to the current
+  // document. Replacing the whole document in one transaction can collapse one of
+  // its cached ranges to an empty span; its CodeMirror StateField then throws an
+  // (uncaught, asynchronous) "Mark decorations may not be empty" RangeError while
+  // recomputing -- AFTER our write has already landed. The write succeeds and the
+  // bug-finder re-scans cleanly on the next tick. This briefly intercepts ONLY that
+  // exact error, on the real page window, so a successful pull doesn't spill a
+  // scary uncaught error into the console. Returns a function that stops it.
+  function muteBugFinderError() {
+    var re = /Mark decorations may not be empty/;
+    function h(ev) {
+      var m = (ev && (ev.message || (ev.error && ev.error.message))) || '';
+      if (re.test(String(m))) { ev.preventDefault(); if (ev.stopImmediatePropagation) ev.stopImmediatePropagation(); }
+    }
+    var w = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+    try { w.addEventListener('error', h, true); } catch (e) {}
+    return function () { try { w.removeEventListener('error', h, true); } catch (e) {} };
+  }
   function pullFromGitHub(over) {
     var name = genName();
     if (!name) { toast('No generator detected -- open one first'); return; }
@@ -258,7 +276,9 @@
         + 'This REPLACES the editor contents. You will still need to click Save.';
       if (!confirm(msg)) { toast('Cancelled'); return; }
       if (gget('ghBackupBeforePull', true)) { if (backupCurrentSource(name)) toast('Backed up current source first'); }
+      var unmute = muteBugFinderError();   // hush Perchance's bug-finder during the whole-document replace
       var sDsl = cmSet(panes.dsl, got.dsl.text), sHtml = cmSet(panes.html, got.html.text);
+      setTimeout(unmute, 2000);
       console.log('[weld github] wrote panes', { name: name, dsl: sDsl, html: sHtml, dslChars: got.dsl.text.length, htmlChars: got.html.text.length, panes: panes.all.length, overridden: R.overridden });
       if (sDsl === 'failed' || sHtml === 'failed') toast('Wrote with issues (DSL:' + sDsl + ' HTML:' + sHtml + ') -- see console');
       else toast('Pulled ' + name + ' (DSL:' + sDsl + ', HTML:' + sHtml + ') -- now click Save');
