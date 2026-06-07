@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.17.0
+// @version      1.21.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -138,10 +138,140 @@
   // Drive CM6's own input pipeline: synthetic paste first (CM6 reads clipboardData and
   // preventDefaults), then execCommand insertText as a fallback. Returns which fired.
   // Resolve the live CodeMirror 6 EditorView behind a .cm-content element.
+  function isCmView(v) { try { return !!(v && v.state && v.state.doc && typeof v.dispatch === 'function'); } catch (e) { return false; } }
   function cmViewFor(elx) {
-    try { var v = elx && elx.cmView && elx.cmView.view; if (v && v.state && v.state.doc && typeof v.dispatch === 'function') return v; } catch (e) {}
+    try { var v = elx && elx.cmView && elx.cmView.view; if (isCmView(v)) return v; } catch (e) {}
+    // Fallback: match the element against Perchance's exposed view maps.
+    try { var maps = window.editorViewsByDocId || {}; for (var k in maps) { var arr = maps[k]; if (arr) for (var i = 0; i < arr.length; i++) if (arr[i] && arr[i].contentDOM === elx && isCmView(arr[i])) return arr[i]; } } catch (e) {}
     return null;
   }
+  // Canonical pane resolver. The editor exposes its live CM6 EditorViews on
+  // window.docIdToView[docId] and window.editorViewsByDocId[docId][...] (docId is
+  // "modelText" = DSL/top panel, "outputTemplate" = HTML panel) -- the source of
+  // truth. Prefer those, then the legacy named globals, then null. Reads/writes go
+  // through the universal CM6 API (state.doc + dispatch), which every EditorView
+  // has, rather than the view-specific getValue/setValue -- so a mapped raw view
+  // works too. A write via dispatch is recorded in the editor's own undo history.
+  function viewForDocId(docId) {
+    try { var v = window.docIdToView && window.docIdToView[docId]; if (isCmView(v) && !v.destroyed) return v; } catch (e) {}
+    try { var arr = window.editorViewsByDocId && window.editorViewsByDocId[docId]; if (arr) for (var i = 0; i < arr.length; i++) if (isCmView(arr[i]) && !arr[i].destroyed) return arr[i]; } catch (e) {}
+    var named = docId === 'modelText' ? window.modelTextEditor : (docId === 'outputTemplate' ? window.outputTemplateEditor : null);
+    return isCmView(named) ? named : null;
+  }
+  function dslView()  { return viewForDocId('modelText'); }
+  function htmlView() { return viewForDocId('outputTemplate'); }
+  function viewText(v) { try { return isCmView(v) ? v.state.doc.toString() : ''; } catch (e) { return ''; } }
+  function viewSet(v, text) { try { if (isCmView(v)) { v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: String(text) } }); return true; } } catch (e) {} return false; }
+
+  // ---- snippet inserter (drops boilerplate at the cursor in the matching pane) ----
+  // Uses CM6's state.replaceSelection (canonical insert-at-cursor); manual change as fallback.
+  function insertAtCursor(view, text) {
+    if (!isCmView(view)) return false;
+    text = String(text);
+    try {
+      view.focus();
+      if (typeof view.state.replaceSelection === 'function') { view.dispatch(view.state.replaceSelection(text)); return true; }
+      var sel = view.state.selection.main;
+      view.dispatch({ changes: { from: sel.from, to: sel.to, insert: text }, selection: { anchor: sel.from + text.length } });
+      return true;
+    } catch (e) { return false; }
+  }
+  // Snippet content is grounded in the perchance-api notes + the real weld-* import stack
+  // (not invented). DSL snippets target the top panel; 'html' snippets the HTML-panel JS.
+  var SNIPPETS = [
+    { id: 'meta', pane: 'dsl', label: '$meta block', desc: 'title / description / tags',
+      text: ['$meta', '  title = ', '  description = ', '  tags = ', ''].join('\n') },
+    { id: 'imports-core', pane: 'dsl', label: 'Core plugin imports', desc: 'ai-text, text-to-image, upload, super-fetch',
+      text: ['aiTextPlugin      = {import:ai-text-plugin}', 'textToImagePlugin = {import:text-to-image-plugin}', 'uploadPlugin      = {import:upload-plugin}', 'superFetch        = {import:super-fetch-plugin}', ''].join('\n') },
+    { id: 'imports-weld', pane: 'dsl', label: 'Weld import stack', desc: 'common weld-* plugins',
+      text: ['weldUi       = {import:weld-ui-plugin}', 'weldState    = {import:weld-state-plugin}', 'weldToast    = {import:weld-toast-plugin}', 'weldStream   = {import:weld-stream-plugin}', 'weldMarkdown = {import:weld-markdown-plugin}', ''].join('\n') },
+    { id: 'import-superfetch', pane: 'dsl', label: 'super-fetch import', desc: 'CORS proxy plugin only',
+      text: 'superFetch = {import:super-fetch-plugin}\n' },
+    { id: 'meta-dynamic', pane: 'dsl', label: '$meta.dynamic', desc: 'self-contained dynamic title/description',
+      text: ['$meta', '  header', '    mode = minimal', '  async dynamic(inputs) =>', '    // must be fully self-contained -- no root.*, no external globals', '    return { title: "...", description: "..." }', ''].join('\n') },
+    { id: 'grab', pane: 'html', label: 'grab() helper', desc: 'defensive plugin access (Proxy-safe)',
+      text: ['// defensive plugin access -- handles Proxy miss + load race', 'function grab(name) {', '  try { if (typeof root !== "undefined" && root[name] !== undefined) return root[name]; } catch (e) {}', '  try { if (window[name] !== undefined) return window[name]; } catch (e) {}', '  return undefined;', '}', ''].join('\n') },
+    { id: 'ai-call', pane: 'html', label: 'aiTextPlugin call', desc: 'non-streaming generation',
+      text: ['const result = await root.aiTextPlugin({', '  instruction:   "System prompt / task",', '  startWith:     "",', '  stopSequences: ["\\n\\n[[", "\\n[["],', '  hideStartWith: true', '});', 'const text = String(result);            // boxed String -> primitive', 'if (result.stopReason === "error") { /* generatedText is "" */ }', ''].join('\n') },
+    { id: 'ai-stream', pane: 'html', label: 'aiTextPlugin stream', desc: 'streaming with onChunk',
+      text: ['const stream = root.aiTextPlugin({', '  instruction: "...",', '  stopSequences: ["\\n\\n[[", "\\n[["],', '  hideStartWith: true,', '  onChunk: function (o) {', '    if (o.isFromStartWith) return;', '    /* o.textChunk, o.fullTextSoFar */', '  }', '});', 'const result = await stream;            // stream.stop() to abort', 'const text = String(result);', ''].join('\n') },
+    { id: 'superfetch-call', pane: 'html', label: 'superFetch call', desc: 'CORS-bypass fetch (auth in URL)',
+      text: ['// auth via URL params -- custom headers are stripped by the proxy', 'const r = await root.superFetch("https://api.example.com/data?_=" + Date.now());', 'const text = await r.text();', ''].join('\n') }
+  ];
+  function snippetById(id) { for (var i = 0; i < SNIPPETS.length; i++) if (SNIPPETS[i].id === id) return SNIPPETS[i]; return null; }
+  function insertSnippet(snip) {
+    if (!snip) return false;
+    var v = (snip.pane === 'html') ? htmlView() : dslView();
+    var paneName = (snip.pane === 'html') ? 'HTML panel' : 'DSL (top) panel';
+    if (!isCmView(v)) { toast('Open a generator\u2019s #edit page first'); return false; }
+    var ok = insertAtCursor(v, snip.text);
+    toast(ok ? ('Inserted into ' + paneName + ': ' + snip.label) : 'Insert failed');
+    return ok;
+  }
+
+  // ---- JS lint (reuse Perchance's own ESLint + htmlparser2) --------------------
+  // Perchance lazily loads eslint-linter-browserify + htmlparser2 and leaves a
+  // Linter per pane on window.eslintInstances and the parser on window.htmlparser2.
+  // We reuse those (no second download): pull the <script> regions out of the HTML
+  // pane the same way the editor does, and Linter.verify() each with rules:{} ->
+  // pure syntax-error checking, no style nags. Extraction + offset math validated
+  // against the real bundles before shipping. Fails open (returns []) if the libs
+  // aren't up yet, so a save/push is never wrongly blocked.
+  function lintLibs() {
+    try { if (window.eslintInstances && window.eslintInstances.outputTemplate && window.htmlparser2 && window.htmlparser2.Parser) return { linter: window.eslintInstances.outputTemplate, ParserCls: window.htmlparser2.Parser }; } catch (e) {}
+    return null;
+  }
+  function lintLineOf(s, idx) { var n = 1; for (var i = 0; i < idx && i < s.length; i++) if (s.charCodeAt(i) === 10) n++; return n; }
+  function extractJsRegions(html, ParserCls) {
+    var out = [], inScript = false, type = '', start = 0, p;
+    p = new ParserCls({
+      onopentag: function (name, attrs) {
+        if (name !== 'script') return;
+        var t = ((attrs && attrs.type) || '').toLowerCase();
+        if (t && !/^(text\/javascript|application\/javascript|module)$/.test(t)) { inScript = false; return; }  // skip JSON / template scripts
+        inScript = true; type = (t === 'module') ? 'module' : 'script'; start = p.endIndex + 1;
+        if (html.charCodeAt(start) === 13) start++;   // skip one leading \r
+        if (html.charCodeAt(start) === 10) start++;   // and \n, so a region starts at its first real line
+      },
+      onclosetag: function (name) {
+        if (name !== 'script' || !inScript) return;
+        var code = html.slice(start, p.startIndex);
+        if (code.trim()) out.push({ code: code, from: start, sourceType: type, startLine: lintLineOf(html, start) });
+        inScript = false;
+      }
+    }, { recognizeSelfClosing: true });
+    p.write(html); p.end();
+    return out;
+  }
+  // Lint the HTML pane's <script> blocks. Returns [{line,col,message,sev,ruleId}]
+  // with line numbers mapped to the pane. (modelText {...} JS-block linting needs
+  // the DSL-aware block ranges Perchance computes internally -- deferred.)
+  function lintHtmlScripts() {
+    var libs = lintLibs(), hv = htmlView(); if (!libs || !hv) return [];
+    var html = viewText(hv); if (!html) return [];
+    var out = [], regions; try { regions = extractJsRegions(html, libs.ParserCls); } catch (e) { return []; }
+    for (var i = 0; i < regions.length; i++) {
+      var reg = regions[i], cfg = { languageOptions: { globals: {}, parserOptions: { ecmaVersion: 2022, sourceType: reg.sourceType } }, rules: {} }, msgs;
+      try { msgs = libs.linter.verify(reg.code, cfg); } catch (e) { continue; }
+      for (var j = 0; j < msgs.length; j++) { var m = msgs[j]; out.push({ line: reg.startLine + (m.line || 1) - 1, col: m.column || 1, message: m.message, sev: m.severity, ruleId: m.ruleId }); }
+    }
+    return out;
+  }
+  function fmtLintProb(p) { return '\u2022 line ' + p.line + (p.col ? (':' + p.col) : '') + ' \u2014 ' + p.message; }
+  function confirmLint(action, probs) {
+    console.warn('[weld lint]', probs);
+    var lines = probs.slice(0, 8).map(fmtLintProb).join('\n');
+    var more = probs.length > 8 ? ('\n\u2026 and ' + (probs.length - 8) + ' more (see console)') : '';
+    return confirm(action + ': ' + probs.length + ' JavaScript problem(s) in the HTML pane:\n\n' + lines + more + '\n\nProceed with ' + action + ' anyway?');
+  }
+  function lintNow() {
+    if (!lintLibs()) { toast('Lint unavailable \u2014 open the editor so Perchance loads its linter, then retry'); return; }
+    var p = lintHtmlScripts();
+    if (!p.length) { toast('\u2713 No JavaScript problems in the HTML pane'); return; }
+    console.warn('[weld lint]', p);
+    alert('JavaScript problems in the HTML pane (' + p.length + '):\n\n' + p.slice(0, 20).map(fmtLintProb).join('\n') + (p.length > 20 ? '\n\u2026 and ' + (p.length - 20) + ' more (see console)' : ''));
+  }
+
   // Write text into a CM6 pane. Primary: a real EditorView transaction -- reliable, and
   // recorded in the editor's own undo history, so Ctrl+Z reverts a pull. Fallbacks: a
   // synthetic paste, then execCommand, for any build that doesn't expose the view.
@@ -161,8 +291,8 @@
     return 'failed';
   }
   function ghPanes() {
-    // Prefer Perchance's named editor views: modelText = DSL/top panel, outputTemplate = HTML.
-    var mt = window.modelTextEditor, ot = window.outputTemplateEditor;
+    // Prefer Perchance's canonical views (docId maps), then named globals, then DOM scan.
+    var mt = dslView(), ot = htmlView();
     if (mt && mt.contentDOM && ot && ot.contentDOM) return { dsl: mt.contentDOM, html: ot.contentDOM, all: [mt.contentDOM, ot.contentDOM] };
     var panes = Array.prototype.slice.call(document.querySelectorAll('.cm-content'));
     if (panes.length < 2) return null;
@@ -355,7 +485,7 @@
   // pre-pull state is recoverable (the pull itself is also Ctrl+Z-undoable).
   function backupCurrentSource(name) {
     try {
-      var mt = window.modelTextEditor, ot = window.outputTemplateEditor;
+      var mt = dslView(), ot = htmlView();
       if (!mt || !ot || !mt.state || !ot.state) return false;
       var dsl = mt.state.doc.toString(), html = ot.state.doc.toString();
       var body = '<<<<< Weld Companion backup of "' + name + '" -- ' + new Date().toISOString() + '\n'
@@ -373,6 +503,7 @@
   // binds Ctrl/Cmd+S, so we trigger that keybinding (legacy saveGenerator() first, if present).
   // window.perchanceSaveState reflects the outcome ('saved' / 'saving' / 'unsaved').
   function doSave() {
+    if (gget('lintOnSave', true)) { var lp = lintHtmlScripts(); if (lp.length && !confirmLint('Save', lp)) { toast('Save cancelled'); return; } }
     if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); return; } catch (e) {} }
     var mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
     function press(t) { try { t.dispatchEvent(new KeyboardEvent('keydown', { key: 's', code: 'KeyS', keyCode: 83, which: 83, ctrlKey: !mac, metaKey: mac, bubbles: true, cancelable: true })); } catch (e) {} }
@@ -380,7 +511,8 @@
     // for keydowns dispatched to the editor, body, or document), so a SINGLE
     // dispatch is enough. Dispatching to all three triggered saveGenerator
     // multiple times -> a redundant double save + double output reload.
-    var ed = (window.modelTextEditor && window.modelTextEditor.contentDOM) || document.querySelector('.cm-content');
+    var dv = dslView();
+    var ed = (dv && dv.contentDOM) || document.querySelector('.cm-content');
     if (ed) { try { ed.focus(); } catch (e) {} }
     press(ed || document);
     // Saving can be gated behind a Cloudflare Turnstile captcha (Perchance returns
@@ -438,7 +570,7 @@
       }
       var dslP = R.cfg.dslPath.replace(/\{name\}/g, name), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, name);
       var dirty = false;
-      try { dirty = (window.modelTextEditor && window.modelTextEditor.state.doc.toString() !== window.lastModelTextSaved) || (window.outputTemplateEditor && window.outputTemplateEditor.state.doc.toString() !== window.lastOutputTemplateSaved); } catch (e) {}
+      try { var dv = dslView(), hv = htmlView(); dirty = (dv && viewText(dv) !== window.lastModelTextSaved) || (hv && viewText(hv) !== window.lastOutputTemplateSaved); } catch (e) {}
       var msg = (dirty ? '\u26A0 You have UNSAVED edits that this will overwrite.\n\n' : '') + 'Update "' + name + '" from GitHub?' + (R.overridden ? '  [custom mapping]' : '') + '\n\n'
         + 'repo: ' + R.cfg.owner + '/' + R.cfg.repo + '@' + R.cfg.branch + '\n'
         + 'DSL  <- ' + dslP + '   (' + got.dsl.text.length + ' chars)\n'
@@ -452,6 +584,7 @@
       console.log('[weld github] wrote panes', { name: name, dsl: sDsl, html: sHtml, dslChars: got.dsl.text.length, htmlChars: got.html.text.length, panes: panes.all.length, overridden: R.overridden });
       if (sDsl === 'failed' || sHtml === 'failed') toast('Wrote with issues (DSL:' + sDsl + ' HTML:' + sHtml + ') -- see console');
       else toast('Pulled ' + name + ' (DSL:' + sDsl + ', HTML:' + sHtml + ') -- now click Save');
+      setTimeout(function () { try { var lp = lintHtmlScripts(); if (lp.length) toast('\u26A0 ' + lp.length + ' JS problem(s) in the pulled HTML \u2014 check before Save', 5000); } catch (e) {} }, 400);
     }
     ghFetch(dslUrl, function (err, text) { got.dsl = { err: err, text: text }; done(); });
     ghFetch(htmlUrl, function (err, text) { got.html = { err: err, text: text }; done(); });
@@ -496,7 +629,7 @@
     if (!name) { toast('No generator detected -- open one first'); return; }
     var token = ghToken();
     if (!token) { toast('Set a GitHub token first (gear \u2192 GitHub push)'); return; }
-    var mt = window.modelTextEditor, ot = window.outputTemplateEditor;
+    var mt = dslView(), ot = htmlView();
     if (!mt || !ot || !mt.state || !ot.state) { toast('Open the editor (#edit) first -- panes not ready'); return; }
     var R = ghResolve(name);
     if (over && (over.dslPath || over.htmlPath || over.owner || over.repo || over.branch)) {
@@ -512,6 +645,8 @@
       + 'DSL  \u2192 ' + dslP + '   (' + dsl.length + ' chars)\n'
       + 'HTML \u2192 ' + htmlP + '   (' + html.length + ' chars)\n\n'
       + 'This COMMITS over the GitHub copies of these two files.';
+    var pushLint = lintHtmlScripts();
+    if (pushLint.length) { console.warn('[weld lint]', pushLint); confirmMsg += '\n\n\u26A0 ' + pushLint.length + ' JavaScript problem(s) in the HTML pane (see console) \u2014 pushing commits them as-is.'; }
     if (!confirm(confirmMsg)) { toast('Cancelled'); return; }
     toast('Pushing ' + name + ' to GitHub\u2026');
     var commitMsg = 'Update ' + name + ' via Weld Companion';   // sent to GitHub; no token, no local paths
@@ -573,11 +708,15 @@
       GM_registerMenuCommand('Weld: Rename THIS generator', renameThisGenerator);
       GM_registerMenuCommand('Weld: Delete THIS generator', deleteThisGenerator);
       GM_registerMenuCommand('Weld: Configure GitHub repo (global)', ghConfigure);
+      GM_registerMenuCommand('Weld: Insert $meta block at cursor', function () { insertSnippet(snippetById('meta')); });
+      GM_registerMenuCommand('Weld: Insert core plugin imports at cursor', function () { insertSnippet(snippetById('imports-core')); });
+      GM_registerMenuCommand('Weld: Lint JS in HTML pane now', lintNow);
+      GM_registerMenuCommand('Weld: Lint-before-Save (toggle)', function () { var on = !gget('lintOnSave', true); gset('lintOnSave', on); toast('Lint before Save: ' + (on ? 'ON' : 'OFF')); });
       GM_registerMenuCommand('Weld: Edit GitHub mapping (JSON)', ghEditMap);
     }
   } catch (e) {}
 
-  function isEditMode() { return /[?&]edit/.test(location.search) || !!window.modelTextEditor; }
+  function isEditMode() { return /[?&]edit/.test(location.search) || !!dslView(); }
   function toast(msg, ms) {
     var t = el('div', { class: 'wc-root wc-toast', text: msg });
     document.body.appendChild(t);
@@ -864,6 +1003,7 @@
       { id: 'generators', glyph: '\u2605', label: 'Generators' },
       { id: 'github', glyph: '\u21C5', label: 'GitHub' },
       { id: 'comfort', glyph: '\u{1F441}', label: 'Comfort' },
+      { id: 'snippets', glyph: '\u2702', label: 'Snippets' },
       { id: 'ai', glyph: '\u{1F916}', label: 'AI Helper' }
     ];
   }
@@ -925,6 +1065,7 @@
     if (WC_TAB === 'generators') renderGenerators(body);
     else if (WC_TAB === 'github') renderGitHub(body);
     else if (WC_TAB === 'comfort') renderComfort(body);
+    else if (WC_TAB === 'snippets') renderSnippets(body);
     else if (WC_TAB === 'ai') renderAI(body);
   }
 
@@ -965,6 +1106,7 @@
     ]));
     var actions = el('div', { class: 'wc-row', style: { marginTop: '8px', flexWrap: 'wrap' } }, [
       el('button', { class: 'wc-btn', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave }),
+      el('button', { class: 'wc-btn', text: 'Lint JS', title: 'Check the HTML pane\u2019s <script> blocks for JavaScript errors', onclick: lintNow }),
       el('button', { class: 'wc-btn', text: 'Backups\u2026', title: 'Browse local backups \u2014 download or restore', onclick: openBackupBrowser })
     ]);
     var sm0 = pageSettingsModal();
@@ -1055,6 +1197,19 @@
       el('button', { class: 'wc-btn', text: 'Clear token', title: 'Remove the stored token', onclick: function () { gdel('ghToken'); tokIn.value = ''; tokIn.placeholder = 'github_pat_\u2026 / ghp_\u2026'; toast('GitHub token cleared'); } })
     ]));
     colB.appendChild(cardTok);
+
+    var cardLint = el('div', { class: 'wc-card' });
+    cardLint.appendChild(head('Code checks'));
+    cardLint.appendChild(note('Lints the HTML pane\u2019s <script> blocks for JavaScript syntax errors, reusing Perchance\u2019s own ESLint. Runs before Save and is flagged in the Push dialog.'));
+    var lchk = el('input', { type: 'checkbox', id: 'wc-lint-save', style: { margin: '0 8px 0 0' } });
+    lchk.checked = gget('lintOnSave', true);
+    lchk.onchange = function () { gset('lintOnSave', !!lchk.checked); toast('Lint before Save: ' + (lchk.checked ? 'ON' : 'OFF')); };
+    cardLint.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginTop: '4px' } }, [
+      lchk,
+      el('label', { class: 'wc-section-note', for: 'wc-lint-save', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Lint JS before each Save (warn on errors)' })
+    ]));
+    cardLint.appendChild(row([ el('button', { class: 'wc-btn', text: 'Lint JS now', title: 'Check the HTML pane\u2019s <script> blocks now', onclick: lintNow }) ]));
+    colB.appendChild(cardLint);
 
     var gOwner = field(base.owner, 'default owner (all generators)', 'github username');
     var gRepo = field(base.repo, 'default repo', 'repository name');
@@ -1299,6 +1454,34 @@
       ]),
       el('div', { class: 'wc-section-note', text: genName() ? 'Settings are remembered per generator.' : 'Open a generator to save per-generator.' })
     ]));
+  }
+
+  // ============================================================ C2. snippet inserter tab
+  function renderSnippets(body) {
+    var onEdit = isCmView(dslView()) || isCmView(htmlView());
+    body.appendChild(el('div', { class: 'wc-section-note', text: onEdit
+      ? 'Click a snippet to drop it at the cursor in the matching pane.'
+      : 'Open a generator\u2019s #edit page to insert \u2014 each snippet drops boilerplate at your cursor.' }));
+
+    function groupCard(title, pane) {
+      var card = el('div', { class: 'wc-card wc-col' });
+      card.appendChild(el('label', { class: 'wc-label', text: title }));
+      var list = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px', marginTop: '6px' } });
+      SNIPPETS.filter(function (s) { return s.pane === pane; }).forEach(function (s) {
+        list.appendChild(el('button', { class: 'wc-btn', style: { textAlign: 'left', lineHeight: '1.3' },
+          title: 'Insert at cursor', onclick: function () { insertSnippet(s); } }, [
+          el('span', { text: s.label }),
+          el('span', { class: 'wc-section-note', style: { display: 'block', marginTop: '2px' }, text: s.desc })
+        ]));
+      });
+      card.appendChild(list);
+      return card;
+    }
+
+    var cols = el('div', { class: 'wc-cols', style: { marginTop: '10px' } });
+    cols.appendChild(groupCard('DSL \u2014 top panel', 'dsl'));
+    cols.appendChild(groupCard('HTML panel \u2014 JS', 'html'));
+    body.appendChild(cols);
   }
 
   // ============================================================ D. result tools (copy / save / pin / compare)
@@ -1603,16 +1786,17 @@
     var btn = $('#aiHelperSubmitBtn'); if (!btn || btn.dataset.wcHook) return; btn.dataset.wcHook = '1';
     btn.addEventListener('click', function (e) {
       var cfg = aiConfig(); if (cfg.provider === 'builtin') return; // let Perchance handle it
-      var input = $('#aiHelperInputEl'); if (!input || !window.modelTextEditor) return;
+      var input = $('#aiHelperInputEl'); var dv = dslView(); if (!input || !dv) return;
       var prompt = (input.value || '').trim(); if (!prompt) return;
       e.stopImmediatePropagation(); e.preventDefault();
       var sys = cfg.instruction || 'You are a Perchance generator coding assistant. Given the current code and an instruction, return the COMPLETE updated code only, no explanation. Respect Perchance DSL conventions and avoid bare [word] list-reference traps.';
-      var current = window.modelTextEditor.getValue();
+      var current = viewText(dv);
       toast('Asking ' + (PROVIDERS[cfg.provider] || {}).label + '\u2026', 4000);
       callOwnAI(cfg, sys, 'CURRENT CODE:\n' + current + '\n\nINSTRUCTION:\n' + prompt, function (err, txt) {
         if (err) return toast(('\u2717 ' + err).slice(0, 90), 5000);
         var code = txt.replace(/^```[a-z]*\n?/i, '').replace(/```\s*$/, '').trim();
-        window.modelTextEditor.setValue(code); toast('\u2713 Applied ' + (PROVIDERS[cfg.provider] || {}).label + ' output');
+        var unmute = muteBugFinderError(); viewSet(dv, code); setTimeout(unmute, 2000);
+        toast('\u2713 Applied ' + (PROVIDERS[cfg.provider] || {}).label + ' output');
       });
     }, true);
   }
