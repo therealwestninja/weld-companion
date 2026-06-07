@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.7.0
+// @version      1.8.4
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -13,11 +13,13 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        unsafeWindow
+// @grant        GM_registerMenuCommand
 // @connect      api.openai.com
 // @connect      api.anthropic.com
 // @connect      generativelanguage.googleapis.com
 // @connect      api.duckduckgo.com
 // @connect      perchance.org
+// @connect      raw.githubusercontent.com
 // @connect      *
 // @run-at       document-idle
 // @noframes
@@ -75,6 +77,157 @@
   function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
   function debounce(fn, ms) { var t; return function () { var a = arguments, self = this; clearTimeout(t); t = setTimeout(function () { fn.apply(self, a); }, ms); }; }
   function genName() { return (window.generatorName || (location.pathname.replace(/^\//, '').split('/')[0]) || '').trim(); }
+  // ============================================================ G. GitHub updater
+  // Pull a generator's source from a GitHub repo (DSL.txt / HTML.txt layout) straight
+  // into the CodeMirror 6 editor panes; the user saves manually. Evidence (field probe
+  // on #edit): two .cm-content panes -- [0] DSL/top-panel, [1] HTML-panel.
+  //
+  // Mapping resolves per generator SLUG: global defaults (owner/repo/branch + path
+  // templates, {name} = slug) overlaid with an optional per-slug override map, so a
+  // generator whose Perchance slug does NOT match its GitHub file names (e.g. a random
+  // slug like /fr5y67ygfde456...) can be re-pointed at the right files by hand.
+  var GH_DEFAULTS = {
+    owner: '', repo: '', branch: 'main',
+    dslPath: '{name}/{name}-top-panel.txt', htmlPath: '{name}/{name}-html-panel.html'
+  };
+  function ghCfg() { var c = gget('github', {}) || {}; var o = {}; for (var k in GH_DEFAULTS) o[k] = (c[k] != null && c[k] !== '') ? c[k] : GH_DEFAULTS[k]; return o; }
+  function ghRawUrl(cfg, tpl, name) {
+    var path = String(tpl).replace(/\{name\}/g, name);
+    return 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/refs/heads/' + cfg.branch + '/' + path + '?_=' + Date.now();
+  }
+  // global defaults overlaid with per-slug override from the 'githubMap' config
+  // ({ slug: { dslPath, htmlPath, owner?, repo?, branch? } }).
+  function ghResolve(name) {
+    var base = ghCfg(), map = gget('githubMap', {}) || {}, ov = map[name] || {};
+    var cfg = {
+      owner: ov.owner || base.owner, repo: ov.repo || base.repo, branch: ov.branch || base.branch,
+      dslPath: ov.dslPath || base.dslPath, htmlPath: ov.htmlPath || base.htmlPath
+    };
+    return { cfg: cfg, overridden: !!map[name], dslUrl: ghRawUrl(cfg, cfg.dslPath, name), htmlUrl: ghRawUrl(cfg, cfg.htmlPath, name) };
+  }
+  function ghFetch(url, cb) {
+    try {
+      GM_xmlhttpRequest({
+        method: 'GET', url: url,
+        onload: function (r) { cb((r.status >= 200 && r.status < 300) ? null : ('HTTP ' + r.status), r.responseText || ''); },
+        onerror: function () { cb('network error', ''); },
+        ontimeout: function () { cb('timeout', ''); }
+      });
+    } catch (e) { cb(String((e && e.message) || e), ''); }
+  }
+  function cmText(elx) { try { return (elx.innerText || elx.textContent || ''); } catch (e) { return ''; } }
+  // Drive CM6's own input pipeline: synthetic paste first (CM6 reads clipboardData and
+  // preventDefaults), then execCommand insertText as a fallback. Returns which fired.
+  function cmSet(elx, text) {
+    elx.focus();
+    function selectAll() { try { var s = window.getSelection(), r = document.createRange(); r.selectNodeContents(elx); s.removeAllRanges(); s.addRange(r); } catch (e) {} }
+    selectAll();
+    try {
+      var dt = new DataTransfer(); dt.setData('text/plain', text);
+      var ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      elx.dispatchEvent(ev);
+      if (ev.defaultPrevented) return 'paste';
+    } catch (e) {}
+    try { selectAll(); if (document.execCommand('insertText', false, text)) return 'execCommand'; } catch (e) {}
+    return 'failed';
+  }
+  function ghPanes() {
+    var panes = Array.prototype.slice.call(document.querySelectorAll('.cm-content'));
+    if (panes.length < 2) return null;
+    var dsl = null, html = null;
+    panes.forEach(function (p) {
+      var t = cmText(p).replace(/^\s+/, '');
+      if (t.charAt(0) === '<') { if (!html) html = p; }
+      else if (!dsl) dsl = p;
+    });
+    if (!dsl) dsl = panes[0];
+    if (!html) html = (panes[1] === dsl ? panes[0] : panes[1]);
+    return { dsl: dsl, html: html, all: panes };
+  }
+  function pullFromGitHub(over) {
+    var name = genName();
+    if (!name) { toast('No generator detected -- open one first'); return; }
+    var panes = ghPanes();
+    if (!panes) { toast('Open the editor (#edit) first -- no editor panes found'); return; }
+    var R = ghResolve(name);
+    if (over && (over.dslPath || over.htmlPath || over.owner || over.repo || over.branch)) {
+      var cfgO = { owner: over.owner || R.cfg.owner, repo: over.repo || R.cfg.repo, branch: over.branch || R.cfg.branch, dslPath: over.dslPath || R.cfg.dslPath, htmlPath: over.htmlPath || R.cfg.htmlPath };
+      R = { cfg: cfgO, overridden: true, dslUrl: ghRawUrl(cfgO, cfgO.dslPath, name), htmlUrl: ghRawUrl(cfgO, cfgO.htmlPath, name) };
+    }
+    if (!R.cfg.owner || !R.cfg.repo) { toast('Set your GitHub owner/repo first (open the gear, then Repo defaults)'); return; }
+    var dslUrl = R.dslUrl, htmlUrl = R.htmlUrl;
+    toast('Fetching ' + name + ' from GitHub\u2026');
+    var got = {};
+    function done() {
+      if (!('dsl' in got) || !('html' in got)) return;
+      if (got.dsl.err || got.html.err) {
+        console.warn('[weld github] fetch error', { dslUrl: dslUrl, htmlUrl: htmlUrl, dsl: got.dsl.err, html: got.html.err });
+        toast('Fetch failed (' + (got.dsl.err ? 'DSL ' + got.dsl.err : '') + (got.html.err ? ' HTML ' + got.html.err : '') + ') -- use "Map THIS generator" to re-point');
+        return;
+      }
+      var dslP = R.cfg.dslPath.replace(/\{name\}/g, name), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, name);
+      var msg = 'Update "' + name + '" from GitHub?' + (R.overridden ? '  [custom mapping]' : '') + '\n\n'
+        + 'repo: ' + R.cfg.owner + '/' + R.cfg.repo + '@' + R.cfg.branch + '\n'
+        + 'DSL  <- ' + dslP + '   (' + got.dsl.text.length + ' chars)\n'
+        + 'HTML <- ' + htmlP + '   (' + got.html.text.length + ' chars)\n\n'
+        + 'This REPLACES the editor contents. You will still need to click Save.';
+      if (!confirm(msg)) { toast('Cancelled'); return; }
+      var sDsl = cmSet(panes.dsl, got.dsl.text), sHtml = cmSet(panes.html, got.html.text);
+      console.log('[weld github] wrote panes', { name: name, dsl: sDsl, html: sHtml, dslChars: got.dsl.text.length, htmlChars: got.html.text.length, panes: panes.all.length, overridden: R.overridden });
+      if (sDsl === 'failed' || sHtml === 'failed') toast('Wrote with issues (DSL:' + sDsl + ' HTML:' + sHtml + ') -- see console');
+      else toast('Pulled ' + name + ' (DSL:' + sDsl + ', HTML:' + sHtml + ') -- now click Save');
+    }
+    ghFetch(dslUrl, function (err, text) { got.dsl = { err: err, text: text }; done(); });
+    ghFetch(htmlUrl, function (err, text) { got.html = { err: err, text: text }; done(); });
+  }
+  function ghConfigure() {
+    var cfg = ghCfg();
+    var owner = prompt('GitHub owner (global default):', cfg.owner); if (owner == null) return;
+    var repo = prompt('Repo:', cfg.repo); if (repo == null) return;
+    var branch = prompt('Branch:', cfg.branch); if (branch == null) return;
+    var dslPath = prompt('DSL path template ({name} = generator slug):', cfg.dslPath); if (dslPath == null) return;
+    var htmlPath = prompt('HTML path template ({name} = generator slug):', cfg.htmlPath); if (htmlPath == null) return;
+    gset('github', { owner: (owner || '').trim(), repo: (repo || '').trim(), branch: (branch || '').trim(), dslPath: (dslPath || '').trim(), htmlPath: (htmlPath || '').trim() });
+    toast('Global GitHub config saved');
+  }
+  // Re-point the CURRENT generator (by slug) at specific GitHub files -- needed when the
+  // Perchance slug does not match the file names (e.g. a random slug).
+  function ghMapThis() {
+    var name = genName();
+    if (!name) { toast('Open a generator first'); return; }
+    var R = ghResolve(name), map = gget('githubMap', {}) || {}, cur = map[name] || {}, base = ghCfg();
+    var dsl = prompt('GitHub DSL path for slug "' + name + '"\n(repo ' + R.cfg.owner + '/' + R.cfg.repo + '@' + R.cfg.branch + '; {name} = ' + name + '):', R.cfg.dslPath); if (dsl == null) return;
+    var html = prompt('GitHub HTML path for slug "' + name + '":', R.cfg.htmlPath); if (html == null) return;
+    var owner = prompt('Owner override (blank = global "' + base.owner + '"):', cur.owner || ''); if (owner == null) return;
+    var repo = prompt('Repo override (blank = global "' + base.repo + '"):', cur.repo || ''); if (repo == null) return;
+    var branch = prompt('Branch override (blank = global "' + base.branch + '"):', cur.branch || ''); if (branch == null) return;
+    var entry = { dslPath: dsl.trim(), htmlPath: html.trim() };
+    if (owner.trim()) entry.owner = owner.trim();
+    if (repo.trim()) entry.repo = repo.trim();
+    if (branch.trim()) entry.branch = branch.trim();
+    map[name] = entry; gset('githubMap', map);
+    toast('Mapped slug "' + name + '" -> GitHub files');
+  }
+  // Power-user: edit the whole per-slug mapping as JSON.
+  function ghEditMap() {
+    var map = gget('githubMap', {}) || {};
+    var txt = prompt('Edit GitHub mapping JSON\n{ "<slug>": { "dslPath", "htmlPath", "owner"?, "repo"?, "branch"? } }', JSON.stringify(map));
+    if (txt == null) return;
+    try {
+      var parsed = JSON.parse(txt);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { toast('Invalid: must be a JSON object'); return; }
+      gset('githubMap', parsed); toast('GitHub mapping saved (' + Object.keys(parsed).length + ' entries)');
+    } catch (e) { toast('Invalid JSON: ' + ((e && e.message) || e)); }
+  }
+  try {
+    if (typeof GM_registerMenuCommand !== 'undefined') {
+      GM_registerMenuCommand('Weld: Update editor from GitHub', pullFromGitHub);
+      GM_registerMenuCommand('Weld: Map THIS generator -> GitHub files', ghMapThis);
+      GM_registerMenuCommand('Weld: Configure GitHub repo (global)', ghConfigure);
+      GM_registerMenuCommand('Weld: Edit GitHub mapping (JSON)', ghEditMap);
+    }
+  } catch (e) {}
+
   function isEditMode() { return /[?&]edit/.test(location.search) || !!window.modelTextEditor; }
   function toast(msg, ms) {
     var t = el('div', { class: 'wc-root wc-toast', text: msg });
@@ -215,6 +368,9 @@
     // a sticky footer area inside a tab (for CRUD / actions)
     '.wc-foot{margin-top:14px;padding-top:14px;border-top:1px solid var(--wc-line-2);}',
     '.wc-section-note{font:500 11px/1.5 var(--wc-sans);color:var(--wc-faint);margin-top:12px;}',
+    '.wc-thisgen{margin-bottom:14px;}',
+    '.wc-adv{margin-top:10px;padding-top:12px;border-top:1px solid var(--wc-line);flex-direction:column;gap:8px;}',
+    '.wc-subhead{font:600 10.5px/1.4 var(--wc-sans);color:var(--wc-dim);text-transform:uppercase;letter-spacing:.05em;margin:6px 0 -2px;}',
     // ---- toast ----
     '.wc-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(14px) scale(.98);z-index:2147483600;',
     '  padding:11px 18px 11px 15px;font:500 13px/1.3 var(--wc-sans);letter-spacing:.1px;color:var(--wc-ink);',
@@ -438,6 +594,94 @@
   // Generators tab = the old launcher + manager, merged (they list the same data).
   // Search + sort + filter, keyboard nav, per-row star/open/edit/forget, and the
   // CRUD actions in a footer.
+  // Top-of-panel "This Generator" section. Compact by default (slug + one Pull button);
+  // a gear reveals the advanced editor -- this generator's GitHub file paths / repo
+  // overrides, AND the global repo defaults (owner/repo/branch + path templates). The
+  // expand state is remembered, so the common user keeps a clean, uncluttered panel.
+  function renderThisGenerator(body) {
+    function note(t) { return el('div', { class: 'wc-section-note', text: t }); }
+    function field(val, aria, ph) { return el('input', { class: 'wc-field', type: 'text', value: val, placeholder: ph || '', 'aria-label': aria, title: aria }); }
+    function row(kids, mt) { return el('div', { class: 'wc-row', style: { marginTop: (mt == null ? 8 : mt) + 'px' } }, kids); }
+    function head(t) { return el('div', { class: 'wc-subhead', text: t }); }
+
+    var name = genName();
+    var sec = el('div', { class: 'wc-thisgen' });
+    sec.appendChild(el('label', { class: 'wc-label', text: 'This Generator' }));
+    if (!name) {
+      sec.appendChild(note('Open a generator (its #edit page) to pull it from GitHub.'));
+      body.appendChild(sec);
+      return;
+    }
+
+    var map = gget('githubMap', {}) || {}, ov = map[name] || {}, base = ghCfg(), R = ghResolve(name);
+
+    // per-generator mapping inputs
+    var dslIn = field(R.cfg.dslPath, 'DSL / top-panel file path ({name} = slug)');
+    var htmlIn = field(R.cfg.htmlPath, 'HTML-panel file path ({name} = slug)');
+    var ownerIn = field(ov.owner || '', 'owner override for this generator', base.owner ? 'owner = ' + base.owner : 'owner');
+    var repoIn = field(ov.repo || '', 'repo override for this generator', base.repo ? 'repo = ' + base.repo : 'repo');
+    var branchIn = field(ov.branch || '', 'branch override for this generator', base.branch ? 'branch = ' + base.branch : 'branch');
+    function liveOver() {
+      var o = { dslPath: dslIn.value.trim(), htmlPath: htmlIn.value.trim() };
+      if (ownerIn.value.trim()) o.owner = ownerIn.value.trim();
+      if (repoIn.value.trim()) o.repo = repoIn.value.trim();
+      if (branchIn.value.trim()) o.branch = branchIn.value.trim();
+      return o;
+    }
+    function saveMapping() { var m = gget('githubMap', {}) || {}; m[name] = liveOver(); gset('githubMap', m); toast('Saved mapping for ' + name); renderTab(); }
+    function resetMapping() { var m = gget('githubMap', {}) || {}; delete m[name]; gset('githubMap', m); toast('Reset ' + name + ' to defaults'); renderTab(); }
+
+    // global repo defaults inputs
+    var gOwner = field(base.owner, 'default owner (all generators)', 'github username');
+    var gRepo = field(base.repo, 'default repo', 'repository name');
+    var gBranch = field(base.branch, 'default branch', 'main');
+    var gDsl = field(base.dslPath, 'default DSL path template ({name} = slug)');
+    var gHtml = field(base.htmlPath, 'default HTML path template ({name} = slug)');
+    function saveDefaults() {
+      gset('github', {
+        owner: gOwner.value.trim() || GH_DEFAULTS.owner, repo: gRepo.value.trim() || GH_DEFAULTS.repo,
+        branch: gBranch.value.trim() || GH_DEFAULTS.branch, dslPath: gDsl.value.trim() || GH_DEFAULTS.dslPath,
+        htmlPath: gHtml.value.trim() || GH_DEFAULTS.htmlPath
+      });
+      toast('Repo defaults saved'); renderTab();
+    }
+
+    // compact header: slug + Pull + gear
+    var gear = el('button', { class: 'wc-btn wc-mini', text: '\u2699', title: 'Mapping & repo settings', 'aria-label': 'GitHub mapping and repo settings', 'aria-expanded': 'false' });
+    sec.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center' } }, [
+      el('span', { class: 'wc-gslug', style: { flex: '1', minWidth: '0' }, text: name + (map[name] ? '  \u00b7  custom' : '') }),
+      el('button', { class: 'wc-btn wc-btn-accent', text: '\u2B07 Pull', title: 'Fetch this generator\u2019s files and fill the editor panes (you then Save)', onclick: function () { pullFromGitHub(liveOver()); } }),
+      gear
+    ]));
+
+    // advanced (collapsible)
+    var adv = el('div', { class: 'wc-adv', style: { display: gget('ghExpanded', false) ? 'flex' : 'none' } });
+    adv.appendChild(head('Files for this generator'));
+    adv.appendChild(dslIn);
+    adv.appendChild(htmlIn);
+    adv.appendChild(row([ownerIn, repoIn, branchIn]));
+    adv.appendChild(row([
+      el('button', { class: 'wc-btn', text: 'Save mapping', title: 'Remember these paths for this slug', onclick: saveMapping }),
+      el('button', { class: 'wc-btn', text: 'Reset', title: 'Use the global defaults', onclick: resetMapping })
+    ]));
+    adv.appendChild(head('Repo defaults (all generators)'));
+    adv.appendChild(row([gOwner, gRepo, gBranch]));
+    adv.appendChild(gDsl);
+    adv.appendChild(gHtml);
+    adv.appendChild(row([el('button', { class: 'wc-btn', text: 'Save defaults', title: 'Owner / repo / branch + path templates for every generator', onclick: saveDefaults })]));
+    sec.appendChild(adv);
+
+    gear.onclick = function () {
+      var open = adv.style.display === 'none';
+      adv.style.display = open ? 'flex' : 'none';
+      gear.setAttribute('aria-expanded', open ? 'true' : 'false');
+      gset('ghExpanded', open);
+    };
+    if (gget('ghExpanded', false)) gear.setAttribute('aria-expanded', 'true');
+
+    body.appendChild(sec);
+  }
+
   function renderGenerators(body) {
     var sort = gget('mgrSort', 'recent');
     var filter = '';
@@ -462,7 +706,7 @@
       items.slice(0, 60).forEach(function (it, idx) {
         var star = el('span', { class: 'wc-star' + (isFav(it.name) ? ' on' : ''), text: '\u2605', onclick: function (e) { e.stopPropagation(); var on = toggleFav(it.name); star.classList.toggle('on', on); } });
         var open = el('button', { class: 'wc-btn wc-mini', text: 'open', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name; } });
-        var edit = el('button', { class: 'wc-btn wc-mini', text: 'edit', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name + '?edit'; } });
+        var edit = el('button', { class: 'wc-btn wc-mini', text: 'edit', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name + '#edit'; } });
         var forget = el('button', { class: 'wc-btn wc-mini', text: '\u2715', title: 'Remove from this list', onclick: function (e) { e.stopPropagation(); var r = gget('recent', []).filter(function (x) { return x.name !== it.name; }); gset('recent', r); build(); } });
         var li = el('li', { onclick: function () { location.href = 'https://perchance.org/' + it.name; } }, [star, el('span', { class: 'wc-gname', text: it.title || it.name }), el('span', { class: 'wc-gslug', text: it.name }), open, edit, forget]);
         if (idx === 0) li.classList.add('wc-sel');
@@ -479,13 +723,14 @@
     });
     var crud = el('div', { class: 'wc-foot' }, [
       el('div', { class: 'wc-row' }, [
-        el('button', { class: 'wc-btn wc-btn-accent', text: '\uFF0B New', onclick: function () { window.open('https://perchance.org/create', '_blank'); } }),
-        el('button', { class: 'wc-btn', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '?edit'; else toast('Open a generator first'); } }),
+        el('button', { class: 'wc-btn wc-btn-accent', text: '\uFF0B New', onclick: function () { window.open('https://perchance.org/minimal#edit', '_blank'); } }),
+        el('button', { class: 'wc-btn', text: 'Fork this', title: 'Open this generator\u2019s editor to copy it', onclick: function () { if (genName()) location.href = 'https://perchance.org/' + genName() + '#edit'; else toast('Open a generator first'); } }),
         el('button', { class: 'wc-btn', text: 'Save', title: 'Trigger Perchance save (edit mode)', onclick: function () { if (typeof window.saveGenerator === 'function') { try { window.saveGenerator(); toast('Save triggered'); } catch (e) { toast('Save failed'); } } else toast('Open the editor to save'); } }),
         el('button', { class: 'wc-btn', text: 'Delete\u2026', title: 'Delete current generator (edit mode)', onclick: function () { if (window.settingsModal && typeof window.settingsModal.deleteGenerator === 'function') { if (confirm('Delete ' + genName() + '? This uses Perchance\u2019s own delete and cannot be undone.')) window.settingsModal.deleteGenerator(); } else toast('Open the editor settings to delete'); } })
       ]),
-      el('div', { class: 'wc-section-note', text: 'List from generators you\u2019ve opened and starred. New/Fork/Save/Delete drive Perchance\u2019s own functions when available.' })
+      el('div', { class: 'wc-section-note', text: 'Generators you\u2019ve opened or starred.' })
     ]);
+    renderThisGenerator(body);
     body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel ]));
     body.appendChild(listEl);
     body.appendChild(crud);
@@ -692,6 +937,9 @@
   function enhanceInputs() {
     $$('textarea').forEach(function (ta) {
       if (ta.dataset.wcResize) return; ta.dataset.wcResize = '1';
+      if (ta.id === 'aiHelperInputEl') return;
+      if (ta.closest && ta.closest('.wc-root, [role="dialog"], dialog, [class*="modal" i], [class*="popup" i], [class*="dialog" i], [class*="overlay" i], [class*="settings" i]')) return;
+      if (!ta.offsetParent || ta.clientHeight < 40) return;
       ta.style.resize = ta.style.resize || 'vertical';
       // Enter submits / Shift+Enter newline normalization is risky to force globally;
       // instead add an unobtrusive expand button.
