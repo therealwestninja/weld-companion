@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.24.0
+// @version      1.26.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -197,7 +197,13 @@
     { id: 'ai-stream', pane: 'html', label: 'aiTextPlugin stream', desc: 'streaming with onChunk',
       text: ['const stream = root.aiTextPlugin({', '  instruction: "...",', '  stopSequences: ["\\n\\n[[", "\\n[["],', '  hideStartWith: true,', '  onChunk: function (o) {', '    if (o.isFromStartWith) return;', '    /* o.textChunk, o.fullTextSoFar */', '  }', '});', 'const result = await stream;            // stream.stop() to abort', 'const text = String(result);', ''].join('\n') },
     { id: 'superfetch-call', pane: 'html', label: 'superFetch call', desc: 'CORS-bypass fetch (auth in URL)',
-      text: ['// auth via URL params -- custom headers are stripped by the proxy', 'const r = await root.superFetch("https://api.example.com/data?_=" + Date.now());', 'const text = await r.text();', ''].join('\n') }
+      text: ['// auth via URL params -- custom headers are stripped by the proxy', 'const r = await root.superFetch("https://api.example.com/data?_=" + Date.now());', 'const text = await r.text();', ''].join('\n') },
+    { id: 't2i-call', pane: 'html', label: 'textToImagePlugin call', desc: 'image gen (await -> dataUrl)',
+      text: ['// resolution MUST be one of: 512x512, 512x768, 768x512, 768x768 (others give a 0x0 canvas).', '// weights: use parens like (red:1.5) -- square brackets are eaten by the DSL layer.', '// an empty or inline-only prompt HANGS forever -- always pass real description text.', 'const result = root.textToImagePlugin({', '  prompt:        "a red apple on a wooden table",', '  resolution:    "768x768",', '  guidanceScale: 7', '});', 'const data = await result;        // resolves with canvas, dataUrl, inputs (no iframe key)', 'img.src = String(data.dataUrl);   // String() any boxed values before use', ''].join('\n') },
+    { id: 'upload-call', pane: 'html', label: 'uploadPlugin call', desc: 'upload a blob (url is boxed)',
+      text: ['// result.url is a BOXED String -- always String() it before compare/use.', 'const result = await root.uploadPlugin(blob);     // blob up to 5 MB', 'if (result.error) {', '  // "disallowed_content" -> make the description explicitly state the subject is 18+', '} else {', '  const url = String(result.url);', '  // result.deletionUrl (undocumented): GET it to permanently delete the upload.', '}', ''].join('\n') },
+    { id: 'image-hint', pane: 'html', label: '<image> tag hint', desc: 'reliably trigger image output',
+      text: ['// The model emits images reliably only when told about the tag (see skill section 17).', 'const IMAGE_TAG_HINT =', '  "You can embed an AI-generated image using this exact syntax: " +', '  "<image>a detailed description of the scene</image> -- the text inside the tag is " +', '  "used to generate a real image. Use it when the user asks for one or it would help.";', '// Append IMAGE_TAG_HINT to your aiTextPlugin instruction when images should be available.', ''].join('\n') }
   ];
   function snippetById(id) { for (var i = 0; i < SNIPPETS.length; i++) if (SNIPPETS[i].id === id) return SNIPPETS[i]; return null; }
   function insertSnippet(snip) {
@@ -247,6 +253,26 @@
   // Lint the HTML pane's <script> blocks. Returns [{line,col,message,sev,ruleId}]
   // with line numbers mapped to the pane. (modelText {...} JS-block linting needs
   // the DSL-aware block ranges Perchance computes internally -- deferred.)
+  // Static scan for Perchance parser traps the JS linter cannot see: the engine evaluates
+  // {..}/[..] template patterns in the raw HTML-panel source (including <script>) BEFORE JS
+  // runs, and decodes HTML entities first. These pass JS parsing but break silently at runtime.
+  function perchanceTraps(code) {
+    var rules = [
+      { re: /\\u\{/g, msg: 'Perchance trap: a unicode brace-escape -- the parser reads the brace expression as a template. Use a surrogate pair or String.fromCodePoint() instead.' },
+      { re: /\{import:/g, msg: 'Perchance trap: an import pattern in panel code is parsed as a plugin import. Escape the braces or build the string at runtime.' },
+      { re: /&#(?:x0*7b|123|x0*5b|91);/gi, msg: 'Perchance trap: a brace or bracket HTML entity -- entities are decoded before scanning, so this still triggers. Construct the character at runtime.' }
+    ];
+    var out = [], i, m;
+    for (i = 0; i < rules.length; i++) {
+      rules[i].re.lastIndex = 0;
+      while ((m = rules[i].re.exec(code)) !== null) {
+        out.push({ lineOffset: code.slice(0, m.index).split('\n').length, message: rules[i].msg });
+        if (m.index === rules[i].re.lastIndex) rules[i].re.lastIndex++;
+      }
+    }
+    return out;
+  }
+
   function lintHtmlScripts() {
     var libs = lintLibs(), hv = htmlView(); if (!libs || !hv) return [];
     var html = viewText(hv); if (!html) return [];
@@ -255,6 +281,8 @@
       var reg = regions[i], cfg = { languageOptions: { globals: {}, parserOptions: { ecmaVersion: 2022, sourceType: reg.sourceType } }, rules: {} }, msgs;
       try { msgs = libs.linter.verify(reg.code, cfg); } catch (e) { continue; }
       for (var j = 0; j < msgs.length; j++) { var m = msgs[j]; out.push({ line: reg.startLine + (m.line || 1) - 1, col: m.column || 1, message: m.message, sev: m.severity, ruleId: m.ruleId }); }
+      var traps = perchanceTraps(reg.code);
+      for (var t = 0; t < traps.length; t++) out.push({ line: reg.startLine + traps[t].lineOffset - 1, col: 1, message: traps[t].message, sev: 1, ruleId: 'perchance-trap' });
     }
     return out;
   }
@@ -263,14 +291,14 @@
     console.warn('[weld lint]', probs);
     var lines = probs.slice(0, 8).map(fmtLintProb).join('\n');
     var more = probs.length > 8 ? ('\n\u2026 and ' + (probs.length - 8) + ' more (see console)') : '';
-    return confirm(action + ': ' + probs.length + ' JavaScript problem(s) in the HTML pane:\n\n' + lines + more + '\n\nProceed with ' + action + ' anyway?');
+    return confirm(action + ': ' + probs.length + ' problem(s) in the HTML pane:\n\n' + lines + more + '\n\nProceed with ' + action + ' anyway?');
   }
   function lintNow() {
     if (!lintLibs()) { toast('Lint unavailable \u2014 open the editor so Perchance loads its linter, then retry'); return; }
     var p = lintHtmlScripts();
-    if (!p.length) { toast('\u2713 No JavaScript problems in the HTML pane'); return; }
+    if (!p.length) { toast('\u2713 No problems in the HTML pane'); return; }
     console.warn('[weld lint]', p);
-    alert('JavaScript problems in the HTML pane (' + p.length + '):\n\n' + p.slice(0, 20).map(fmtLintProb).join('\n') + (p.length > 20 ? '\n\u2026 and ' + (p.length - 20) + ' more (see console)' : ''));
+    alert('Problems in the HTML pane (' + p.length + '):\n\n' + p.slice(0, 20).map(fmtLintProb).join('\n') + (p.length > 20 ? '\n\u2026 and ' + (p.length - 20) + ' more (see console)' : ''));
   }
 
   // ---- AI bug-check: Perchance's own editor copilot, creds-free ----
@@ -1398,7 +1426,7 @@
 
     var cardLint = el('div', { class: 'wc-card' });
     cardLint.appendChild(head('Code checks'));
-    cardLint.appendChild(note('Lints the HTML pane\u2019s <script> blocks for JavaScript syntax errors, reusing Perchance\u2019s own ESLint. Runs before Save and is flagged in the Push dialog.'));
+    cardLint.appendChild(note('Lints the HTML pane\u2019s <script> blocks for JavaScript syntax errors (Perchance\u2019s own ESLint) plus Perchance parser traps the JS linter can\u2019t see \u2014 unicode-brace escapes, import patterns, and brace/bracket HTML entities. Runs before Save and is flagged in the Push dialog.'));
     var lchk = el('input', { type: 'checkbox', id: 'wc-lint-save', style: { margin: '0 8px 0 0' } });
     lchk.checked = gget('lintOnSave', true);
     lchk.onchange = function () { gset('lintOnSave', !!lchk.checked); toast('Lint before Save: ' + (lchk.checked ? 'ON' : 'OFF')); };
