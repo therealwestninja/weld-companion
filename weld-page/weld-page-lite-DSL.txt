@@ -1,0 +1,7 @@
+$meta
+  title = Page // chat
+  description = The simplest way to use Page. Just chat. Every message you send is quietly handled by a small team of AI agents -- they split the work, reason in parallel, and hand back one clear reply (tap "agent activity" under any answer to see how). Free native AI, no key, no setup. The full mission-control Page is one tab away when you want the dials.
+  tags = ai, chat, simple, multi-agent, assistant, weld, page
+
+aiTextPlugin       = {import:ai-text-plugin}
+textToImagePlugin  = {import:text-to-image-plugin}
