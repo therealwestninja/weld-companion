@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.36.0
-// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian, night light, read-aloud).
+// @version      1.38.0
+// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
 // @match        https://*.perchance.org/*
@@ -1716,6 +1716,19 @@
 
     cols.appendChild(cardTheme);
     cols.appendChild(cardOpts);
+    // Night light (a comfort setting that drives the theme above) is owned by
+    // the Library module; mount its card here so all reading settings live
+    // together. Fails soft if the Library module isn't loaded.
+    try {
+      var lib = window.weldLibrary;
+      if (lib && typeof lib.renderNightlightCard === 'function') {
+        var cardNL = el('div', { class: 'wc-card wc-col' });
+        cardNL.appendChild(el('label', { class: 'wc-label', text: '\uD83C\uDF19 Night light' }));
+        var nlBody = el('div', {}); cardNL.appendChild(nlBody);
+        lib.renderNightlightCard(nlBody);
+        cols.appendChild(cardNL);
+      }
+    } catch (e) {}
     body.appendChild(cols);
 
     body.appendChild(el('div', { class: 'wc-foot' }, [
@@ -2570,10 +2583,10 @@
 
 /* =============================================================================
  * Weld Companion appended modules
- *  [1] IDB engine v1.3        [2] Data Manager v2.3 (pageText kind-aware, askWindow)
- *  [3] AICC core              [4] AICC pack (sentry, lore, recovery)
- *  [5] AICC typed view        [6] AICC tools (character files)
- *  [7] Story export core      [8] Library (scrapbook, stories, guardian)
+ *  [1] IDB engine v1.3        [2] Data Manager v2.3
+ *  [3] AICC core              [4] AICC pack
+ *  [5] AICC typed view        [6] AICC tools
+ *  [7] Story export core      [8] Library (task sub-nav: Collect / Care)
  * ========================================================================== */
 
 /* ----- [1] IDB ENGINE v1.3 ----- */
@@ -3310,7 +3323,11 @@
         try { (ev.source || window.top).postMessage(payload, '*'); } catch (e) {}
       };
       var eng = getEngine();
-      if (!eng) { reply({ ok: false, error: 'IndexedDB engine unavailable on ' + location.origin }); return; }
+      // pageText and ping read the DOM / report identity only — they don't touch
+      // IndexedDB, so they must answer even when the engine can't be built
+      // (some generators fail engine construction; the result reader still works).
+      var ENGINE_FREE = (d.op === 'pageText' || d.op === 'ping');
+      if (!eng && !ENGINE_FREE) { reply({ ok: false, error: 'IndexedDB engine unavailable on ' + location.origin }); return; }
       runOp(eng, d.op, d.args).then(function (res) { reply({ ok: true, result: res }); })
         .catch(function (err) { reply({ ok: false, error: (err && err.message) ? err.message : String(err) }); });
     }, false);
@@ -5999,7 +6016,15 @@
       '.wlib-msg{margin:10px 0;}',
       '.wlib-msg .nm{font-weight:700;font-size:12px;color:var(--wc-arc,#ff8a3d);}',
       '.wlib-msg.user .nm{color:#7fb2ff;}',
-      '.wlib-msg .tx{font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;margin-top:2px;}'
+      '.wlib-msg .tx{font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;margin-top:2px;}',
+      '.wlib-head{position:sticky;top:0;z-index:2;background:var(--wc-surface,#13171e);padding-bottom:10px;margin-bottom:4px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.06));}',
+      '.wlib-nav{display:flex;gap:6px;margin-bottom:10px;}',
+      '.wlib-navbtn{appearance:none;flex:1;background:var(--wc-surface-2,#1a1f28);border:1px solid var(--wc-line,rgba(255,255,255,.12));color:var(--wc-dim,#9aa7b6);border-radius:9px;padding:8px 10px;font:600 12.5px system-ui;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;transition:all .12s;}',
+      '.wlib-navbtn:hover{border-color:var(--wc-arc,#ff8a3d);color:var(--wc-ink,#e8e4dc);}',
+      '.wlib-navbtn.active{background:var(--wc-arc,#ff8a3d);border-color:var(--wc-arc,#ff8a3d);color:#1a0f05;}',
+      '.wlib-navbtn .badge{font:11px ui-monospace,monospace;opacity:.7;}',
+      '.wlib-navbtn.active .badge{opacity:.85;}',
+      '.wlib-intro{font:11.5px/1.5 system-ui;color:var(--wc-faint,#5d6b7b);margin-bottom:10px;}'
     ].join('\n');
     document.head.appendChild(Object.assign(document.createElement('style'), { id: 'weld-lib-style', innerHTML: css }));
   }
@@ -6070,13 +6095,37 @@
     }
     return Promise.resolve(null);
   }
+  // A final safety net: even if some path returns text, refuse anything that is
+  // obviously Perchance's frame chrome rather than a result. The control strip
+  // is a short, fixed set of labels (fullscreen / warnings / reload / auto), so
+  // text that is ONLY those words (in any order, any casing) is never a roll.
+  function looksLikeChrome(text) {
+    var t = String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!t) return true;
+    var words = t.split(' ').filter(Boolean);
+    if (words.length > 8) return false;   // real output is longer than the toolbar
+    var chrome = { fullscreen: 1, warnings: 1, warning: 1, reload: 1, auto: 1, pause: 1, resume: 1, copy: 1, save: 1, share: 1, settings: 1, edit: 1 };
+    return words.every(function (w) { return chrome[w]; });
+  }
+
   // Returns { text, kind }. kind: 'chat' (AICC — steer to Chat stories),
-  // 'output' (classic generator), 'none' (nothing found), '' (top-frame hit).
+  // 'output' (classic generator), 'none' (nothing found).
+  //
+  // Precedence matters: the real output ALWAYS lives in the cross-origin sandbox
+  // frame, never on the top page (which only holds Perchance chrome around the
+  // iframe). So we ask the live frame FIRST. The top-frame hook is a last resort
+  // for the rare case where no agent is reachable.
   function getOutputResult() {
-    var h = hooks();
-    var text = (typeof h.outputText === 'function') ? h.outputText() : '';
-    if (text) return Promise.resolve({ text: text, kind: 'output' });
-    return liveOutputResult().then(function (r) { return r || { text: '', kind: 'none' }; });
+    return liveOutputResult().then(function (r) {
+      if (r && r.text && !looksLikeChrome(r.text)) return { text: r.text, kind: r.kind || 'output' };
+      if (r && r.kind === 'chat') return { text: r.text && !looksLikeChrome(r.text) ? r.text : '', kind: 'chat' };
+      if (r && r.kind === 'none') return { text: '', kind: 'none' };
+      // No agent answered \u2014 consider the top frame, but never trust chrome text.
+      var h = hooks();
+      var text = (typeof h.outputText === 'function') ? h.outputText() : '';
+      if (text && !looksLikeChrome(text)) return { text: text, kind: 'output' };
+      return { text: '', kind: 'none' };
+    });
   }
   function saveCurrentOutput() {
     return getOutputResult().then(function (res) {
@@ -6395,7 +6444,10 @@
       nlPrevTheme = null;
     }
   }
-  function renderNightlight(bd, setCount) {
+  // Night light renders into any container (a Library section OR a Comfort
+  // card). setCount is optional. Returns nothing; mutates the container.
+  function buildNightlight(bd, setCount) {
+    setCount = setCount || function () {};
     var cfg = libCfg(); var nl = cfg.nightlight || { on: false, theme: 'warm', from: 20, to: 7 };
     setCount(nl.on ? 'on' : 'off');
     var h = hooks();
@@ -6429,20 +6481,63 @@
     location.href = 'https://perchance.org/' + pick;
   }
 
-  /* ====================== tab renderer ====================================== */
+  /* ====================== tab renderer ======================================
+   * Grouped by task, not by feature:
+   *   Collect (\ud83d\udcda) \u2014 the things you keep: Scrapbook + Chat stories
+   *   Care    (\ud83d\udee1) \u2014 keeping data safe: Backup guardian
+   * Night light is a comfort SETTING, so it lives in the Comfort tab (mounted
+   * there via buildNightlight); it is intentionally absent here.
+   * A sticky header holds the persistent quick actions + sub-nav so they don't
+   * scroll away with the content.
+   */
+  var LIB_VIEW = 'collect';   // remembered for the session
   function renderTab(body) {
     styleOnce();
-    body.appendChild(el('div', { class: 'wlib-bar', style: { marginBottom: '10px' } }, [
-      el('button', { class: 'wlib-mini', text: '\ud83c\udfb2 Random favorite', onclick: randomFavorite }),
-      el('button', { class: 'wlib-mini', text: '\ud83d\udd0a Read this page\u2019s output', onclick: function () {
-        getOutputResult().then(function (res) { if (res.text) speak(res.text); else toast('No generator output found on this page'); });
-      } }),
-      el('button', { class: 'wlib-mini', text: '\u25a0 Stop reading', onclick: stopSpeak })
-    ]));
-    body.appendChild(section('\ud83d\udccc Scrapbook', '', true, renderScrapbook));
-    body.appendChild(section('\ud83d\udcd6 Chat stories', '', true, renderStories));
-    body.appendChild(section('\ud83d\udee1 Backups', '', false, renderGuardian));
-    body.appendChild(section('\ud83c\udf19 Night light', '', false, renderNightlight));
+
+    var work = el('div');   // swappable working area
+    function counts() {
+      var sb = (gget('scrapbook', []) || []).length;
+      return { sb: sb };
+    }
+    var c = counts();
+
+    var navCollect = el('button', { class: 'wlib-navbtn', onclick: function () { LIB_VIEW = 'collect'; paint(); } }, [
+      el('span', { text: '\ud83d\udcda Collect' }), el('span', { class: 'badge', text: c.sb ? String(c.sb) : '' })
+    ]);
+    var navCare = el('button', { class: 'wlib-navbtn', onclick: function () { LIB_VIEW = 'care'; paint(); } }, [
+      el('span', { text: '\ud83d\udee1 Care' })
+    ]);
+
+    var head = el('div', { class: 'wlib-head' }, [
+      el('div', { class: 'wlib-bar', style: { marginBottom: '8px' } }, [
+        el('button', { class: 'wlib-mini', text: '\u2913 Save current output', title: 'Save the open generator\u2019s current result to the Scrapbook', onclick: function () { saveCurrentOutput().then(function (ok) { if (ok && LIB_VIEW === 'collect') paint(); }); } }),
+        el('button', { class: 'wlib-mini', text: '\ud83d\udd0a Read output', title: 'Read the current page\u2019s output aloud', onclick: function () {
+          getOutputResult().then(function (res) { if (res.text) speak(res.text); else toast('No generator output found on this page'); });
+        } }),
+        el('button', { class: 'wlib-mini', text: '\u25a0 Stop', onclick: stopSpeak }),
+        el('button', { class: 'wlib-mini', text: '\ud83c\udfb2 Random favorite', onclick: randomFavorite })
+      ]),
+      el('div', { class: 'wlib-nav' }, [navCollect, navCare])
+    ]);
+    body.appendChild(head);
+    body.appendChild(work);
+    paint();
+
+    function paint() {
+      navCollect.classList.toggle('active', LIB_VIEW === 'collect');
+      navCare.classList.toggle('active', LIB_VIEW === 'care');
+      var n = counts();
+      navCollect.querySelector('.badge').textContent = n.sb ? String(n.sb) : '';
+      work.innerHTML = '';
+      if (LIB_VIEW === 'collect') {
+        work.appendChild(el('div', { class: 'wlib-intro', text: 'The things you keep \u2014 saved rolls and saved conversations, searchable and exportable.' }));
+        work.appendChild(section('\ud83d\udccc Scrapbook', '', true, renderScrapbook));
+        work.appendChild(section('\ud83d\udcd6 Chat stories', '', false, renderStories));
+      } else {
+        work.appendChild(el('div', { class: 'wlib-intro', text: 'Keep your generator data safe. (Reading comfort and night light live in the Comfort tab.)' }));
+        work.appendChild(section('\ud83d\udee1 Backup guardian', '', true, renderGuardian));
+      }
+    }
   }
 
   /* ====================== boot =============================================== */
@@ -6451,6 +6546,11 @@
   setInterval(nightTick, 60000);
   setTimeout(nightTick, 2500);
 
-  window.weldLibrary = { renderTab: renderTab, saveCurrentOutput: saveCurrentOutput, speak: speak, stopSpeak: stopSpeak };
+  window.weldLibrary = {
+    renderTab: renderTab,
+    renderNightlightCard: buildNightlight,   // mounted by the Comfort tab
+    saveCurrentOutput: saveCurrentOutput,
+    speak: speak, stopSpeak: stopSpeak
+  };
 })();
 

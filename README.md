@@ -7,7 +7,7 @@
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.36.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.37.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -111,23 +111,27 @@ The same actions are also on your userscript manager's menu: **Update editor fro
 
 ### Library — for readers & players
 
-Everything in the **📒 Library** tab is for people who *use* generators rather than write them.
+Everything in the **📒 Library** tab is for people who *use* generators rather than write them. It's organised by task rather than by feature: a sticky header keeps the actions you reach for constantly — **Save current output**, **Read output** aloud, **Stop**, and **🎲 Random favorite** — above two views you switch between, **📚 Collect** and **🛡 Care**.
 
-#### 📌 Scrapbook
+#### 📚 Collect — the things you keep
+
+##### 📌 Scrapbook
 
 A permanent, cross-generator collection of saved results. The drawer's **Save** button downloads a one-shot file and **Pins** are per-generator and capped at 12 — the Scrapbook is where great rolls actually live. One click saves the open generator's current output — captured from **inside the generator's sandbox frame** via the agent, reading the real output container and skipping Perchance's own frame chrome (the fullscreen / reload / warnings strip) and any inline scripts. On an AI Character Chat page it recognises the conversation and points you to **Chat stories** instead, where the whole thread exports cleanly from the database; every entry is searchable (text, generator, tags, notes), taggable, annotatable, readable aloud, and links back to the generator it came from. The whole collection (including your per-generator notes) exports to a single JSON file and imports back with duplicate-safe merging. Capacity is 500 entries; when full, the oldest entry rotates out and the save tells you so.
 
-#### 📖 Chat stories
+##### 📖 Chat stories
 
 People write long roleplay stories in AI Character Chat with no good way to keep or share them — the raw database export is unreadable. This panel lists every chat thread in any AICC-compatible generator (newest first, with character names), and each thread can be **read** in a clean transcript modal — with read-aloud — or **exported** as a styled HTML page (chat-bubble layout, avatars, light/dark aware), Markdown, or plain text. Strictly read-only: nothing is ever written to the chat database. Message visibility follows AICC's own rules — messages hidden from the user stay hidden, system messages are excluded by default, and all exported HTML is fully escaped (generator HTML is never re-emitted), with only a small safe markdown subset rendered.
 
-#### 🛡 Backup guardian
+#### 🛡 Care — keeping your data safe
+
+##### 🛡 Backup guardian
 
 The most common disaster for casual users is the browser quietly evicting months of chats. The guardian shows when your last sweep backup ran, this origin's storage usage against its quota, and whether the browser has marked the storage **persistent** (if not, it says so plainly — eviction is a real risk). One click runs a sweep. If backups are more than 14 days overdue, a gentle reminder toast appears at most once per day.
 
-#### 🌙 Night light & small comforts
+##### Small comforts
 
-**Night light** auto-applies a comfort theme (Warm, Dim, Sepia, Gray, or Dark) on an hour schedule — e.g. Warm from 20:00 to 07:00 — and restores your previous theme outside those hours; your manual comfort settings always win when it's off. **Read aloud** speaks the current page's output, any Scrapbook entry, or a whole chat story using the browser's built-in speech — local, no network, no key. **Per-generator notes** let you jot "great for elf names" on any generator, searchable from the Scrapbook box. **🎲 Random favorite** jumps to a random starred generator.
+**Read aloud** speaks the current page's output, any Scrapbook entry, or a whole chat story using the browser's built-in speech — local, no network, no key. **Per-generator notes** let you jot "great for elf names" on any generator, searchable from the Scrapbook box. **🎲 Random favorite** (in the sticky header) jumps to a random starred generator. **Night light** now lives in the **Comfort** tab beside the theme it controls — it auto-applies a comfort theme (Warm, Dim, Sepia, Gray, or Dark) on an hour schedule, e.g. Warm from 20:00 to 07:00, restoring your previous theme outside those hours; your manual comfort settings always win when it's off.
 
 ### Tools — AI Helper & character files
 
