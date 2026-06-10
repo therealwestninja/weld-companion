@@ -4,10 +4,10 @@
 
 **Quality-of-life upgrades for [Perchance](https://perchance.org) — for readers, players, and authors alike.**
 
-Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · an AI Helper you can edit *or point at your own GPT* · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery.
+Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.32.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.33.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -28,7 +28,7 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
   - [Quality-of-life](#quality-of-life)
   - [Generator manager, directory & CRUD](#generator-manager-directory--crud)
   - [Sync with GitHub — Pull & Push](#sync-with-github--pull--push)
-  - [AI Helper — edit it, or bring your own GPT](#ai-helper--edit-it-or-bring-your-own-gpt)
+  - [Tools — AI Helper & character files](#tools--ai-helper--character-files)
   - [Data Manager — browse, edit & back up every generator's IndexedDB](#data-manager--browse-edit--back-up-every-generators-indexeddb)
   - [AICC pack — Lore Library, character round-trip & repair](#aicc-pack--lore-library-character-round-trip--repair)
   - [Skybridge — the bridge to Weld generators](#skybridge--the-bridge-to-weld-generators)
@@ -58,7 +58,7 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 | ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort, and per-row open/edit. A **This Generator** panel gives the open generator two-way GitHub sync (Pull/Push), rename, delete, and backup. |
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
 | 👁 **Comfort** | Eye-comfort theme filters, font size, line height, max width, a dyslexia-friendly font, focus mode — and an option to apply the same sizing to the **code editor**. |
-| 🤖 **AI Helper** | A custom instruction, or route the helper to your own OpenAI / Anthropic / Google model with your key. |
+| 🛠 **Tools** | Tool cards. **AI Helper**: a custom instruction, or route the helper to your own OpenAI / Anthropic / Google model with your key. **Character Files**: import and export AI Character Chat character `.json` files, or fetch one straight from a GitHub raw URL. |
 
 ### Quality-of-life
 
@@ -107,9 +107,13 @@ The same actions are also on your userscript manager's menu: **Update editor fro
 > [!NOTE]
 > Perchance itself has no external write API, so a **Pull never auto-saves** — the manual Perchance **Save** is always the gate for what goes live. **Push** is gated by the confirm dialog. Push is current-generator only; cross-page bulk sync isn't possible because each generator's editor lives on its own `#edit` page.
 
-### AI Helper — edit it, or bring your own GPT
+### Tools — AI Helper & character files
 
-Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 AI Helper** tab adds the two things it's missing:
+The **🛠 Tools** tab holds self-contained tool cards.
+
+#### 🤖 AI Helper
+
+Perchance's built-in AI Helper writes generator code from a prompt. This card adds the two things it's missing:
 
 1. **Edit the instruction.** Override the helper's system prompt with your own.
 2. **Use your own model.** Route the helper through your own account on any of the three most popular APIs:
@@ -124,6 +128,14 @@ Perchance's built-in AI Helper writes generator code from a prompt. The **🤖 A
 
 > [!IMPORTANT]
 > Your API key is stored **only** in this browser and sent **only** to the provider you select. See [Privacy & safety](#privacy--safety).
+
+#### 👤 Character Files
+
+Surfaces AI Character Chat character files without opening the Data Manager. Works against the generator you currently have open.
+
+- **Import characters** — load a `.json` file: a single-character bundle saved by this manager, an AICC share-link envelope (`{ addCharacter: … }`), a raw character object, or a multi-character export. Every character is validated and normalized (the same sanitizer the repair tools use) before anything is written, so a corrupt file can't poison the database. If an AICC tab is open, direct writes are blocked by the sentry and you get per-character **share links** instead — open each in AICC and its own import flow handles the merge. If AICC is closed, characters are written directly, de-duplicated by `uuid` exactly the way AICC's import does (same `uuid` replaces, no `uuid` inserts fresh).
+- **Export characters** — downloads every character in the current generator as one `.json` file (`format: "aicc-characters"`), each stripped with AICC's own share rules. Private — nothing is uploaded.
+- **Pull character from GitHub** — paste a `raw.githubusercontent.com` URL to a character `.json` and it's fetched (via `GM_xmlhttpRequest`, so CSP can't block it) and run through the same import flow.
 
 ### Data Manager — browse, edit & back up every generator's IndexedDB
 
@@ -175,7 +187,7 @@ A GM-stored catalog of lorebook URLs. Because AICC lore is a list of URLs a char
 Add a lorebook by pasting any `https://` URL directly, or upload a local `.txt` file. Uploads go to **user.uploads.dev** (anonymous; anyone with the URL can read) or your **GitHub repo** (`lore/` folder, served from `raw.githubusercontent.com`). Both paths are enabled by default and each has a toggle in the panel header so you can turn off whichever you don't want as a default. The choice is per-upload; if both are enabled you're asked which to use at upload time.
 
 > [!NOTE]
-> Direct upload to user.uploads.dev requires a small agent extension that isn't currently included. The upload path falls back to GitHub, or you can paste the URL of a file you've already uploaded elsewhere.
+> Uploads to user.uploads.dev run through the generator's **own** upload-plugin, inside its sandbox frame — so they work on any generator that imports `upload-plugin` (AI Character Chat does). Uploaded content passes through Perchance's moderation; a rejection is reported with the reason rather than silently swallowed.
 
 #### 🔧 Repair & recovery
 
@@ -187,12 +199,13 @@ The Repair panel has two modes.
 
 - Characters are normalized to the full set of field defaults AICC fills in on boot (`customCode`, `userCharacter`, `scene`, `streamingResponse`, `roleInstruction` migrated from legacy `systemMessage`, `avatar` migrated from legacy `avatarUrl`, `loreBookUrls`, `autoGenerateMemories`, `maxTokensPerMessage`, and others). Characters with no `id` are dropped and counted; characters with a missing or invalid `uuid` get a fresh one minted.
 - Threads with a dead `characterId` are recovered by scanning their messages for the first one with a real `characterId`, falling back to any existing character.
-- Messages and lore rows that are structurally broken (no `id`, or pointing at a thread that no longer exists after recovery) are dropped. Messages are normalized to include `variants: [null]` if missing.
+- Messages and lore rows that are structurally broken (no `id`, or pointing at a thread that no longer exists after recovery) are removed from the live tables. Messages are normalized to include `variants: [null]` if missing.
+- **Nothing is destroyed.** Every removed row is moved into a separate **`weld-quarantine`** database on the same origin, where you can inspect or restore it any time from the Data Manager. Quarantine lives in its own database because adding a store to `chatbot-ui-v1` would bump its version past what AICC declares and break AICC's boot.
 
 After reviewing the plan ("12 characters normalized, 3 threads recovered, 5 orphan messages dropped"), you have two options:
 
 - **Export repaired copy** — downloads the repaired result as an `idbml` file without touching the live database. Use this to verify the output by importing it somewhere first.
-- **Back up & apply** — downloads a full pre-repair backup of the current database, then rewrites `characters`, `threads`, `messages`, and `lore` from the repaired plan. The `summaries`, `memories`, and embedding caches are left untouched. The planner is a set of pure functions that never mutate your data until you confirm; the backup comes before any write.
+- **Back up & apply** — downloads a full pre-repair backup of the current database, writes any removed rows into the `weld-quarantine` database, then rewrites `characters`, `threads`, `messages`, and `lore` from the repaired plan. The `summaries`, `memories`, and embedding caches are left untouched. The planner is a set of pure functions that never mutate your data until you confirm; the backup and the quarantine write both come before any change to the live stores.
 
 Both options are gated by the **cooperative sentry**: if an AICC tab is open on the same origin, all writes are blocked and the panel explains why. The sentry pings a `BroadcastChannel` per origin and waits 800 ms for any response from a tab it didn't spawn itself; a response means AICC is live. When AICC is closed, the engine writes directly. This is the same gate used for all other AICC pack writes — two writers on a Dexie `++id` store corrupt sequences, and the sentry is the only thing standing between the Companion and that failure mode.
 
@@ -282,7 +295,6 @@ Planned additions:
 - **Weld Lint overlay** — run Weld's brace-trap scanner live in the editor and underline issues as you type.
 - **A richer GitHub manager** — a sync-status badge and pre-Pull/Push diff, building on the two-way sync that's already here.
 - **Atomic GitHub commits** — push DSL + HTML as a single commit rather than two.
-- **Direct user.uploads.dev upload** — a small agent extension to let the Lore Library upload directly to user.uploads.dev from any origin without needing the GitHub path as a fallback.
 
 ## Contributing
 

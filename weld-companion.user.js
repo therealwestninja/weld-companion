@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.31.0
-// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager and an AICC pack for ai-character-chat (Lore Library, character round-trip via GitHub, repair tools).
+// @version      1.33.0
+// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack for ai-character-chat (Lore Library, character round-trip, repair & recovery with quarantine), and a Tools tab with AI Helper and character file import/export.
 // @author       therealwestninja
 // @match        https://perchance.org/*
 // @match        https://*.perchance.org/*
@@ -1231,7 +1231,7 @@
       { id: 'github', glyph: '\u21C5', label: 'GitHub' },
       { id: 'comfort', glyph: '\u{1F441}', label: 'Comfort' },
       { id: 'snippets', glyph: '\u2702', label: 'Snippets' },
-      { id: 'ai', glyph: '\u{1F916}', label: 'AI Helper' }
+      { id: 'tools', glyph: '\u{1F6E0}', label: 'Tools' }
     ];
   }
   function weldItem() { return $('.wc-weld-item'); }
@@ -1294,14 +1294,30 @@
     else if (WC_TAB === 'github') renderGitHub(body);
     else if (WC_TAB === 'comfort') renderComfort(body);
     else if (WC_TAB === 'snippets') renderSnippets(body);
-    else if (WC_TAB === 'ai') renderAI(body);
+    else if (WC_TAB === 'tools') renderTools(body);
   }
   // Data tab delegates to the Data Manager module appended at the end of this file.
-  // Fail-soft: if that block is removed, the tab explains itself.
   function renderData(body) {
     var h = window.weldDataManager;
     if (h && typeof h.renderTab === 'function') { try { h.renderTab(body); return; } catch (e) {} }
     body.appendChild(el('div', { class: 'wc-section-note', text: 'Data Manager module not loaded.' }));
+  }
+  // Tools tab: tool cards. The AI Helper keeps its existing renderer, wrapped
+  // in a card; the Character Files card comes from the AICC tools module.
+  function renderTools(body) {
+    var grid = el('div', { class: 'wc-cols' });
+    var aiCard = el('div', { class: 'wc-card wc-col' });
+    aiCard.appendChild(el('label', { class: 'wc-label', text: '\uD83E\uDD16 AI Helper' }));
+    var aiBody = el('div', {}); aiCard.appendChild(aiBody);
+    try { renderAI(aiBody); } catch (e) { aiBody.appendChild(el('div', { class: 'wc-section-note', text: 'AI Helper failed to render.' })); }
+    var cfCard = el('div', { class: 'wc-card wc-col' });
+    cfCard.appendChild(el('label', { class: 'wc-label', text: '\uD83D\uDC64 Character files \u00b7 AI Character Chat' }));
+    var cfBody = el('div', {}); cfCard.appendChild(cfBody);
+    var t = window.weldAICCTools;
+    if (t && typeof t.renderCharacterFilesCard === 'function') { try { t.renderCharacterFilesCard(cfBody); } catch (e2) { cfBody.appendChild(el('div', { class: 'wc-section-note', text: 'Character tools failed to render.' })); } }
+    else cfBody.appendChild(el('div', { class: 'wc-section-note', text: 'Character tools module not loaded.' }));
+    grid.appendChild(aiCard); grid.appendChild(cfCard);
+    body.appendChild(grid);
   }
 
   // ============================================================ B. favorites & recently-used
@@ -2515,13 +2531,13 @@
 
 
 /* =============================================================================
- * Weld Companion appended modules (Data Manager + AICC pack)
- *  [1] IDB engine v1.2     [2] Data Manager v2.1 (3-pane CRUD/export/import)
- *  [3] AICC core (schema + share rules)   [4] AICC pack (sentry, lore, repair)
- *  [5] AICC typed view (renders in the Data Manager when a chatbot-ui-v1 DB is opened)
+ * Weld Companion appended modules (Data Manager + AICC pack + Tools)
+ *  [1] IDB engine v1.3     [2] Data Manager v2.2 (CRUD/export/import/upload op)
+ *  [3] AICC core (schema + share rules)   [4] AICC pack (sentry, lore, recovery)
+ *  [5] AICC typed view (Data Manager extension)   [6] AICC tools (character files)
  * ========================================================================== */
 
-/* ----- [1] IDB ENGINE v1.2 ----- */
+/* ----- [1] IDB ENGINE v1.3 ----- */
 /* IDB Manager Engine v1.2 — origin-scoped IndexedDB enumerate / describe / CRUD /
  * search / export / import. Pure logic, no DOM. Runs in a browser frame (global
  * indexedDB) or Node (inject an implementation via createIdbEngine(env)).
@@ -3012,11 +3028,13 @@
     }
 
     // mode 'replace' clears the store first; 'merge' puts on top. A missing store is
-    // created via a version bump using the dump's schema.
+    // created via a version bump using the dump's schema; a missing DATABASE is
+    // bootstrapped at version 1 with that store (openExisting guarantees no
+    // shell DB is left behind, so version 0 here really means "doesn't exist").
     function importStore(name, storeDump, mode) {
       mode = mode || 'merge';
       return withDb(name, function (db) {
-        if (!db) throw new Error('database not found: ' + name);
+        if (!db) return { exists: false, version: 0 };
         return { exists: db.objectStoreNames.contains(storeDump.name), version: db.version };
       }).then(function (info) {
         if (info.exists) return;
@@ -3074,7 +3092,7 @@
   };
 });
 
-/* ----- [2] DATA MANAGER v2.1 ----- */
+/* ----- [2] DATA MANAGER v2.2 ----- */
 /* ============================================================================
  * Weld Companion — Data Manager v2.1  (federated IndexedDB / Dexie browser)
  * ----------------------------------------------------------------------------
@@ -3155,6 +3173,42 @@
         case 'estimate': return (navigator.storage && navigator.storage.estimate)
           ? navigator.storage.estimate().then(function (e) { return { usage: e.usage || 0, quota: e.quota || 0 }; })
           : Promise.resolve(null);
+        case 'uploadText': return (function () {
+          // Upload text content to user.uploads.dev THROUGH the generator's own
+          // upload-plugin (root.uploadPlugin). Only works on generators that
+          // import upload-plugin (AICC does). The plugin broker may still be
+          // booting when the hidden frame is fresh, so wait for it briefly.
+          // NOTE: uploadPlugin returns { url, size, error } where url is a
+          // boxed String — String() coercion is mandatory before use.
+          function pageWin() { try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window; } catch (e) { return window; }; }
+          function waitFor(check, ms) {
+            return new Promise(function (resolve, reject) {
+              var t0 = Date.now();
+              (function poll() {
+                var v = null;
+                try { v = check(); } catch (e) {}
+                if (v) return resolve(v);
+                if (Date.now() - t0 > ms) return reject(new Error('upload-plugin is not available on this generator (timed out waiting for root.uploadPlugin)'));
+                setTimeout(poll, 250);
+              })();
+            });
+          }
+          return waitFor(function () {
+            var w = pageWin();
+            return w.root && typeof w.root.uploadPlugin === 'function' ? w.root.uploadPlugin : null;
+          }, 15000).then(function (uploadPlugin) {
+            var blob = new Blob([String(a.text || '')], { type: a.mime || 'text/plain' });
+            return Promise.resolve(uploadPlugin(blob));
+          }).then(function (res) {
+            if (!res) throw new Error('uploadPlugin returned nothing');
+            if (res.error) {
+              var msg = String(res.error);
+              if (msg === 'disallowed_content') msg += ' \u2014 Perchance moderation flagged the content';
+              throw new Error(msg);
+            }
+            return { url: String(res.url), size: res.size || 0 };
+          });
+        })();
         case 'ping': return Promise.resolve({ origin: location.origin, slug: slugOf() });
         default: return Promise.reject(new Error('unknown op: ' + op));
       }
@@ -4454,33 +4508,169 @@
       });
   }
 
-  // ---- Hidden-frame uploader -----------------------------------------------
-  // upload-plugin only resolves from a Perchance origin (the broker iframe is
-  // injected into the page that imports it). We reuse the Data Manager's
-  // existing hidden-frame plumbing: spawn an ai-character-chat frame (its agent
-  // has access to the same origin's uploadPlugin via root.uploadPlugin), call a
-  // tiny op we add to the agent, get back the user.uploads.dev URL.
-  //
-  // Implementation note: rather than extend the agent with an upload op (which
-  // requires re-issuing the userscript), we use the Skybridge transport already
-  // present on AICC: when the user has the skybridge plugin imported, we can
-  // call its bridge.upload (or whatever the bridge exposes). On vanilla AICC
-  // without skybridge, we fall back to the GitHub path. The two-host design
-  // means there's always a working route.
-  function uploadToPerchance(slug, blob) {
-    // Reach a same-origin agent. The Data Manager exposes the rpc primitive
-    // through window.weldDataManager.rpc once it's loaded; if it isn't, we
-    // can't upload via Perchance and have to fall back.
+  // ---- user.uploads.dev uploader ---------------------------------------------
+  // upload-plugin only resolves from a Perchance origin, so the upload runs
+  // INSIDE the generator's sandbox frame via the Data Manager agent's
+  // 'uploadText' op (the agent calls the generator's own root.uploadPlugin).
+  // Works on any generator that imports upload-plugin — AICC does. Content
+  // passes through Perchance moderation; a 'disallowed_content' rejection is
+  // surfaced verbatim so the user knows why.
+  function uploadToPerchance(slug, text, mime) {
     if (!window.weldDataManager || typeof window.weldDataManager.rpc !== 'function') {
-      return Promise.reject(new Error('Data Manager not loaded — paste a raw URL or enable the GitHub path.'));
+      return Promise.reject(new Error('Data Manager not loaded — open the Data tab once first.'));
     }
-    // The upload op isn't part of the Data Manager agent's switch; signal
-    // clearly so the caller can route to the GitHub path. (A 5-line agent
-    // extension would add it, but that's a follow-up — flagged in the README.)
-    return Promise.reject(new Error('Direct user.uploads.dev upload requires a small agent extension. Use the GitHub path for now, or paste the URL.'));
+    return window.weldDataManager.rpc(slug, 'uploadText', { text: String(text == null ? '' : text), mime: mime || 'text/plain' }, 90000)
+      .then(function (r) {
+        if (!r || !r.url) throw new Error('upload returned no URL');
+        return String(r.url);
+      });
   }
 
-  // ---- Public registry hook -------------------------------------------------
+  // ---- Recovery engine -----------------------------------------------------
+  // Restores an AICC database to a BOOTABLE state, not merely a parseable one.
+  // Three escalating strategies, all pure functions over decoded rows so they
+  // can be unit-tested and previewed before any write:
+  //
+  //   normalizeCharacter(c)  — applies AICC's upgradeCharacterFromOldVersion
+  //                            field defaults (aicc_2.txt:3058) + mints a uuid.
+  //   normalizeMessage(m)    — ensures variants:[null] (AICC's message upgrade).
+  //   reconcile(tables)      — AICC's corruptItemReplacer logic: placeholder
+  //                            broken characters, recover thread.characterId
+  //                            from messages, drop orphan messages/lore.
+  //
+  // planRepair(tables) returns a structured plan { actions, fixed, dropped,
+  // quarantined, tables } WITHOUT mutating its input, so the UI can show
+  // "12 characters normalized, 3 threads recovered, 5 orphan messages dropped"
+  // and let the user confirm before anything is written.
+  var DEFAULT_EMBEDDING_MODEL = 'Xenova/bge-base-en-v1.5';
+
+  function normalizeCharacter(input) {
+    var c = input;            // caller passes a clone
+    var changed = [];
+    function set(k, v) { c[k] = v; changed.push(k); }
+    upgradeInitialMessages(c, changed);
+    if (c.customCode === undefined) set('customCode', '');
+    if (c.modelVersion) { c.modelName = c.modelVersion; delete c.modelVersion; changed.push('modelName'); }
+    if (c.textEmbeddingModelName === undefined) { c.textEmbeddingModelName = c.associativeMemoryEmbeddingModelName != null ? c.associativeMemoryEmbeddingModelName : DEFAULT_EMBEDDING_MODEL; delete c.associativeMemoryEmbeddingModelName; changed.push('textEmbeddingModelName'); }
+    if (c.userCharacter === undefined) set('userCharacter', {});
+    if (c.avatar === undefined) { c.avatar = { url: c.avatarUrl, size: 1, shape: 'square' }; changed.push('avatar'); }
+    if (Object.prototype.hasOwnProperty.call(c, 'avatarUrl')) delete c.avatarUrl;
+    if (c.scene === undefined) set('scene', { background: {}, music: {} });
+    if (c.streamingResponse === undefined) set('streamingResponse', true);
+    if (c.roleInstruction === undefined) { c.roleInstruction = c.systemMessage != null ? c.systemMessage : ''; delete c.systemMessage; changed.push('roleInstruction'); }
+    if (c.folderPath === undefined) set('folderPath', '');
+    if (c.customData === undefined) set('customData', {});
+    if (c.systemCharacter === undefined) set('systemCharacter', { avatar: {} });
+    if (c.loreBookUrls === undefined) set('loreBookUrls', []);
+    if (c.associativeMemoryMethod !== undefined) { c.autoGenerateMemories = c.associativeMemoryMethod; delete c.associativeMemoryMethod; changed.push('autoGenerateMemories'); }
+    if (c.autoGenerateMemories === undefined) set('autoGenerateMemories', 'none');
+    if (c.maxTokensPerMessage === undefined) set('maxTokensPerMessage', null);
+    // uuid: AICC leaves null on upgrade, but a valid uuid is what makes a
+    // character round-trippable and de-dupable, so repair mints one when absent.
+    if (!c.uuid || !window.weldAICC.isUuid(c.uuid)) { c.uuid = window.weldAICC.uuidV4(); changed.push('uuid'); }
+    if (!c.name) { c.name = 'Unnamed'; changed.push('name'); }
+    return { character: c, changed: changed };
+  }
+  function upgradeInitialMessages(c, changed) {
+    if (c.initialMessages === undefined && c.firstMessage !== undefined) {
+      c.initialMessages = [{ author: 'ai', content: c.firstMessage }];
+      delete c.firstMessage;
+      changed.push('initialMessages');
+    }
+    if (!Array.isArray(c.initialMessages)) { c.initialMessages = c.initialMessages ? [c.initialMessages] : []; changed.push('initialMessages'); }
+  }
+  function normalizeMessage(m) {
+    var changed = [];
+    if (!m.variants) { m.variants = [null]; changed.push('variants'); }
+    return { message: m, changed: changed };
+  }
+
+  // Pure planner. tables = { characters:[], threads:[], messages:[], lore:[] }
+  // (decoded rows). Returns a plan; does not mutate the input arrays.
+  function planRepair(tables) {
+    var chars = (tables.characters || []).map(clone);
+    var threads = (tables.threads || []).map(clone);
+    var messages = (tables.messages || []).map(clone);
+    var lore = (tables.lore || []).map(clone);
+    var actions = [];
+    var stats = { charactersNormalized: 0, charactersPlaceholdered: 0, threadsRecovered: 0, messagesDropped: 0, loreDropped: 0, messagesNormalized: 0 };
+    // Dropped rows are never discarded — they're collected here so the apply
+    // step can write them into the separate `weld-quarantine` database on the
+    // same origin. (Null/unparseable rows can't be quarantined and are only
+    // counted.) AICC's own schema can't host a quarantine store: adding one
+    // would bump chatbot-ui-v1 past the version AICC declares and brick its
+    // boot, so quarantine lives in its own database.
+    var quarantine = { characters: [], threads: [], messages: [], lore: [] };
+
+    // 1. characters: normalize fields; placeholder ones with no id
+    var keptChars = [];
+    chars.forEach(function (c) {
+      if (c == null || typeof c !== 'object') { stats.charactersPlaceholdered++; actions.push('drop non-object character row'); return; }
+      if (c.id == null) {
+        // AICC's replacer keeps it with a CORRUPT name rather than dropping —
+        // but a character with no id can't be a Dexie ++id row on re-put, so we
+        // drop it and record it. (Threads referencing it are recovered below.)
+        stats.charactersPlaceholdered++; quarantine.characters.push(c); actions.push('quarantine character with no id (was: ' + (c.name || 'unknown') + ')'); return;
+      }
+      var r = normalizeCharacter(c);
+      if (r.changed.length) { stats.charactersNormalized++; }
+      keptChars.push(r.character);
+    });
+    var charById = {}; keptChars.forEach(function (c) { charById[c.id] = c; });
+    var anyCharId = keptChars.length ? keptChars[0].id : null;
+
+    // 2. threads: recover dead characterId from messages (AICC's logic)
+    var keptThreads = [];
+    threads.forEach(function (t) {
+      if (t == null || typeof t !== 'object' || t.id == null) { if (t && typeof t === 'object') quarantine.threads.push(t); actions.push('quarantine malformed thread'); return; }
+      var cid = t.characterId;
+      var valid = cid === -1 || cid === -2 || charById[cid];   // -1 user, -2 system
+      if (!valid) {
+        var firstReal = messages.find(function (m) { return m && m.threadId === t.id && m.characterId >= 0; });
+        var recovered = firstReal ? firstReal.characterId : anyCharId;
+        if (recovered != null) { t.characterId = recovered; if (!t.name) t.name = 'Recovered'; stats.threadsRecovered++; actions.push('recover thread ' + t.id + ' characterId -> ' + recovered); }
+        else { quarantine.threads.push(t); actions.push('quarantine thread ' + t.id + ' (no characters to attach to)'); return; }
+      }
+      keptThreads.push(t);
+    });
+    var threadById = {}; keptThreads.forEach(function (t) { threadById[t.id] = t; });
+
+    // 3. messages: drop orphans, normalize variants
+    var keptMessages = [];
+    messages.forEach(function (m) {
+      if (m == null || typeof m !== 'object' || m.id == null) { if (m && typeof m === 'object') quarantine.messages.push(m); stats.messagesDropped++; return; }
+      if (m.threadId != null && !threadById[m.threadId]) { quarantine.messages.push(m); stats.messagesDropped++; actions.push('quarantine orphan message ' + m.id); return; }
+      var r = normalizeMessage(m);
+      if (r.changed.length) stats.messagesNormalized++;
+      keptMessages.push(m);
+    });
+
+    // 4. lore: drop entries whose book/thread is gone is too aggressive (lore
+    // can be shared by URL), so only drop structurally broken rows.
+    var keptLore = [];
+    lore.forEach(function (l) {
+      if (l == null || typeof l !== 'object' || l.id == null) { if (l && typeof l === 'object') quarantine.lore.push(l); stats.loreDropped++; return; }
+      keptLore.push(l);
+    });
+
+    return {
+      stats: stats,
+      actions: actions,
+      quarantine: quarantine,
+      tables: { characters: keptChars, threads: keptThreads, messages: keptMessages, lore: keptLore }
+    };
+  }
+  function clone(x) { try { return JSON.parse(JSON.stringify(x)); } catch (e) { return null; } }
+
+  // Validate-and-normalize a character bundle on IMPORT, so corruption never
+  // gets written back in. Returns { ok, character, changed } or { ok:false }.
+  function sanitizeImportedCharacter(character) {
+    if (!character || typeof character !== 'object' || !character.name) return { ok: false, reason: 'no name' };
+    var r = normalizeCharacter(clone(character));
+    return { ok: true, character: r.character, changed: r.changed };
+  }
+
+
   // The Data Manager looks for window.weldDataExtensions and, for each AICC
   // database it opens, calls extension.render(ctx). This is the integration
   // surface — kept narrow so the AICC pack is decoupled from the manager's
@@ -4500,6 +4690,12 @@
       parseBundle: parseCharacterBundle
     },
     diagnose: diagnose,
+    recovery: {
+      normalizeCharacter: normalizeCharacter,
+      normalizeMessage: normalizeMessage,
+      planRepair: planRepair,
+      sanitizeImportedCharacter: sanitizeImportedCharacter
+    },
     upload: { perchance: uploadToPerchance }
   };
 
@@ -4834,7 +5030,7 @@
         var host = hosts.length === 1 ? hosts[0]
           : (ctx.confirmYes('Host on user.uploads.dev (anyone with the URL can read)?\n\nOK = user.uploads.dev\nCancel = GitHub (your repo)') ? 'uploads' : 'github');
         if (host === 'uploads') {
-          pack.upload.perchance(ctx.slug, new Blob([text], { type: 'text/plain' })).then(function (url) {
+          pack.upload.perchance(ctx.slug, text, 'text/plain').then(function (url) {
             pack.lore.add({ name: file.name.replace(/\.[^.]+$/, ''), url: url, host: 'uploads', tags: [], notes: '' });
             ctx.toast('Uploaded to user.uploads.dev'); done && done();
           }).catch(function (err) {
@@ -4865,10 +5061,116 @@
   // ============================================================================
   function renderRepair(body, setCount, ctx) {
     var actions = ctx.el('div', { class: 'wdm-coltools', style: { padding: '0 0 8px 0', border: '0' } }, [
-      ctx.btn('Run diagnosis', function () { runDiagnose(); })
+      ctx.btn('Run diagnosis', function () { runDiagnose(); }),
+      ctx.ghost('Repair this database\u2026', function () { runRepair(); }, 'Normalize characters, recover broken threads, drop orphan rows \u2014 makes a non-booting DB bootable')
     ]);
-    var report = ctx.el('div', { class: 'wdm-repair', text: 'Click Run diagnosis to scan this database.' });
+    var report = ctx.el('div', { class: 'wdm-repair', text: 'Run diagnosis to scan, or Repair to plan a fix. Repair never writes without showing you the plan first.' });
     body.appendChild(actions); body.appendChild(report);
+
+    function loadTables() {
+      return Promise.all(['characters', 'threads', 'messages', 'lore'].map(function (s) {
+        return loadAllRows(ctx, s).catch(function () { return []; });
+      })).then(function (res) {
+        return { characters: res[0], threads: res[1], messages: res[2], lore: res[3] };
+      });
+    }
+
+    function runRepair() {
+      ctx.clear(report);
+      ctx.spinner(report, 'Reading all rows and planning a repair\u2026');
+      loadTables().then(function (tables) {
+        var plan = pack.recovery.planRepair(tables);
+        ctx.clear(report);
+        var s = plan.stats;
+        var total = s.charactersNormalized + s.charactersPlaceholdered + s.threadsRecovered + s.messagesDropped + s.messagesNormalized + s.loreDropped;
+        if (!total) { report.appendChild(ctx.el('div', { class: 'ok', text: '\u2713 Nothing to repair \u2014 the database is already consistent.' })); return; }
+        report.appendChild(ctx.el('div', { class: 'warn', style: { fontWeight: 600 }, text: 'Repair plan:' }));
+        [
+          ['characters normalized', s.charactersNormalized, 'ok'],
+          ['characters dropped (no id)', s.charactersPlaceholdered, 'bad'],
+          ['threads recovered', s.threadsRecovered, 'ok'],
+          ['messages normalized', s.messagesNormalized, 'ok'],
+          ['orphan messages dropped', s.messagesDropped, 'bad'],
+          ['broken lore dropped', s.loreDropped, 'bad']
+        ].forEach(function (row) {
+          if (row[1]) report.appendChild(ctx.el('div', { class: row[2], style: { paddingLeft: '12px' }, text: '\u2022 ' + row[1] + ' ' + row[0] }));
+        });
+        var qTotal = ['characters', 'threads', 'messages', 'lore'].reduce(function (n, k) { return n + ((plan.quarantine && plan.quarantine[k]) || []).length; }, 0);
+        if (qTotal) report.appendChild(ctx.el('div', { class: 'ok', style: { paddingLeft: '12px' }, text: '\u2022 ' + qTotal + ' removed row' + (qTotal === 1 ? '' : 's') + ' will be kept in the weld-quarantine database \u2014 nothing is destroyed' }));
+        report.appendChild(ctx.el('div', { class: 'wdm-foot', style: { padding: '10px 0 0', border: '0' } }, [
+          ctx.el('span', { class: 'wdm-hint', text: 'A full backup downloads before anything is written, and removed rows are moved into the separate weld-quarantine database on this origin \u2014 inspect or restore them any time from the Data Manager.' }),
+          ctx.ghost('Export repaired copy', function () { exportRepaired(plan); }, 'Download the repaired result as an idbml file without touching the live database'),
+          ctx.btn('Back up & apply', function () { applyRepair(plan, tables); }, { kind: 'danger' })
+        ]));
+      }).catch(function (err) { ctx.clear(report); report.appendChild(ctx.el('div', { class: 'bad', text: 'Repair planning failed: ' + err.message })); });
+    }
+
+    function exportRepaired(plan) {
+      // Build an idbml-export dump from the repaired tables (no live write).
+      var dump = {
+        format: 'idbml-export', formatVersion: 1, slug: ctx.slug, exportedAt: new Date().toISOString(), repaired: true,
+        databases: [{
+          name: ctx.db,
+          version: pack.schema.version,
+          stores: ['characters', 'threads', 'messages', 'lore'].map(function (name) {
+            var sch = pack.schema.stores[name];
+            return {
+              name: name, keyPath: sch.keyPath, autoIncrement: sch.autoIncrement, indexes: [],
+              records: plan.tables[name].map(function (row) { return { value: encodeForDump(row) }; })
+            };
+          })
+        }]
+      };
+      var blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+      var a = ctx.el('a', { href: URL.createObjectURL(blob), download: ctx.slug + '.' + ctx.db + '.repaired.' + Date.now() + '.idbml.json' });
+      document.body.appendChild(a); a.click(); setTimeout(function () { a.remove(); URL.revokeObjectURL(a.href); }, 1500);
+      ctx.toast('Exported repaired copy \u2014 import it to verify before applying in place.');
+    }
+    function encodeForDump(row) {
+      // values are plain decoded objects here (no Blobs/Dates in AICC core tables
+      // beyond timestamps which are numbers), so a shallow tag-free copy is safe.
+      try { return JSON.parse(JSON.stringify(row)); } catch (e) { return row; }
+    }
+
+    function applyRepair(plan, original) {
+      pack.sentry.canWriteToAICC(ctx.slug, [ctx.slug]).then(function (gate) {
+        if (!gate.ok) { ctx.toast(gate.reason + ' Use "Export repaired copy" and import it after closing AICC.'); return; }
+        if (!ctx.confirmYes('Apply repair in place?\n\nA full backup is downloaded first. Then characters/threads/messages/lore are rewritten from the repaired plan. Continue?')) return;
+        ctx.spinner(report, 'Backing up, then applying repair\u2026');
+        // 1. full backup via exportDb
+        ctx.rpc(ctx.slug, 'exportDb', { db: ctx.db }, 180000).then(function (backup) {
+          var blob = new Blob([JSON.stringify({ format: 'idbml-export', formatVersion: 1, slug: ctx.slug, exportedAt: new Date().toISOString(), databases: [backup] }, null, 2)], { type: 'application/json' });
+          var a = ctx.el('a', { href: URL.createObjectURL(blob), download: ctx.slug + '.' + ctx.db + '.pre-repair-backup.' + Date.now() + '.idbml.json' });
+          document.body.appendChild(a); a.click(); setTimeout(function () { a.remove(); URL.revokeObjectURL(a.href); }, 1500);
+          // 2. quarantine removed rows into a SEPARATE database. chatbot-ui-v1
+          // itself can't host the store: adding one bumps the IDB version past
+          // what AICC declares and bricks its boot. weld-quarantine is invisible
+          // to AICC and browsable/restorable from the Data Manager.
+          var qRows = [];
+          var qSrc = plan.quarantine || {};
+          ['characters', 'threads', 'messages', 'lore'].forEach(function (n) {
+            (qSrc[n] || []).forEach(function (row) {
+              qRows.push({ value: { srcDb: ctx.db, srcStore: n, quarantinedAt: Date.now(), row: encodeForDump(row) } });
+            });
+          });
+          var qStep = qRows.length
+            ? ctx.rpc(ctx.slug, 'importStore', { db: 'weld-quarantine', storeDump: { name: 'rows', keyPath: 'id', autoIncrement: true, indexes: [], records: qRows }, mode: 'merge' }, 180000)
+            : Promise.resolve(true);
+          // 3. clear + reload each repaired store
+          return qStep.then(function () { return ['characters', 'threads', 'messages', 'lore'].reduce(function (chain, name) {
+            return chain.then(function () {
+              var sch = pack.schema.stores[name];
+              var storeDump = { name: name, keyPath: sch.keyPath, autoIncrement: sch.autoIncrement, indexes: [], records: plan.tables[name].map(function (row) { return { value: encodeForDump(row) }; }) };
+              return ctx.rpc(ctx.slug, 'importStore', { db: ctx.db, storeDump: storeDump, mode: 'replace' }, 180000);
+            });
+          }, Promise.resolve()); });
+        }).then(function () {
+          ctx.clear(report);
+          report.appendChild(ctx.el('div', { class: 'ok', text: '\u2713 Repair applied. A pre-repair backup was downloaded, and removed rows (if any) are preserved in the weld-quarantine database. Reload AICC to verify it boots.' }));
+          ctx.toast('Repair applied \u2014 reload AICC to verify');
+        }).catch(function (err) { ctx.clear(report); report.appendChild(ctx.el('div', { class: 'bad', text: 'Repair failed (your backup downloaded first): ' + err.message })); });
+      });
+    }
 
     function runDiagnose() {
       ctx.clear(report);
@@ -4921,4 +5223,382 @@
     ctx.parent.appendChild(section(ctx, '\ud83d\udcd6 Lore Library', '', true, function (body, setCount) { renderLore(body, setCount, ctx); }));
     ctx.parent.appendChild(section(ctx, '\ud83d\udd27 Repair', '', false, function (body, setCount) { renderRepair(body, setCount, ctx); }));
   };
+})();
+
+/* ----- [6] AICC TOOLS ----- */
+/* AICC Tools — character file import/export card.
+ *
+ * Rendered by renderTools() in the host Companion's Tools tab. Does NOT depend
+ * on the Data Manager being open; it talks to a generator's AICC database
+ * directly through the same RPC channel the Data Manager uses.
+ *
+ * Cards in the Tools tab:
+ *   • AI Helper     — existing renderAI() content, wrapped in a wc-card
+ *   • Character Files — this module; import a .json/.aicc-character.json file
+ *       back into AICC (sentry-gated: write directly if AICC is closed, show
+ *       the share URL if AICC is open); export all characters from the current
+ *       generator as a single .json file; pull characters from GitHub.
+ *
+ * Privacy default: confirmation is always required before any data leaves the
+ * device, and importing a file requires explicit "Add to AICC" action.
+ *
+ * Exposes: window.weldAICCTools = { renderCharacterFilesCard }
+ */
+(function () {
+  'use strict';
+  if (window.top !== window) return;
+
+  var NS = 'weldCompanion';
+  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+
+  // Minimal el() that mirrors the Companion's own helper — used only for the
+  // card body since the outer renderTools() already has the full el() in scope.
+  // When called from renderTools (which passes its el/btn/etc. in ctx), we use
+  // ctx.el instead. This standalone version is only for self-contained rendering.
+  function _el(tag, attrs, kids) {
+    var node = document.createElement(tag);
+    attrs = attrs || {};
+    for (var k in attrs) {
+      if (k === 'text') { node.textContent = attrs[k]; }
+      else if (k === 'html') { node.innerHTML = attrs[k]; }
+      else if (k === 'class') { node.className = attrs[k]; }
+      else if (k === 'style' && typeof attrs[k] === 'object') { Object.assign(node.style, attrs[k]); }
+      else if (/^on/.test(k)) { node.addEventListener(k.slice(2), attrs[k]); }
+      else { node.setAttribute(k, attrs[k]); }
+    }
+    (kids || []).forEach(function (c) { if (c) node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return node;
+  }
+  function _toast(msg) { try { if (window.weldDataManager && window.weldDataManager.toast) window.weldDataManager.toast(msg); else console.log('[weld tools]', msg); } catch (e) {} }
+
+  // ---- current generator slug --------------------------------------------------
+  // Re-use the Companion's genName() via unsafeWindow if available; fallback to
+  // parsing the URL.
+  function currentSlug() {
+    try { var n = (unsafeWindow || window).genName && (unsafeWindow || window).genName(); if (n) return n; } catch (e) {}
+    var m = location.pathname.match(/^\/([^/#?]+)/);
+    return m ? m[1] : null;
+  }
+
+  // ---- rpc shim ----------------------------------------------------------------
+  // Routes through weldDataManager.rpc if present (preferred — Data Manager
+  // manages the hidden frame lifecycle). If it's absent we fall back to a one-shot
+  // iframe spawn (same protocol, but we manage teardown ourselves).
+  function rpc(slug, op, args, timeout) {
+    if (window.weldDataManager && typeof window.weldDataManager.rpc === 'function') {
+      return window.weldDataManager.rpc(slug, op, args, timeout || 30000);
+    }
+    return Promise.reject(new Error('Data Manager not loaded — open the Data tab first.'));
+  }
+
+  // ---- decode rows -------------------------------------------------------------
+  var _dec = null;
+  function decodeRow(row) {
+    try {
+      if (!_dec) _dec = window.IDBManEngine ? window.IDBManEngine({}) : null;
+      return _dec ? _dec.decodeValue(row.valueEnc) : row.valueEnc;
+    } catch (e) { return row.valueEnc; }
+  }
+
+  function loadAllCharacters(slug) {
+    var rows = []; var offset = 0;
+    function next() {
+      return rpc(slug, 'page', { db: 'chatbot-ui-v1', store: 'characters', offset: offset, limit: 500 }).then(function (p) {
+        rows = rows.concat((p.rows || []).map(decodeRow));
+        offset += (p.rows || []).length;
+        if (p.done) return rows;
+        return next();
+      });
+    }
+    return next();
+  }
+
+  // ---- helpers -----------------------------------------------------------------
+  function safeName(character) {
+    return String(character.name || 'unnamed').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
+  }
+  function download(filename, text) {
+    var blob = new Blob([text], { type: 'application/json' });
+    var a = _el('a', { href: URL.createObjectURL(blob), download: filename });
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { a.remove(); URL.revokeObjectURL(a.href); }, 1500);
+  }
+
+  // ---- IMPORT ------------------------------------------------------------------
+  // Accepts:
+  //   • { format: "aicc-character", character: {...} }   — our bundle format
+  //   • { addCharacter: {...}, quickAdd: true/false }    — AICC share envelope
+  //   • A raw character object with at least a `name`
+  //   • { characters: [...] }                           — multi-character export file
+  //
+  // Returns an array of parsed { ok, character, changed } results.
+  function parseFile(text) {
+    var json;
+    try { json = JSON.parse(text); } catch (e) { return { ok: false, reason: 'Not valid JSON: ' + e.message }; }
+    if (!json || typeof json !== 'object') return { ok: false, reason: 'JSON root is not an object.' };
+
+    // Multi-character export?
+    if (Array.isArray(json.characters)) {
+      var results = json.characters.map(function (c) {
+        return window.weldAICCPack.recovery.sanitizeImportedCharacter(c);
+      });
+      return { ok: true, multi: true, results: results };
+    }
+
+    // Single character — delegate to pack
+    var result = window.weldAICCPack.character.parseBundle(text);
+    if (!result.ok) return result;
+    var sanitized = window.weldAICCPack.recovery.sanitizeImportedCharacter(result.character);
+    return { ok: true, multi: false, results: [sanitized] };
+  }
+
+  function importParsedCharacters(slug, sanitizedResults, onDone) {
+    // Separate clean from flagged
+    var clean = sanitizedResults.filter(function (r) { return r.ok; });
+    var bad = sanitizedResults.filter(function (r) { return !r.ok; });
+    if (!clean.length) { _toast('No importable characters found.'); return; }
+
+    var msg = 'Import ' + clean.length + ' character' + (clean.length === 1 ? '' : 's') + ' into AICC?';
+    if (bad.length) msg += '\n\n' + bad.length + ' row' + (bad.length === 1 ? '' : 's') + ' could not be parsed and will be skipped.';
+    if (!window.confirm(msg)) return;
+
+    window.weldAICCPack.sentry.canWriteToAICC(slug, [slug]).then(function (gate) {
+      if (!gate.ok) {
+        // AICC is running — build share URLs and show them one at a time.
+        // User can paste each into the AICC address bar; AICC handles the merge.
+        showShareUrls(slug, clean.map(function (r) { return r.character; }));
+        return;
+      }
+      // AICC closed — write directly.
+      writeCharactersDirect(slug, clean, onDone);
+    });
+  }
+
+  function writeCharactersDirect(slug, sanitizedList, onDone) {
+    var eng = window.IDBManEngine ? window.IDBManEngine({}) : null;
+    if (!eng) { _toast('IDB engine not loaded.'); return; }
+
+    var chain = Promise.resolve();
+    var written = 0;
+    sanitizedList.forEach(function (r) {
+      chain = chain.then(function () {
+        var c = r.character;
+        // De-dupe by uuid: if a character with this uuid already exists, replace it.
+        if (c.uuid && window.weldAICC.isUuid(c.uuid)) {
+          return rpc(slug, 'page', { db: 'chatbot-ui-v1', store: 'characters', offset: 0, limit: 500 })
+            .then(function (page) {
+              var rows = (page.rows || []).map(decodeRow);
+              var existing = rows.find(function (row) { return row.uuid === c.uuid; });
+              if (existing) {
+                // Update: merge into existing record, keep its id
+                var merged = Object.assign({}, existing, c, { id: existing.id });
+                return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: merged }).then(function () { written++; });
+              } else {
+                // Insert: strip id so Dexie assigns one
+                var fresh = Object.assign({}, c);
+                delete fresh.id;
+                fresh.creationTime = fresh.creationTime || Date.now();
+                fresh.lastMessageTime = fresh.lastMessageTime || Date.now();
+                return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: fresh }).then(function () { written++; });
+              }
+            });
+        } else {
+          var fresh = Object.assign({}, c);
+          delete fresh.id;
+          fresh.creationTime = fresh.creationTime || Date.now();
+          fresh.lastMessageTime = fresh.lastMessageTime || Date.now();
+          return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: fresh }).then(function () { written++; });
+        }
+      });
+    });
+
+    chain.then(function () {
+      _toast(written + ' character' + (written === 1 ? '' : 's') + ' imported.');
+      if (onDone) onDone();
+    }).catch(function (err) {
+      _toast('Import failed: ' + err.message);
+    });
+  }
+
+  function showShareUrls(slug, characters) {
+    var urls = characters.map(function (c) {
+      return window.weldAICC.buildShareHashUrl(slug, window.weldAICC.stripCharacterForShare(c));
+    });
+    var content = _el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } });
+    content.appendChild(_el('div', { class: 'wc-section-note', text: 'An AICC tab is open, so direct write is blocked. Open each link in your AICC to import the character via its own import flow.' }));
+    urls.forEach(function (url, i) {
+      var name = characters[i].name || 'Character ' + (i + 1);
+      var row = _el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } });
+      var inp = _el('input', { class: 'wc-field', style: { flex: '1', fontSize: '11px' } });
+      inp.value = url;
+      inp.readOnly = true;
+      var copyBtn = _el('button', { class: 'wc-btn wc-mini', text: 'Copy' });
+      copyBtn.addEventListener('click', function () {
+        try { navigator.clipboard.writeText(url).then(function () { copyBtn.textContent = '\u2713'; setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500); }); } catch (e) {}
+      });
+      var openBtn = _el('button', { class: 'wc-btn wc-mini', text: 'Open' });
+      openBtn.addEventListener('click', function () { window.open(url, '_blank'); });
+      row.appendChild(_el('span', { style: { fontWeight: 600, minWidth: '80px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, text: name }));
+      row.appendChild(inp);
+      row.appendChild(copyBtn);
+      row.appendChild(openBtn);
+      content.appendChild(row);
+    });
+    var overlay = _el('div', { class: 'wdm-modal', id: 'weld-tools-modal', style: { zIndex: '9999999' } }, [
+      _el('div', { class: 'wdm-card', style: { maxWidth: '620px', width: '100%' } }, [
+        _el('h3', { text: 'Share links for import' }),
+        content,
+        _el('div', { class: 'wc-foot' }, [
+          _el('button', { class: 'wc-btn wc-btn-accent', text: 'Done', onclick: function () { var m = document.getElementById('weld-tools-modal'); if (m) m.remove(); } })
+        ])
+      ])
+    ]);
+    document.body.appendChild(overlay);
+  }
+
+  // ---- EXPORT ------------------------------------------------------------------
+  function exportAllCharacters(slug, statusEl) {
+    statusEl.textContent = 'Loading characters\u2026';
+    loadAllCharacters(slug).then(function (chars) {
+      if (!chars.length) { statusEl.textContent = 'No characters found in this generator.'; return; }
+      var bundle = {
+        format: 'aicc-characters',
+        formatVersion: 1,
+        slug: slug,
+        exportedAt: new Date().toISOString(),
+        count: chars.length,
+        characters: chars.map(function (c) {
+          return window.weldAICC.stripCharacterForShare(c) || c;
+        })
+      };
+      var fname = slug + '.characters.' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.json';
+      download(fname, JSON.stringify(bundle, null, 2));
+      statusEl.textContent = '\u2713 Exported ' + chars.length + ' character' + (chars.length === 1 ? '' : 's') + ' to ' + fname;
+    }).catch(function (err) {
+      statusEl.textContent = 'Export failed: ' + err.message;
+    });
+  }
+
+  // ---- CARD RENDERER -----------------------------------------------------------
+  function renderCharacterFilesCard(body) {
+    if (!window.weldAICCPack || !window.weldAICC) {
+      body.appendChild(_el('div', { class: 'wc-section-note', text: 'AICC pack not loaded.' }));
+      return;
+    }
+
+    var slug = currentSlug();
+    var statusLine = _el('div', { class: 'wc-section-note', style: { marginTop: '8px' }, text: slug ? ('Current generator: ' + slug) : 'No generator detected \u2014 open a Perchance generator first.' });
+
+    // -- IMPORT section --
+    var importLabel = _el('div', { class: 'wc-label', text: 'Import characters' });
+    var importNote = _el('div', { class: 'wc-section-note', text: 'Load a .json file saved by this manager, an AICC share-link envelope, or a multi-character export. AICC open \u2192 share URL shown; AICC closed \u2192 written directly.' });
+
+    var fileInput = _el('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } });
+    var importedData = null;
+    var previewEl = _el('div', { class: 'wc-section-note', style: { marginTop: '6px' } });
+    var importBtn = _el('button', { class: 'wc-btn wc-btn-accent', text: 'Add to AICC' });
+    importBtn.disabled = true;
+    importBtn.style.opacity = '0.4';
+
+    fileInput.addEventListener('change', function () {
+      var file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        var parsed = parseFile(String(reader.result));
+        if (!parsed.ok) {
+          previewEl.textContent = '\u26A0 ' + parsed.reason;
+          importedData = null;
+          importBtn.disabled = true; importBtn.style.opacity = '0.4';
+          return;
+        }
+        importedData = parsed.results;
+        var good = parsed.results.filter(function (r) { return r.ok; });
+        var bad = parsed.results.filter(function (r) { return !r.ok; });
+        var summary = '\u2713 ' + good.length + ' character' + (good.length === 1 ? '' : 's') + ' ready to import';
+        if (bad.length) summary += ' (' + bad.length + ' unparseable, will be skipped)';
+        previewEl.textContent = summary;
+        importBtn.disabled = !good.length;
+        importBtn.style.opacity = good.length ? '1' : '0.4';
+      };
+      reader.readAsText(file);
+    });
+
+    var chooseBtn = _el('button', { class: 'wc-btn', text: '\ud83d\udcc2 Choose file\u2026' });
+    chooseBtn.addEventListener('click', function () { fileInput.click(); });
+
+    importBtn.addEventListener('click', function () {
+      if (!importedData || !slug) return;
+      var good = importedData.filter(function (r) { return r.ok; });
+      if (!good.length) return;
+      importParsedCharacters(slug, good, function () {
+        previewEl.textContent = '';
+        importedData = null;
+        importBtn.disabled = true; importBtn.style.opacity = '0.4';
+        fileInput.value = '';
+      });
+    });
+
+    var importRow = _el('div', { class: 'wc-row', style: { marginTop: '6px', gap: '8px' } }, [chooseBtn, importBtn, fileInput]);
+
+    // -- EXPORT section --
+    var exportLabel = _el('div', { class: 'wc-label', text: 'Export characters' });
+    var exportNote = _el('div', { class: 'wc-section-note', text: 'Downloads all characters from the current generator as a single JSON file. Private \u2014 nothing is uploaded.' });
+    var exportStatus = _el('div', { class: 'wc-section-note', style: { marginTop: '6px' } });
+    var exportBtn = _el('button', { class: 'wc-btn', text: '\u2913 Export all characters' });
+    exportBtn.disabled = !slug;
+    exportBtn.style.opacity = slug ? '1' : '0.4';
+    exportBtn.addEventListener('click', function () {
+      if (!slug) { exportStatus.textContent = 'Open a generator first.'; return; }
+      exportBtn.disabled = true;
+      exportAllCharacters(slug, exportStatus);
+      setTimeout(function () { exportBtn.disabled = false; }, 4000);
+    });
+
+    // -- GitHub Pull section --
+    var ghLabel = _el('div', { class: 'wc-label', text: 'Pull character from GitHub' });
+    var ghNote = _el('div', { class: 'wc-section-note', text: 'Fetch a character .json from a raw GitHub URL and import it. Uses the same flow as file import.' });
+    var ghInput = _el('input', { class: 'wc-field', type: 'url', placeholder: 'https://raw.githubusercontent.com/\u2026/character.json' });
+    var ghStatus = _el('div', { class: 'wc-section-note', style: { marginTop: '4px' } });
+    var ghBtn = _el('button', { class: 'wc-btn', text: '\u2193 Fetch & import' });
+    ghBtn.addEventListener('click', function () {
+      var url = ghInput.value.trim();
+      if (!url || !/^https?:\/\//i.test(url)) { ghStatus.textContent = 'Enter a full https:// URL.'; return; }
+      if (!slug) { ghStatus.textContent = 'Open a generator first.'; return; }
+      ghStatus.textContent = 'Fetching\u2026';
+      // Use GM_xmlhttpRequest so CSP doesn't block a cross-origin fetch.
+      GM_xmlhttpRequest({
+        method: 'GET', url: url,
+        onload: function (res) {
+          if (res.status !== 200) { ghStatus.textContent = 'Fetch failed: HTTP ' + res.status; return; }
+          var parsed = parseFile(res.responseText);
+          if (!parsed.ok) { ghStatus.textContent = '\u26A0 ' + parsed.reason; return; }
+          var good = parsed.results.filter(function (r) { return r.ok; });
+          if (!good.length) { ghStatus.textContent = 'No importable characters in that file.'; return; }
+          ghStatus.textContent = '\u2713 ' + good.length + ' character' + (good.length === 1 ? '' : 's') + ' ready.';
+          importParsedCharacters(slug, good, function () { ghStatus.textContent = '\u2713 Imported.'; ghInput.value = ''; });
+        },
+        onerror: function (err) { ghStatus.textContent = 'Fetch error \u2014 check the URL and your network.'; }
+      });
+    });
+
+    var ghRow = _el('div', { class: 'wc-row', style: { marginTop: '6px', gap: '8px' } }, [ghInput, ghBtn]);
+
+    // Assemble card
+    body.appendChild(statusLine);
+    body.appendChild(importLabel);
+    body.appendChild(importNote);
+    body.appendChild(importRow);
+    body.appendChild(previewEl);
+    body.appendChild(exportLabel);
+    body.appendChild(exportNote);
+    body.appendChild(_el('div', { style: { marginTop: '6px' } }, [exportBtn]));
+    body.appendChild(exportStatus);
+    body.appendChild(ghLabel);
+    body.appendChild(ghNote);
+    body.appendChild(ghRow);
+    body.appendChild(ghStatus);
+  }
+
+  window.weldAICCTools = { renderCharacterFilesCard: renderCharacterFilesCard };
 })();
