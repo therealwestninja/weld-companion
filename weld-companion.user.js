@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.33.0
-// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack for ai-character-chat (Lore Library, character round-trip, repair & recovery with quarantine), and a Tools tab with AI Helper and character file import/export.
+// @version      1.34.0
+// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian, night light, read-aloud).
 // @author       therealwestninja
 // @match        https://perchance.org/*
 // @match        https://*.perchance.org/*
@@ -1227,6 +1227,7 @@
   function tabDefs() {
     return [
       { id: 'generators', glyph: '\u2605', label: 'Generators' },
+      { id: 'library', glyph: '\u{1F4D2}', label: 'Library' },
       { id: 'data', glyph: '\u{1F5C3}', label: 'Data' },
       { id: 'github', glyph: '\u21C5', label: 'GitHub' },
       { id: 'comfort', glyph: '\u{1F441}', label: 'Comfort' },
@@ -1290,20 +1291,23 @@
     var body = $('#wc-body'); if (!body) return;
     body.innerHTML = '';
     if (WC_TAB === 'generators') renderGenerators(body);
+    else if (WC_TAB === 'library') renderLibrary(body);
     else if (WC_TAB === 'data') renderData(body);
     else if (WC_TAB === 'github') renderGitHub(body);
     else if (WC_TAB === 'comfort') renderComfort(body);
     else if (WC_TAB === 'snippets') renderSnippets(body);
     else if (WC_TAB === 'tools') renderTools(body);
   }
-  // Data tab delegates to the Data Manager module appended at the end of this file.
   function renderData(body) {
     var h = window.weldDataManager;
     if (h && typeof h.renderTab === 'function') { try { h.renderTab(body); return; } catch (e) {} }
     body.appendChild(el('div', { class: 'wc-section-note', text: 'Data Manager module not loaded.' }));
   }
-  // Tools tab: tool cards. The AI Helper keeps its existing renderer, wrapped
-  // in a card; the Character Files card comes from the AICC tools module.
+  function renderLibrary(body) {
+    var h = window.weldLibrary;
+    if (h && typeof h.renderTab === 'function') { try { h.renderTab(body); return; } catch (e) {} }
+    body.appendChild(el('div', { class: 'wc-section-note', text: 'Library module not loaded.' }));
+  }
   function renderTools(body) {
     var grid = el('div', { class: 'wc-cols' });
     var aiCard = el('div', { class: 'wc-card wc-col' });
@@ -1319,6 +1323,14 @@
     grid.appendChild(aiCard); grid.appendChild(cfCard);
     body.appendChild(grid);
   }
+  try {
+    window.weldHooks = Object.assign(window.weldHooks || {}, {
+      outputText: function () { var o = outputNode(); return o ? nodeToText(o) : ''; },
+      comfortGet: function () { return comfortSettings(); },
+      comfortSet: function (v) { gset('comfort:' + genName(), v); gset('comfort:_default', v); },
+      applyComfort: function () { applyComfort(); }
+    });
+  } catch (e) {}
 
   // ============================================================ B. favorites & recently-used
   function recordVisit() {
@@ -2531,14 +2543,15 @@
 
 
 /* =============================================================================
- * Weld Companion appended modules (Data Manager + AICC pack + Tools)
- *  [1] IDB engine v1.3     [2] Data Manager v2.2 (CRUD/export/import/upload op)
- *  [3] AICC core (schema + share rules)   [4] AICC pack (sentry, lore, recovery)
- *  [5] AICC typed view (Data Manager extension)   [6] AICC tools (character files)
+ * Weld Companion appended modules
+ *  [1] IDB engine v1.3        [2] Data Manager v2.2
+ *  [3] AICC core              [4] AICC pack (sentry, lore, recovery)
+ *  [5] AICC typed view        [6] AICC tools (character files)
+ *  [7] Story export core      [8] Library (scrapbook, stories, guardian)
  * ========================================================================== */
 
 /* ----- [1] IDB ENGINE v1.3 ----- */
-/* IDB Manager Engine v1.2 — origin-scoped IndexedDB enumerate / describe / CRUD /
+/* IDB Manager Engine v1.3 — origin-scoped IndexedDB enumerate / describe / CRUD /
  * search / export / import. Pure logic, no DOM. Runs in a browser frame (global
  * indexedDB) or Node (inject an implementation via createIdbEngine(env)).
  *
@@ -3094,7 +3107,7 @@
 
 /* ----- [2] DATA MANAGER v2.2 ----- */
 /* ============================================================================
- * Weld Companion — Data Manager v2.1  (federated IndexedDB / Dexie browser)
+ * Weld Companion — Data Manager v2.2  (federated IndexedDB / Dexie browser)
  * ----------------------------------------------------------------------------
  * Browse, edit, back up, export and import the IndexedDB databases stored by
  * every Perchance generator you've visited — full CRUD, organized by visited
@@ -5269,7 +5282,19 @@
     (kids || []).forEach(function (c) { if (c) node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
     return node;
   }
-  function _toast(msg) { try { if (window.weldDataManager && window.weldDataManager.toast) window.weldDataManager.toast(msg); else console.log('[weld tools]', msg); } catch (e) {} }
+  function _toast(msg, ms) {
+    try {
+      var prev = document.querySelector('.weld-tools-toast'); if (prev) prev.remove();
+      var t = _el('div', { class: 'weld-tools-toast', text: msg, style: {
+        position: 'fixed', bottom: '22px', left: '50%', transform: 'translateX(-50%)', zIndex: '99999999',
+        background: 'var(--wc-surface-2,#1a1f28)', color: 'var(--wc-ink,#e8e4dc)',
+        border: '1px solid var(--wc-line,rgba(255,255,255,.12))', borderRadius: '9px',
+        padding: '8px 14px', font: '12.5px system-ui', boxShadow: '0 10px 30px -10px rgba(0,0,0,.6)'
+      } });
+      document.body.appendChild(t);
+      setTimeout(function () { t.remove(); }, ms || 2600);
+    } catch (e) { try { console.log('[weld tools]', msg); } catch (e2) {} }
+  }
 
   // ---- current generator slug --------------------------------------------------
   // Re-use the Companion's genName() via unsafeWindow if available; fallback to
@@ -5602,3 +5627,710 @@
 
   window.weldAICCTools = { renderCharacterFilesCard: renderCharacterFilesCard };
 })();
+
+/* ----- [7] STORY EXPORT CORE ----- */
+/* Weld Story Export — turn an AICC chat thread into a readable document.
+ *
+ * The core is PURE: buildTranscript() and the three renderers take decoded
+ * rows and return strings, no DOM, no IDB — so the whole pipeline is unit-
+ * tested in Node. The Library tab provides the UI around it.
+ *
+ * Message semantics (from AICC source):
+ *   - display order: `order` property when present, else primary-key id
+ *   - hiddenFrom: ['user'] means the user never saw it → excluded by default
+ *     (['ai'] is visible to the user → included)
+ *   - current text lives in `content` (defensively: content ?? message ?? '')
+ *   - characterId: -1 = user, -2 = system, >=0 = the AI character
+ *   - <!--hidden-from-ai-start/end--> markers are visible to the user; the
+ *     markers themselves are stripped, the text between them kept
+ *
+ * HTML export escapes ALL message content and renders only a small, safe
+ * markdown subset (**bold**, *italic*, `code`, line breaks). Raw generator
+ * HTML is never re-emitted into the exported file.
+ */
+(function (globalRoot, moduleRef) {
+  'use strict';
+
+  function createStoryExport() {
+
+    function esc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function cleanContent(raw) {
+      var s = String(raw == null ? '' : raw);
+      // strip the hidden-from-ai markers but keep the text between them
+      s = s.replace(/<!--hidden-from-ai-(start|end)-->/g, '');
+      return s.trim();
+    }
+
+    function authorLabel(m, ctx) {
+      if (m.name) return String(m.name);
+      if (m.author === 'ai' || (m.characterId != null && m.characterId >= 0)) return ctx.characterName || 'AI';
+      if (m.author === 'user' || m.characterId === -1) return ctx.userName || 'You';
+      return 'System';
+    }
+
+    // tables = { thread, character, messages } (decoded rows)
+    // opts = { includeSystem: false, includeHiddenFromUser: false }
+    function buildTranscript(tables, opts) {
+      opts = opts || {};
+      var thread = tables.thread || {};
+      var character = tables.character || {};
+      var ctx = {
+        characterName: character.name || 'AI',
+        userName: (character.userCharacter && character.userCharacter.name) || 'You'
+      };
+      var msgs = (tables.messages || []).slice();
+      // keep only this thread's messages if a mixed array was passed
+      if (thread.id != null) msgs = msgs.filter(function (m) { return m && m.threadId === thread.id; });
+      msgs.sort(function (a, b) {
+        var ao = (a.order != null ? a.order : a.id) || 0;
+        var bo = (b.order != null ? b.order : b.id) || 0;
+        return ao - bo || (a.id || 0) - (b.id || 0);
+      });
+
+      var items = [];
+      msgs.forEach(function (m) {
+        if (!m || typeof m !== 'object') return;
+        var hidden = Array.isArray(m.hiddenFrom) ? m.hiddenFrom : [];
+        if (hidden.indexOf('user') !== -1 && !opts.includeHiddenFromUser) return;
+        var isSystem = m.author === 'system' || m.characterId === -2;
+        if (isSystem && !opts.includeSystem) return;
+        var content = cleanContent(m.content != null ? m.content : m.message);
+        if (!content) return;
+        items.push({
+          author: m.author || (m.characterId === -1 ? 'user' : (m.characterId === -2 ? 'system' : 'ai')),
+          name: authorLabel(m, ctx),
+          content: content,
+          time: m.creationTime || null,
+          avatarUrl: (m.avatar && m.avatar.url) || null
+        });
+      });
+
+      return {
+        title: thread.name || ('Chat with ' + ctx.characterName),
+        characterName: ctx.characterName,
+        userName: ctx.userName,
+        characterAvatarUrl: (character.avatar && character.avatar.url) || null,
+        threadId: thread.id != null ? thread.id : null,
+        messageCount: items.length,
+        items: items
+      };
+    }
+
+    // Escape first, then render a tiny safe markdown subset on the ESCAPED text.
+    function miniMarkdownToHtml(escaped) {
+      return escaped
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/\n/g, '<br>');
+    }
+
+    function fmtTime(t) {
+      if (!t) return '';
+      try { return new Date(t).toLocaleString(); } catch (e) { return ''; }
+    }
+
+    function renderHTML(tr) {
+      var rows = tr.items.map(function (m) {
+        var side = m.author === 'user' ? 'right' : 'left';
+        var av = m.avatarUrl || (m.author !== 'user' ? tr.characterAvatarUrl : null);
+        return '<div class="msg ' + side + '">'
+          + (av ? '<img class="av" src="' + esc(av) + '" alt="">' : '<span class="av ph"></span>')
+          + '<div class="bubble"><div class="meta"><span class="name">' + esc(m.name) + '</span>'
+          + (m.time ? '<span class="time">' + esc(fmtTime(m.time)) + '</span>' : '') + '</div>'
+          + '<div class="body">' + miniMarkdownToHtml(esc(m.content)) + '</div></div></div>';
+      }).join('\n');
+      return '<!doctype html>\n<html><head><meta charset="utf-8">'
+        + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        + '<title>' + esc(tr.title) + '</title>\n<style>'
+        + ':root{color-scheme:light dark;}'
+        + 'body{margin:0;padding:28px 14px;font:15px/1.55 system-ui,sans-serif;background:#f4f1ea;color:#211d17;}'
+        + '@media(prefers-color-scheme:dark){body{background:#15181d;color:#e8e4dc;}}'
+        + '.wrap{max-width:760px;margin:0 auto;}'
+        + 'h1{font-size:21px;margin:0 0 4px;}'
+        + '.sub{opacity:.6;font-size:12px;margin-bottom:26px;}'
+        + '.msg{display:flex;gap:10px;margin:14px 0;align-items:flex-start;}'
+        + '.msg.right{flex-direction:row-reverse;}'
+        + '.av{width:38px;height:38px;border-radius:10px;object-fit:cover;flex:none;}'
+        + '.av.ph{background:rgba(127,127,127,.18);display:inline-block;}'
+        + '.bubble{max-width:78%;background:rgba(127,127,127,.10);border:1px solid rgba(127,127,127,.18);border-radius:12px;padding:9px 12px;}'
+        + '.msg.right .bubble{background:rgba(90,140,255,.12);}'
+        + '.meta{display:flex;gap:10px;align-items:baseline;margin-bottom:3px;}'
+        + '.name{font-weight:700;font-size:12.5px;}'
+        + '.time{opacity:.45;font-size:10.5px;}'
+        + '.body{white-space:normal;word-wrap:break-word;}'
+        + 'code{background:rgba(127,127,127,.16);padding:1px 5px;border-radius:4px;font-size:.92em;}'
+        + '.foot{margin-top:34px;opacity:.45;font-size:11px;text-align:center;}'
+        + '</style></head><body><div class="wrap">'
+        + '<h1>' + esc(tr.title) + '</h1>'
+        + '<div class="sub">' + esc(tr.characterName) + ' &amp; ' + esc(tr.userName) + ' \u00b7 ' + tr.messageCount + ' messages</div>\n'
+        + rows
+        + '\n<div class="foot">Exported with Weld Companion</div>'
+        + '</div></body></html>';
+    }
+
+    function renderMarkdown(tr) {
+      var out = ['# ' + tr.title, '', '_' + tr.characterName + ' & ' + tr.userName + ' \u00b7 ' + tr.messageCount + ' messages_', ''];
+      tr.items.forEach(function (m) {
+        out.push('**' + m.name + '**' + (m.time ? '  \u2014 ' + fmtTime(m.time) : ''));
+        out.push('');
+        out.push(m.content);
+        out.push('');
+      });
+      return out.join('\n');
+    }
+
+    function renderTxt(tr) {
+      var out = [tr.title, '='.repeat(Math.min(60, tr.title.length)), ''];
+      tr.items.forEach(function (m) {
+        out.push('[' + m.name + ']' + (m.time ? ' (' + fmtTime(m.time) + ')' : ''));
+        out.push(m.content.replace(/<[^>]+>/g, ''));
+        out.push('');
+      });
+      return out.join('\n');
+    }
+
+    return {
+      buildTranscript: buildTranscript,
+      renderHTML: renderHTML,
+      renderMarkdown: renderMarkdown,
+      renderTxt: renderTxt,
+      _esc: esc,
+      _cleanContent: cleanContent
+    };
+  }
+
+  if (moduleRef && moduleRef.exports) moduleRef.exports = createStoryExport;
+  else globalRoot.WeldStoryExport = createStoryExport;
+})(typeof window !== 'undefined' ? window : globalThis, typeof module !== 'undefined' ? module : null);
+
+/* ----- [8] LIBRARY ----- */
+/* Weld Library — the reader's home tab. Everything here is for people who USE
+ * generators rather than write them.
+ *
+ *   📌 Scrapbook    — a permanent, cross-generator collection of saved results
+ *                     (the existing Save downloads a one-shot file and Pins are
+ *                     per-generator + capped at 12; this is the persistent,
+ *                     searchable, taggable home they lacked). Save the current
+ *                     output in one click; add notes; export/import the whole
+ *                     collection as JSON; read any entry aloud.
+ *   📖 Chat stories — pick a visited AICC-compatible generator, list its chat
+ *                     threads, and export any thread as styled HTML, Markdown,
+ *                     or plain text — or read it in a clean transcript modal
+ *                     without opening AICC. Read-only: never writes to the DB.
+ *   🛡 Backups      — days-since-last-sweep meter, origin storage usage and
+ *                     persistence status, one-click sweep. A gentle once-a-day
+ *                     toast appears when backups are overdue (default 14 days).
+ *   🌙 Night light  — auto-apply a comfort theme on a schedule (e.g. Warm from
+ *                     20:00 to 07:00). Uses the host's own applyComfort via the
+ *                     weldHooks bridge; fails soft if the hook is absent.
+ *   🗒 Notes        — a free-text note per generator, searchable from the
+ *                     Scrapbook search box.
+ *   🎲 Random favorite — jump to a random starred generator.
+ *
+ * Storage (all GM, all local): 'scrapbook' entries, 'genNotes' map,
+ * 'libCfg' { nightlight }, 'guardLastSweep' timestamp, 'guardLastNag' day-stamp.
+ * Exposes window.weldLibrary = { renderTab, saveCurrentOutput, speak, stopSpeak }.
+ */
+(function () {
+  'use strict';
+  if (window.top !== window) return;
+
+  var NS = 'weldCompanion';
+  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+
+  function el(tag, attrs, kids) {
+    var node = document.createElement(tag);
+    attrs = attrs || {};
+    for (var k in attrs) {
+      if (k === 'text') node.textContent = attrs[k];
+      else if (k === 'html') node.innerHTML = attrs[k];
+      else if (k === 'class') node.className = attrs[k];
+      else if (k === 'style' && typeof attrs[k] === 'object') Object.assign(node.style, attrs[k]);
+      else if (/^on/.test(k)) node.addEventListener(k.slice(2), attrs[k]);
+      else node.setAttribute(k, attrs[k]);
+    }
+    (kids || []).forEach(function (c) { if (c) node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return node;
+  }
+  function toast(msg, ms) {
+    var t = document.querySelector('.weld-lib-toast'); if (t) t.remove();
+    t = el('div', { class: 'weld-lib-toast', text: msg });
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, ms || 2600);
+  }
+  function download(name, text, mime) {
+    var a = el('a', { href: URL.createObjectURL(new Blob([text], { type: mime || 'text/plain' })), download: name });
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { a.remove(); URL.revokeObjectURL(a.href); }, 1500);
+  }
+  function hooks() { return window.weldHooks || {}; }
+  function currentSlug() {
+    var m = location.hostname === 'perchance.org' ? location.pathname.match(/^\/([^/#?]+)/) : null;
+    return m ? m[1] : null;
+  }
+
+  function styleOnce() {
+    if (document.getElementById('weld-lib-style')) return;
+    var css = [
+      '.weld-lib-toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:99999999;background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#e8e4dc);border:1px solid var(--wc-line,rgba(255,255,255,.12));border-radius:9px;padding:8px 14px;font:12.5px system-ui;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);}',
+      '.wlib-sec{border:1px solid var(--wc-line-2,rgba(255,255,255,.06));border-radius:11px;background:var(--wc-surface-2,#1a1f28);margin-bottom:14px;overflow:hidden;}',
+      '.wlib-hd{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;user-select:none;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));}',
+      '.wlib-hd .t{font:700 12px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;color:var(--wc-arc,#ff8a3d);flex:1;}',
+      '.wlib-hd .c{font:11px ui-monospace,monospace;color:var(--wc-faint,#5d6b7b);}',
+      '.wlib-hd .ch{color:var(--wc-faint,#5d6b7b);font-size:11px;transition:transform .15s;}',
+      '.wlib-sec.closed .ch{transform:rotate(-90deg);} .wlib-sec.closed .wlib-bd{display:none;}',
+      '.wlib-bd{padding:10px 12px;}',
+      '.wlib-row{display:flex;align-items:flex-start;gap:10px;padding:8px;border-radius:8px;}',
+      '.wlib-row:hover{background:var(--wc-surface,#13171e);}',
+      '.wlib-row .main{flex:1;min-width:0;}',
+      '.wlib-row .title{font-weight:600;font-size:13px;}',
+      '.wlib-row .meta{font:11px ui-monospace,monospace;color:var(--wc-faint,#5d6b7b);margin-top:1px;}',
+      '.wlib-row .body{font-size:12.5px;opacity:.85;margin-top:4px;max-height:72px;overflow:hidden;white-space:pre-wrap;word-break:break-word;}',
+      '.wlib-row.open .body{max-height:none;}',
+      '.wlib-acts{display:flex;gap:5px;flex:none;flex-wrap:wrap;justify-content:flex-end;max-width:40%;}',
+      '.wlib-mini{appearance:none;background:transparent;border:1px solid var(--wc-line,rgba(255,255,255,.12));color:var(--wc-dim,#9aa7b6);border-radius:7px;padding:3px 8px;font:11px system-ui;cursor:pointer;}',
+      '.wlib-mini:hover{border-color:var(--wc-arc,#ff8a3d);color:var(--wc-ink,#e8e4dc);}',
+      '.wlib-field{flex:1;min-width:0;background:var(--wc-surface,#13171e);border:1px solid var(--wc-line,rgba(255,255,255,.12));color:inherit;border-radius:8px;padding:6px 9px;font:12.5px system-ui;}',
+      '.wlib-bar{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;}',
+      '.wlib-note{font:11.5px system-ui;color:var(--wc-faint,#5d6b7b);}',
+      '.wlib-gauge{height:7px;border-radius:99px;background:var(--wc-surface,#13171e);border:1px solid var(--wc-line-2,rgba(255,255,255,.06));overflow:hidden;flex:1;}',
+      '.wlib-gauge>div{height:100%;background:linear-gradient(90deg,#4ee0c8,#ff8a3d);}',
+      '.wlib-reader{position:fixed;inset:0;z-index:9999999;background:rgba(0,0,0,.55);display:grid;place-items:center;padding:18px;}',
+      '.wlib-reader .pane{background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#e8e4dc);border:1px solid var(--wc-line,rgba(255,255,255,.12));border-radius:13px;max-width:740px;width:100%;max-height:88vh;display:flex;flex-direction:column;}',
+      '.wlib-reader .ph{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.06));}',
+      '.wlib-reader .ph .t{font-weight:700;flex:1;}',
+      '.wlib-reader .pb{overflow:auto;padding:14px;}',
+      '.wlib-msg{margin:10px 0;}',
+      '.wlib-msg .nm{font-weight:700;font-size:12px;color:var(--wc-arc,#ff8a3d);}',
+      '.wlib-msg.user .nm{color:#7fb2ff;}',
+      '.wlib-msg .tx{font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;margin-top:2px;}'
+    ].join('\n');
+    document.head.appendChild(Object.assign(document.createElement('style'), { id: 'weld-lib-style', innerHTML: css }));
+  }
+
+  function section(title, count, open, build) {
+    var bd = el('div', { class: 'wlib-bd' });
+    var cEl = el('span', { class: 'c', text: count || '' });
+    var hd = el('div', { class: 'wlib-hd' }, [el('span', { class: 't', text: title }), cEl, el('span', { class: 'ch', text: '\u25BC' })]);
+    var sec = el('div', { class: 'wlib-sec' + (open ? '' : ' closed') }, [hd, bd]);
+    hd.addEventListener('click', function () { sec.classList.toggle('closed'); });
+    build(bd, function (txt) { cEl.textContent = txt; });
+    return sec;
+  }
+
+  /* ====================== text-to-speech (local, no network) =============== */
+  var speaking = null;
+  function speak(text) {
+    stopSpeak();
+    if (!('speechSynthesis' in window)) { toast('Speech is not supported in this browser'); return; }
+    var u = new SpeechSynthesisUtterance(String(text).slice(0, 30000));
+    u.onend = function () { speaking = null; };
+    speaking = u;
+    window.speechSynthesis.speak(u);
+  }
+  function stopSpeak() {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+    speaking = null;
+  }
+
+  /* ====================== scrapbook store ================================== */
+  var SCRAP_CAP = 500;
+  function scrapAll() { return gget('scrapbook', []) || []; }
+  function scrapSave(list) { gset('scrapbook', list); }
+  function scrapAdd(entry) {
+    var list = scrapAll();
+    entry.id = 'sb-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    entry.t = Date.now();
+    list.unshift(entry);
+    var overflow = list.length > SCRAP_CAP;
+    if (overflow) list = list.slice(0, SCRAP_CAP);
+    scrapSave(list);
+    return { entry: entry, overflow: overflow };
+  }
+  function scrapRemove(id) { scrapSave(scrapAll().filter(function (e) { return e.id !== id; })); }
+  function scrapUpdate(id, patch) {
+    var list = scrapAll();
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) { Object.assign(list[i], patch); break; }
+    scrapSave(list);
+  }
+  function notesAll() { return gget('genNotes', {}) || {}; }
+  function noteSet(slug, text) { var n = notesAll(); if (text) n[slug] = text; else delete n[slug]; gset('genNotes', n); }
+
+  function saveCurrentOutput() {
+    var h = hooks();
+    var text = (typeof h.outputText === 'function') ? h.outputText() : '';
+    if (!text) { toast('No generator output found on this page'); return; }
+    var slug = currentSlug() || 'unknown';
+    var r = scrapAdd({ gen: slug, title: text.slice(0, 64).replace(/\s+/g, ' '), text: text, tags: [], note: '' });
+    toast('\u2713 Saved to Scrapbook' + (r.overflow ? ' (oldest entry rotated out \u2014 cap is ' + SCRAP_CAP + ')' : ''));
+  }
+
+  function renderScrapbook(bd, setCount) {
+    var query = '';
+    var listWrap = el('div');
+    var search = el('input', { class: 'wlib-field', placeholder: 'Search results, generators, tags, notes\u2026' });
+    search.addEventListener('input', function () { query = search.value.toLowerCase(); paint(); });
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [
+      search,
+      el('button', { class: 'wlib-mini', text: '\u2913 Save current output', title: 'Save the open generator\u2019s current result to the Scrapbook', onclick: function () { saveCurrentOutput(); paint(); } }),
+      el('button', { class: 'wlib-mini', text: 'Export', title: 'Download the whole Scrapbook (incl. generator notes) as JSON', onclick: function () {
+        download('weld-scrapbook.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify({ format: 'weld-scrapbook', formatVersion: 1, entries: scrapAll(), notes: notesAll() }, null, 2), 'application/json');
+      } }),
+      el('button', { class: 'wlib-mini', text: 'Import\u2026', onclick: function () { importScrapbook(paint); } })
+    ]));
+    bd.appendChild(listWrap);
+    paint();
+
+    function paint() {
+      var entries = scrapAll();
+      var notes = notesAll();
+      setCount(entries.length + ' saved');
+      listWrap.innerHTML = '';
+      var shown = entries.filter(function (e) {
+        if (!query) return true;
+        var hay = (e.title + ' ' + e.text + ' ' + e.gen + ' ' + (e.tags || []).join(' ') + ' ' + (e.note || '') + ' ' + (notes[e.gen] || '')).toLowerCase();
+        return hay.indexOf(query) !== -1;
+      });
+      if (!shown.length) {
+        listWrap.appendChild(el('div', { class: 'wlib-note', text: entries.length ? 'No matches.' : 'Nothing saved yet. Open any generator and hit \u201cSave current output\u201d \u2014 entries are permanent, searchable, and stay across every generator.' }));
+        return;
+      }
+      shown.slice(0, 60).forEach(function (e) {
+        var row = el('div', { class: 'wlib-row' });
+        var main = el('div', { class: 'main' }, [
+          el('div', { class: 'title', text: e.title || '(untitled)' }),
+          el('div', { class: 'meta', text: e.gen + ' \u00b7 ' + new Date(e.t).toLocaleString() + ((e.tags || []).length ? ' \u00b7 #' + e.tags.join(' #') : '') + (e.note ? ' \u00b7 \ud83d\udcdd' : '') }),
+          el('div', { class: 'body', text: e.text })
+        ]);
+        main.addEventListener('click', function () { row.classList.toggle('open'); });
+        row.appendChild(main);
+        row.appendChild(el('div', { class: 'wlib-acts' }, [
+          el('button', { class: 'wlib-mini', text: '\ud83d\udd0a', title: 'Read aloud', onclick: function () { speak(e.text); } }),
+          el('button', { class: 'wlib-mini', text: 'Copy', onclick: function () { try { navigator.clipboard.writeText(e.text).then(function () { toast('Copied'); }); } catch (er) {} } }),
+          el('button', { class: 'wlib-mini', text: 'Tags', onclick: function () {
+            var t = window.prompt('Tags (space-separated):', (e.tags || []).join(' '));
+            if (t == null) return;
+            scrapUpdate(e.id, { tags: t.split(/\s+/).filter(Boolean).map(function (s) { return s.replace(/^#/, ''); }) }); paint();
+          } }),
+          el('button', { class: 'wlib-mini', text: 'Note', onclick: function () {
+            var n = window.prompt('Note for this entry:', e.note || '');
+            if (n == null) return;
+            scrapUpdate(e.id, { note: n }); paint();
+          } }),
+          el('button', { class: 'wlib-mini', text: 'Open', title: 'Open the generator this came from', onclick: function () { window.open('https://perchance.org/' + e.gen, '_blank'); } }),
+          el('button', { class: 'wlib-mini', text: '\u00d7', title: 'Delete', onclick: function () { if (window.confirm('Delete this Scrapbook entry?')) { scrapRemove(e.id); paint(); } } })
+        ]));
+        listWrap.appendChild(row);
+      });
+      if (shown.length > 60) listWrap.appendChild(el('div', { class: 'wlib-note', text: '\u2026 ' + (shown.length - 60) + ' more \u2014 narrow the search to see them.' }));
+
+      // per-generator note for the page you're on
+      var slug = currentSlug();
+      if (slug) {
+        var noteRow = el('div', { class: 'wlib-bar', style: { marginTop: '10px' } }, [
+          el('span', { class: 'wlib-note', text: '\ud83d\uddd2 Note on \u201c' + slug + '\u201d:' }),
+          el('span', { class: 'wlib-note', style: { flex: '1', fontStyle: notes[slug] ? 'normal' : 'italic' }, text: notes[slug] || 'none' }),
+          el('button', { class: 'wlib-mini', text: 'Edit', onclick: function () {
+            var n = window.prompt('Your note for ' + slug + ' (searchable from the box above):', notes[slug] || '');
+            if (n == null) return;
+            noteSet(slug, n); paint();
+          } })
+        ]);
+        listWrap.appendChild(noteRow);
+      }
+    }
+  }
+
+  function importScrapbook(done) {
+    var inp = el('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } });
+    inp.addEventListener('change', function () {
+      var file = inp.files && inp.files[0]; if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        var json; try { json = JSON.parse(String(reader.result)); } catch (e) { toast('Not valid JSON'); return; }
+        var incoming = Array.isArray(json) ? json : (json.entries || []);
+        if (!Array.isArray(incoming) || !incoming.length) { toast('No entries found in that file'); return; }
+        var list = scrapAll();
+        var have = {}; list.forEach(function (e) { have[e.id] = true; });
+        var added = 0;
+        incoming.forEach(function (e) {
+          if (!e || !e.text) return;
+          if (e.id && have[e.id]) return;        // merge: skip duplicates by id
+          list.push({ id: e.id || ('sb-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), gen: e.gen || 'unknown', title: e.title || String(e.text).slice(0, 64), text: e.text, tags: e.tags || [], note: e.note || '', t: e.t || Date.now() });
+          added++;
+        });
+        list.sort(function (a, b) { return b.t - a.t; });
+        if (list.length > SCRAP_CAP) list = list.slice(0, SCRAP_CAP);
+        scrapSave(list);
+        if (json.notes && typeof json.notes === 'object') {
+          var n = notesAll();
+          for (var k in json.notes) if (!n[k]) n[k] = json.notes[k];
+          gset('genNotes', n);
+        }
+        toast('\u2713 Imported ' + added + ' entr' + (added === 1 ? 'y' : 'ies'));
+        done && done();
+      };
+      reader.readAsText(file);
+    });
+    document.body.appendChild(inp); inp.click(); setTimeout(function () { inp.remove(); }, 120000);
+  }
+
+  /* ====================== chat stories (AICC threads) ======================= */
+  function rpc(slug, op, args, timeout) {
+    if (window.weldDataManager && typeof window.weldDataManager.rpc === 'function') return window.weldDataManager.rpc(slug, op, args, timeout || 45000);
+    return Promise.reject(new Error('Data Manager not loaded'));
+  }
+  var _dec = null;
+  function decodeRow(row) {
+    try { if (!_dec) _dec = window.IDBManEngine ? window.IDBManEngine({}) : null; return _dec ? _dec.decodeValue(row.valueEnc) : row.valueEnc; } catch (e) { return row.valueEnc; }
+  }
+  function pageAll(slug, store) {
+    var rows = []; var offset = 0;
+    function next() {
+      return rpc(slug, 'page', { db: 'chatbot-ui-v1', store: store, offset: offset, limit: 500 }).then(function (p) {
+        rows = rows.concat((p.rows || []).map(decodeRow));
+        offset += (p.rows || []).length;
+        return p.done ? rows : next();
+      });
+    }
+    return next();
+  }
+
+  function renderStories(bd, setCount) {
+    var slugInput = el('input', { class: 'wlib-field', placeholder: 'generator slug (e.g. ai-character-chat)' });
+    var cur = currentSlug();
+    var recent = (gget('recent', []) || []).map(function (r) { return r.name; });
+    slugInput.value = cur && recent.indexOf(cur) !== -1 ? cur : (cur || 'ai-character-chat');
+    var listWrap = el('div');
+    var loadBtn = el('button', { class: 'wlib-mini', text: 'Load threads', onclick: load });
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [slugInput, loadBtn]));
+    bd.appendChild(el('div', { class: 'wlib-note', text: 'Read-only: threads are listed and exported without ever writing to the chat database. Loading briefly wakes the generator in a hidden frame.' }));
+    bd.appendChild(listWrap);
+
+    function load() {
+      var slug = slugInput.value.trim();
+      if (!slug) return;
+      listWrap.innerHTML = '';
+      listWrap.appendChild(el('div', { class: 'wlib-note', text: 'Loading threads\u2026' }));
+      Promise.all([pageAll(slug, 'threads'), pageAll(slug, 'characters')]).then(function (res) {
+        var threads = res[0], chars = res[1];
+        var charById = {}; chars.forEach(function (c) { if (c && c.id != null) charById[c.id] = c; });
+        threads.sort(function (a, b) { return (b.lastMessageTime || 0) - (a.lastMessageTime || 0); });
+        setCount(threads.length + ' thread' + (threads.length === 1 ? '' : 's'));
+        listWrap.innerHTML = '';
+        if (!threads.length) { listWrap.appendChild(el('div', { class: 'wlib-note', text: 'No chat threads found in ' + slug + '.' })); return; }
+        threads.slice(0, 80).forEach(function (t) {
+          var ch = charById[t.characterId] || {};
+          var row = el('div', { class: 'wlib-row' });
+          row.appendChild(el('div', { class: 'main' }, [
+            el('div', { class: 'title', text: (t.name || 'Untitled') + (ch.name ? ' \u00b7 ' + ch.name : '') }),
+            el('div', { class: 'meta', text: (t.lastMessageTime ? 'last message ' + new Date(t.lastMessageTime).toLocaleString() : 'no messages yet') })
+          ]));
+          row.appendChild(el('div', { class: 'wlib-acts' }, [
+            el('button', { class: 'wlib-mini', text: 'Read', onclick: function () { withTranscript(slug, t, ch, function (tr) { openReader(tr); }); } }),
+            el('button', { class: 'wlib-mini', text: 'HTML', title: 'Styled, readable web page', onclick: function () { withTranscript(slug, t, ch, function (tr, SE) { download(fname(tr, 'html'), SE.renderHTML(tr), 'text/html'); }); } }),
+            el('button', { class: 'wlib-mini', text: 'MD', onclick: function () { withTranscript(slug, t, ch, function (tr, SE) { download(fname(tr, 'md'), SE.renderMarkdown(tr), 'text/markdown'); }); } }),
+            el('button', { class: 'wlib-mini', text: 'TXT', onclick: function () { withTranscript(slug, t, ch, function (tr, SE) { download(fname(tr, 'txt'), SE.renderTxt(tr)); }); } })
+          ]));
+          listWrap.appendChild(row);
+        });
+        if (threads.length > 80) listWrap.appendChild(el('div', { class: 'wlib-note', text: '\u2026 ' + (threads.length - 80) + ' older threads not shown.' }));
+      }).catch(function (err) {
+        listWrap.innerHTML = '';
+        listWrap.appendChild(el('div', { class: 'wlib-note', text: 'Could not load: ' + err.message + ' (is this generator AICC-compatible?)' }));
+      });
+    }
+
+    function fname(tr, ext) {
+      return (tr.title || 'chat').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 60) + '.' + ext;
+    }
+    function withTranscript(slug, thread, character, fn) {
+      if (!window.WeldStoryExport) { toast('Story export module not loaded'); return; }
+      var SE = window.WeldStoryExport();
+      toast('Building transcript\u2026');
+      pageAll(slug, 'messages').then(function (messages) {
+        var tr = SE.buildTranscript({ thread: thread, character: character, messages: messages });
+        if (!tr.items.length) { toast('That thread has no visible messages.'); return; }
+        fn(tr, SE);
+      }).catch(function (err) { toast('Failed: ' + err.message); });
+    }
+  }
+
+  function openReader(tr) {
+    var pb = el('div', { class: 'pb' });
+    tr.items.forEach(function (m) {
+      pb.appendChild(el('div', { class: 'wlib-msg' + (m.author === 'user' ? ' user' : '') }, [
+        el('div', { class: 'nm', text: m.name }),
+        el('div', { class: 'tx', text: m.content })
+      ]));
+    });
+    var overlay = el('div', { class: 'wlib-reader' }, [
+      el('div', { class: 'pane' }, [
+        el('div', { class: 'ph' }, [
+          el('span', { class: 't', text: tr.title }),
+          el('button', { class: 'wlib-mini', text: '\ud83d\udd0a', title: 'Read aloud', onclick: function () { speak(tr.items.map(function (m) { return m.name + '. ' + m.content; }).join('\n')); } }),
+          el('button', { class: 'wlib-mini', text: '\u25a0', title: 'Stop reading', onclick: stopSpeak }),
+          el('button', { class: 'wlib-mini', text: '\u00d7', onclick: close })
+        ]),
+        pb
+      ])
+    ]);
+    function close() { stopSpeak(); overlay.remove(); document.removeEventListener('keydown', esc); }
+    function esc(e) { if (e.key === 'Escape') close(); }
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', esc);
+    document.body.appendChild(overlay);
+  }
+
+  /* ====================== backup guardian =================================== */
+  var NAG_DAYS = 14;
+  function lastSweep() { return gget('guardLastSweep', 0) || 0; }
+  function hookSweepTimestamp() {
+    // record when a sweep runs, regardless of where it was started from
+    var tries = 0;
+    (function attach() {
+      var dm = window.weldDataManager;
+      if (dm && typeof dm.sweep === 'function' && !dm.__weldGuardWrapped) {
+        var orig = dm.sweep;
+        dm.sweep = function () { gset('guardLastSweep', Date.now()); return orig.apply(this, arguments); };
+        dm.__weldGuardWrapped = true;
+        return;
+      }
+      if (++tries < 40) setTimeout(attach, 500);
+    })();
+  }
+  function maybeNag() {
+    var visits = (gget('recent', []) || []).length;
+    if (!visits) return;
+    var last = lastSweep();
+    var days = last ? Math.floor((Date.now() - last) / 86400000) : Infinity;
+    if (days < NAG_DAYS) return;
+    var today = new Date().toISOString().slice(0, 10);
+    if (gget('guardLastNag', '') === today) return;
+    gset('guardLastNag', today);
+    toast(last ? ('\ud83d\udee1 It\u2019s been ' + days + ' days since your last backup \u2014 Library \u2192 Backups') : '\ud83d\udee1 You\u2019ve never backed up your generator data \u2014 Library \u2192 Backups', 5200);
+  }
+
+  function renderGuardian(bd, setCount) {
+    var last = lastSweep();
+    var days = last ? Math.floor((Date.now() - last) / 86400000) : null;
+    setCount(last ? (days + 'd ago') : 'never');
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '8px' }, text: last
+      ? ('Last full backup (sweep): ' + new Date(last).toLocaleString() + ' \u2014 ' + days + ' day' + (days === 1 ? '' : 's') + ' ago.')
+      : 'No sweep backup recorded yet. A sweep saves every visited generator\u2019s data into one file.' }));
+    var gauge = el('div', { class: 'wlib-gauge' }, [el('div', { style: { width: '0%' } })]);
+    var gaugeNote = el('span', { class: 'wlib-note', text: 'measuring storage\u2026' });
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [gauge, gaugeNote]));
+    if (navigator.storage && navigator.storage.estimate) {
+      navigator.storage.estimate().then(function (e) {
+        var pct = e.quota ? Math.min(100, Math.round((e.usage / e.quota) * 100)) : 0;
+        gauge.firstChild.style.width = Math.max(2, pct) + '%';
+        gaugeNote.textContent = (e.usage / 1048576).toFixed(1) + ' MB of ' + (e.quota / 1073741824).toFixed(1) + ' GB used on this origin';
+      }).catch(function () { gaugeNote.textContent = 'storage estimate unavailable'; });
+    } else gaugeNote.textContent = 'storage estimate unavailable';
+    if (navigator.storage && navigator.storage.persisted) {
+      var persistNote = el('div', { class: 'wlib-note', text: '' });
+      navigator.storage.persisted().then(function (yes) {
+        persistNote.textContent = yes ? '\u2713 This origin\u2019s storage is marked persistent (the browser won\u2019t auto-evict it).' : '\u26a0 Storage is NOT marked persistent \u2014 the browser may evict it under disk pressure. Backups matter.';
+      });
+      bd.appendChild(persistNote);
+    }
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '8px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u29c9 Run sweep backup now', onclick: function () {
+        var dm = window.weldDataManager;
+        if (dm && typeof dm.sweep === 'function') { gset('guardLastSweep', Date.now()); dm.open(); setTimeout(dm.sweep, 80); }
+        else toast('Data Manager not loaded');
+      } }),
+      el('span', { class: 'wlib-note', text: 'Reminder appears after ' + NAG_DAYS + ' days, at most once a day.' })
+    ]));
+  }
+
+  /* ====================== night light ======================================= */
+  function libCfg() { return gget('libCfg', { nightlight: { on: false, theme: 'warm', from: 20, to: 7 } }) || {}; }
+  function libCfgSave(c) { gset('libCfg', c); }
+  function nightActive(nl, hour) {
+    if (nl.from === nl.to) return false;
+    return nl.from < nl.to ? (hour >= nl.from && hour < nl.to) : (hour >= nl.from || hour < nl.to);
+  }
+  var nlPrevTheme = null;
+  function nightTick() {
+    var cfg = libCfg(); var nl = cfg.nightlight || {};
+    var h = hooks();
+    if (!nl.on || typeof h.comfortGet !== 'function' || typeof h.comfortSet !== 'function' || typeof h.applyComfort !== 'function') return;
+    var active = nightActive(nl, new Date().getHours());
+    var cur = h.comfortGet();
+    if (active && cur.theme !== nl.theme) {
+      if (nlPrevTheme === null) nlPrevTheme = cur.theme || 'off';
+      h.comfortSet(Object.assign({}, cur, { theme: nl.theme })); h.applyComfort();
+    } else if (!active && nlPrevTheme !== null) {
+      h.comfortSet(Object.assign({}, h.comfortGet(), { theme: nlPrevTheme })); h.applyComfort();
+      nlPrevTheme = null;
+    }
+  }
+  function renderNightlight(bd, setCount) {
+    var cfg = libCfg(); var nl = cfg.nightlight || { on: false, theme: 'warm', from: 20, to: 7 };
+    setCount(nl.on ? 'on' : 'off');
+    var h = hooks();
+    if (typeof h.applyComfort !== 'function') {
+      bd.appendChild(el('div', { class: 'wlib-note', text: 'Comfort hooks not available in this build.' }));
+      return;
+    }
+    function save() { cfg.nightlight = nl; libCfgSave(cfg); setCount(nl.on ? 'on' : 'off'); nightTick(); }
+    var onToggle = el('input', { type: 'checkbox', onchange: function (e) { nl.on = e.target.checked; save(); } }); onToggle.checked = !!nl.on;
+    var theme = el('select', { class: 'wlib-field', style: { flex: '0 0 110px' }, onchange: function (e) { nl.theme = e.target.value; save(); } });
+    ['dim', 'warm', 'sepia', 'gray', 'dark'].forEach(function (t) { var o = el('option', { value: t, text: t }); if (t === nl.theme) o.selected = true; theme.appendChild(o); });
+    function hourSel(val, onpick) {
+      var s = el('select', { class: 'wlib-field', style: { flex: '0 0 84px' }, onchange: function (e) { onpick(parseInt(e.target.value, 10)); save(); } });
+      for (var i = 0; i < 24; i++) { var o = el('option', { value: String(i), text: (i < 10 ? '0' : '') + i + ':00' }); if (i === val) o.selected = true; s.appendChild(o); }
+      return s;
+    }
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [
+      el('label', { class: 'wlib-note', style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [onToggle, el('span', { text: 'Auto-apply' })]),
+      theme,
+      el('span', { class: 'wlib-note', text: 'from' }), hourSel(nl.from, function (v) { nl.from = v; }),
+      el('span', { class: 'wlib-note', text: 'to' }), hourSel(nl.to, function (v) { nl.to = v; })
+    ]));
+    bd.appendChild(el('div', { class: 'wlib-note', text: 'Applies the comfort theme during these hours and restores your previous theme outside them. Your manual comfort settings always win when night light is off.' }));
+  }
+
+  /* ====================== random favorite =================================== */
+  function randomFavorite() {
+    var favs = gget('favorites', []) || [];
+    if (!favs.length) { toast('No favorites yet \u2014 star some generators first (press f)'); return; }
+    var pick = favs[Math.floor(Math.random() * favs.length)];
+    location.href = 'https://perchance.org/' + pick;
+  }
+
+  /* ====================== tab renderer ====================================== */
+  function renderTab(body) {
+    styleOnce();
+    body.appendChild(el('div', { class: 'wlib-bar', style: { marginBottom: '10px' } }, [
+      el('button', { class: 'wlib-mini', text: '\ud83c\udfb2 Random favorite', onclick: randomFavorite }),
+      el('button', { class: 'wlib-mini', text: '\ud83d\udd0a Read this page\u2019s output', onclick: function () {
+        var h = hooks(); var t = (typeof h.outputText === 'function') ? h.outputText() : '';
+        if (t) speak(t); else toast('No generator output found on this page');
+      } }),
+      el('button', { class: 'wlib-mini', text: '\u25a0 Stop reading', onclick: stopSpeak })
+    ]));
+    body.appendChild(section('\ud83d\udccc Scrapbook', '', true, renderScrapbook));
+    body.appendChild(section('\ud83d\udcd6 Chat stories', '', true, renderStories));
+    body.appendChild(section('\ud83d\udee1 Backups', '', false, renderGuardian));
+    body.appendChild(section('\ud83c\udf19 Night light', '', false, renderNightlight));
+  }
+
+  /* ====================== boot =============================================== */
+  hookSweepTimestamp();
+  setTimeout(maybeNag, 4000);
+  setInterval(nightTick, 60000);
+  setTimeout(nightTick, 2500);
+
+  window.weldLibrary = { renderTab: renderTab, saveCurrentOutput: saveCurrentOutput, speak: speak, stopSpeak: stopSpeak };
+})();
+

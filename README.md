@@ -4,10 +4,10 @@
 
 **Quality-of-life upgrades for [Perchance](https://perchance.org) — for readers, players, and authors alike.**
 
-Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
+Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.33.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.34.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -28,6 +28,7 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
   - [Quality-of-life](#quality-of-life)
   - [Generator manager, directory & CRUD](#generator-manager-directory--crud)
   - [Sync with GitHub — Pull & Push](#sync-with-github--pull--push)
+  - [Library — for readers & players](#library--for-readers--players)
   - [Tools — AI Helper & character files](#tools--ai-helper--character-files)
   - [Data Manager — browse, edit & back up every generator's IndexedDB](#data-manager--browse-edit--back-up-every-generators-indexeddb)
   - [AICC pack — Lore Library, character round-trip & repair](#aicc-pack--lore-library-character-round-trip--repair)
@@ -56,6 +57,7 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 | Tab | What's in it |
 | :-- | :----------- |
 | ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort, and per-row open/edit. A **This Generator** panel gives the open generator two-way GitHub sync (Pull/Push), rename, delete, and backup. |
+| 📒 **Library** | The reader's home: a permanent **Scrapbook** of saved results from any generator (searchable, taggable, exportable), **Chat stories** (read or export any AI Character Chat thread as styled HTML, Markdown, or text — without opening AICC), a **backup guardian** with overdue reminders and storage health, **night light** (auto comfort theme on a schedule), per-generator notes, read-aloud, and a random-favorite button. |
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
 | 👁 **Comfort** | Eye-comfort theme filters, font size, line height, max width, a dyslexia-friendly font, focus mode — and an option to apply the same sizing to the **code editor**. |
 | 🛠 **Tools** | Tool cards. **AI Helper**: a custom instruction, or route the helper to your own OpenAI / Anthropic / Google model with your key. **Character Files**: import and export AI Character Chat character `.json` files, or fetch one straight from a GitHub raw URL. |
@@ -106,6 +108,26 @@ The same actions are also on your userscript manager's menu: **Update editor fro
 
 > [!NOTE]
 > Perchance itself has no external write API, so a **Pull never auto-saves** — the manual Perchance **Save** is always the gate for what goes live. **Push** is gated by the confirm dialog. Push is current-generator only; cross-page bulk sync isn't possible because each generator's editor lives on its own `#edit` page.
+
+### Library — for readers & players
+
+Everything in the **📒 Library** tab is for people who *use* generators rather than write them.
+
+#### 📌 Scrapbook
+
+A permanent, cross-generator collection of saved results. The drawer's **Save** button downloads a one-shot file and **Pins** are per-generator and capped at 12 — the Scrapbook is where great rolls actually live. One click saves the open generator's current output; every entry is searchable (text, generator, tags, notes), taggable, annotatable, readable aloud, and links back to the generator it came from. The whole collection (including your per-generator notes) exports to a single JSON file and imports back with duplicate-safe merging. Capacity is 500 entries; when full, the oldest entry rotates out and the save tells you so.
+
+#### 📖 Chat stories
+
+People write long roleplay stories in AI Character Chat with no good way to keep or share them — the raw database export is unreadable. This panel lists every chat thread in any AICC-compatible generator (newest first, with character names), and each thread can be **read** in a clean transcript modal — with read-aloud — or **exported** as a styled HTML page (chat-bubble layout, avatars, light/dark aware), Markdown, or plain text. Strictly read-only: nothing is ever written to the chat database. Message visibility follows AICC's own rules — messages hidden from the user stay hidden, system messages are excluded by default, and all exported HTML is fully escaped (generator HTML is never re-emitted), with only a small safe markdown subset rendered.
+
+#### 🛡 Backup guardian
+
+The most common disaster for casual users is the browser quietly evicting months of chats. The guardian shows when your last sweep backup ran, this origin's storage usage against its quota, and whether the browser has marked the storage **persistent** (if not, it says so plainly — eviction is a real risk). One click runs a sweep. If backups are more than 14 days overdue, a gentle reminder toast appears at most once per day.
+
+#### 🌙 Night light & small comforts
+
+**Night light** auto-applies a comfort theme (Warm, Dim, Sepia, Gray, or Dark) on an hour schedule — e.g. Warm from 20:00 to 07:00 — and restores your previous theme outside those hours; your manual comfort settings always win when it's off. **Read aloud** speaks the current page's output, any Scrapbook entry, or a whole chat story using the browser's built-in speech — local, no network, no key. **Per-generator notes** let you jot "great for elf names" on any generator, searchable from the Scrapbook box. **🎲 Random favorite** jumps to a random starred generator.
 
 ### Tools — AI Helper & character files
 
@@ -295,6 +317,10 @@ Planned additions:
 - **Weld Lint overlay** — run Weld's brace-trap scanner live in the editor and underline issues as you type.
 - **A richer GitHub manager** — a sync-status badge and pre-Pull/Push diff, building on the two-way sync that's already here.
 - **Atomic GitHub commits** — push DSL + HTML as a single commit rather than two.
+- **Discover** — browse Perchance's public generator gallery from the drawer, with a "surprise me" random-generator button. (Needs careful, fail-soft parsing of the gallery; deferred until that can be verified against the live site.)
+- **Continue where you left off** — a home surface listing your most recent chats and rolls across generators, with one click back in. (Needs a cached-freshness design so it doesn't spawn hidden frames on every page load.)
+- **Character gallery** — a visual avatar-grid browser for your AICC characters with favorites and "chat now", growing out of the Data Manager's typed view.
+- **Share a roll as an image** — render a Scrapbook entry to a shareable PNG card.
 
 ## Contributing
 
