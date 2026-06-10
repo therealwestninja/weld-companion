@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.30.0
-// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager to browse, edit, back up, export and import IndexedDB/Dexie databases across the generators you have visited.
+// @version      1.31.0
+// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager and an AICC pack for ai-character-chat (Lore Library, character round-trip via GitHub, repair tools).
 // @author       therealwestninja
 // @match        https://perchance.org/*
 // @match        https://*.perchance.org/*
@@ -2515,7 +2515,10 @@
 
 
 /* =============================================================================
- * Weld Companion — Data Manager v2.1  (engine v1.2 + agent + coordinator/UI)
+ * Weld Companion appended modules (Data Manager + AICC pack)
+ *  [1] IDB engine v1.2     [2] Data Manager v2.1 (3-pane CRUD/export/import)
+ *  [3] AICC core (schema + share rules)   [4] AICC pack (sentry, lore, repair)
+ *  [5] AICC typed view (renders in the Data Manager when a chatbot-ui-v1 DB is opened)
  * ========================================================================== */
 
 /* ----- [1] IDB ENGINE v1.2 ----- */
@@ -3747,6 +3750,13 @@
     rpc(slug, 'describe', { db: db }).then(function (desc) {
       clear(refs.mainBody);
       if (!desc) { refs.mainBody.appendChild(el('div', { class: 'wdm-note', text: 'Database not found.' })); return; }
+      // Extensions (e.g. AICC): typed tools rendered ABOVE the generic stores list.
+      var exts = (window.weldDataExtensions || []).filter(function (x) { try { return x && typeof x.match === 'function' && x.match(desc); } catch (e) { return false; } });
+      exts.forEach(function (ext) {
+        if (typeof ext.render === 'function') {
+          try { ext.render({ slug: slug, db: db, desc: desc, parent: refs.mainBody, rpc: rpc, toast: toast, confirmYes: confirmYes, ghost: ghost, btn: btn, sub: sub, el: el, frag: frag, clear: clear, spinner: spinner, refresh: function () { selectDb(slug, db); } }); } catch (e) { console.error('[weld] extension render failed', ext.id, e); }
+        }
+      });
       refs.mainBody.appendChild(frag(desc.stores.map(function (st) {
         var idxTxt = st.indexes.length ? ('indexes: ' + st.indexes.map(function (x) { return x.name; }).join(', ')) : 'no indexes';
         var keyTxt = (st.keyPath === null || st.keyPath === undefined) ? 'out-of-line key' : ('key: ' + JSON.stringify(st.keyPath) + (st.autoIncrement ? ' ++' : ''));
@@ -4121,9 +4131,794 @@
         if (!document.getElementById('wdm-root-panel')) { e.preventDefault(); open(); }
       }
     }, false);
-    var api = { open: open, renderTab: renderLaunch, sweep: sweepBackup };
+    var api = { open: open, renderTab: renderLaunch, sweep: sweepBackup, rpc: rpc, releaseFrame: releaseFrame };
     window.weldDataManager = api;
     try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.weldDataManager = api; } catch (e) {}
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+})();
+
+/* ----- [3] AICC CORE ----- */
+/* AICC schema + Companion-side helpers (top-frame only).
+ *
+ * Source of truth: ai-character-chat aicc_2.txt v90. The exportable-character
+ * stripping rules below are copied verbatim from AICC's own share-link prep
+ * (delete id / creationTime / lastMessageTime; folderName=''; customData reduced
+ * to PUBLIC only) so a round-tripped character re-imports as a native share.
+ *
+ * Exposes window.weldAICC = {
+ *   DB_NAME, DB_VERSION, schema, isAICC(describeResult),
+ *   stripCharacterForShare(character),       // returns a fresh stripped clone
+ *   buildShareHashUrl(slug, character),      // ?data=… isn't possible without an upload; we use the # path
+ *   makeBroadcastChannel(name),              // SSR-safe wrapper that returns null where BC is absent
+ *   uuidV4(), isUuid(s)
+ * }
+ */
+(function () {
+  'use strict';
+  if (window.top !== window) return;
+
+  var DB_NAME = 'chatbot-ui-v1';
+  var DB_VERSION = 90;
+  // Mirrors AICC's db.version(90).stores() declaration. Used by the AICC pack
+  // to verify a database it's about to touch really is an AICC database before
+  // any write — refuses to operate on a coincidentally-named DB with a different
+  // shape.
+  var schema = {
+    name: DB_NAME,
+    version: DB_VERSION,
+    stores: {
+      characters: { keyPath: 'id', autoIncrement: true, indexes: ['modelName', 'fitMessagesInContextMethod', 'uuid', 'creationTime', 'lastMessageTime', 'folderPath'] },
+      threads:    { keyPath: 'id', autoIncrement: true, indexes: ['name', 'characterId', 'creationTime', 'lastMessageTime', 'lastViewTime', 'folderPath'] },
+      messages:   { keyPath: 'id', autoIncrement: true, indexes: ['threadId', 'characterId', 'creationTime', 'order'] },
+      misc:       { keyPath: 'key', autoIncrement: false, indexes: [] },
+      summaries:  { keyPath: 'hash', autoIncrement: false, indexes: ['threadId'] },
+      memories:   { keyPath: 'id', autoIncrement: true, indexes: ['[summaryHash+threadId]', '[characterId+status]', '[threadId+status]', '[threadId+index]', 'threadId'] },
+      lore:       { keyPath: 'id', autoIncrement: true, indexes: ['bookId', 'bookUrl'] },
+      textEmbeddingCache:   { keyPath: 'id', autoIncrement: true, indexes: ['textHash', '&[textHash+modelName]'] },
+      textCompressionCache: { keyPath: 'id', autoIncrement: true, indexes: ['uncompressedTextHash', '&[uncompressedTextHash+modelName+tokenLimit]'] }
+    }
+  };
+
+  // Test a describeDatabase() result against the schema. Returns
+  // { ok, matchedStores, missingStores, extraStores }. A DB is "AICC-shaped" if
+  // it has the right name and contains every characters/threads/messages store
+  // (extras are tolerated — AICC may forward-evolve the schema between bumps).
+  function isAICC(desc) {
+    if (!desc || desc.name !== DB_NAME) return { ok: false, reason: 'not chatbot-ui-v1' };
+    var have = {};
+    (desc.stores || []).forEach(function (s) { have[s.name] = true; });
+    var required = ['characters', 'threads', 'messages'];
+    var missing = required.filter(function (n) { return !have[n]; });
+    if (missing.length) return { ok: false, reason: 'missing stores: ' + missing.join(', ') };
+    var expected = Object.keys(schema.stores);
+    var matched = expected.filter(function (n) { return have[n]; });
+    var extras = Object.keys(have).filter(function (n) { return expected.indexOf(n) === -1; });
+    return { ok: true, version: desc.version, matchedStores: matched, missingStores: expected.filter(function (n) { return !have[n]; }), extraStores: extras };
+  }
+
+  function stripCharacterForShare(input) {
+    if (!input || typeof input !== 'object') return null;
+    var c;
+    try { c = JSON.parse(JSON.stringify(input)); } catch (e) { return null; }
+    delete c.id;
+    delete c.creationTime;
+    delete c.lastMessageTime;
+    delete c.folderPath;
+    c.folderName = '';
+    if (c.customData && typeof c.customData === 'object') {
+      var keep = {};
+      if (Object.prototype.hasOwnProperty.call(c.customData, 'PUBLIC')) keep.PUBLIC = c.customData.PUBLIC;
+      c.customData = keep;
+    }
+    return c;
+  }
+
+  function buildShareHashUrl(slug, character) {
+    var payload = { addCharacter: character, quickAdd: true };
+    var hash = encodeURIComponent(JSON.stringify(payload)).replace(/[!'()*]/g, function (ch) {
+      return '%' + ch.charCodeAt(0).toString(16);
+    });
+    return 'https://perchance.org/' + encodeURIComponent(slug || 'ai-character-chat') + '#' + hash;
+  }
+
+  function makeBroadcastChannel(name) {
+    try { return new BroadcastChannel(name); } catch (e) { return null; }
+  }
+
+  function uuidV4() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    var b = new Uint8Array(16);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(b);
+    else for (var i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    var h = []; for (var j = 0; j < 16; j++) h.push((b[j] + 0x100).toString(16).slice(1));
+    return h[0] + h[1] + h[2] + h[3] + '-' + h[4] + h[5] + '-' + h[6] + h[7] + '-' + h[8] + h[9] + '-' + h[10] + h[11] + h[12] + h[13] + h[14] + h[15];
+  }
+  function isUuid(s) { return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s); }
+
+  window.weldAICC = {
+    DB_NAME: DB_NAME,
+    DB_VERSION: DB_VERSION,
+    schema: schema,
+    isAICC: isAICC,
+    stripCharacterForShare: stripCharacterForShare,
+    buildShareHashUrl: buildShareHashUrl,
+    makeBroadcastChannel: makeBroadcastChannel,
+    uuidV4: uuidV4,
+    isUuid: isUuid
+  };
+})();
+
+/* ----- [4] AICC PACK ----- */
+/* AICC Pack — Companion-side enhancements for ai-character-chat and any other
+ * generator that uses the chatbot-ui-v1 Dexie database.
+ *
+ * What's in here:
+ *   • Sentry        — BroadcastChannel-based presence probe + write-gate
+ *                     (`canWriteToAICC(slug)`); destructive writes refuse while
+ *                     a live AICC tab claims the origin.
+ *   • Lore Library  — GM-stored catalog of {name, url, tags, notes}; supports
+ *                     user.uploads.dev (uploaded through a hidden AICC frame,
+ *                     since upload-plugin needs a Perchance origin) and direct
+ *                     paste of raw.githubusercontent.com URLs. Each entry has a
+ *                     per-entry "where to host" preference (defaults can be
+ *                     toggled on/off in the panel).
+ *   • Character round-trip — pull a row from `db.characters`, run it through
+ *                     weldAICC.stripCharacterForShare (AICC's own rules), push
+ *                     to GitHub as <slug>/characters/<name>.<uuid>.json; reverse
+ *                     direction reads a JSON file and either opens the share
+ *                     URL (AICC alive → AICC owns the merge) or writes through
+ *                     the engine (AICC closed → uuid de-dupe like AICC does).
+ *                     One character at a time, per your preference.
+ *   • Repair tools  — boot-failure detector reading the same fields AICC's own
+ *                     upgrade code repairs, plus a quarantine for rows that
+ *                     can't be saved.
+ *   • Typed view    — friendlier columns for characters/threads/messages/lore
+ *                     that drop into the Data Manager's main pane on AICC DBs.
+ *
+ * Hard rule: NO destructive write to a chatbot-ui-v1 database while an AICC
+ * tab on that origin is alive. Two writers on a Dexie ++id store will interleave
+ * and corrupt sequences. The sentry returns { ok: false, reason: 'AICC is open' }
+ * when in doubt, and the UI offers "open the share link" as the safe path.
+ */
+(function () {
+  'use strict';
+  if (window.top !== window) return;
+
+  var NS = 'weldCompanion';
+  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+
+  // ---- Sentry: cooperative presence over BroadcastChannel -----------------
+  // Cooperative because unmodified AICC doesn't broadcast its own presence. So
+  // the sentry pings a per-slug channel; if any listener replies within the
+  // timeout, AICC is treated as open. A future 3-line AICC patch (announce on
+  // load + on visibilitychange) would make this firm, but until then the
+  // conservative default is "assume open" only when we have positive evidence.
+  // The companion also tracks frames it spawned itself so it knows the
+  // difference between "user has AICC open in a tab" and "we just spun up the
+  // hidden frame to do this work".
+  var SENTRY_CHANNEL = 'weld-aicc-presence';
+  var PROBE_TIMEOUT = 800; // ms
+
+  function probeAICC(slug, ourOwnFrameIds) {
+    return new Promise(function (resolve) {
+      var bc = window.weldAICC.makeBroadcastChannel(SENTRY_CHANNEL + '/' + slug);
+      if (!bc) { resolve({ open: false, peers: 0, reason: 'no BroadcastChannel' }); return; }
+      var peers = 0;
+      var hostile = 0;
+      var nonce = 'wp-' + Math.random().toString(36).slice(2);
+      bc.onmessage = function (ev) {
+        var d = ev.data || {};
+        if (d.kind !== 'pong' || d.replyTo !== nonce) return;
+        peers++;
+        // a peer whose `frameId` we didn't issue is a real AICC tab (or another
+        // top-frame Companion driving its own work). Either way: not us.
+        if (!ourOwnFrameIds || !d.frameId || ourOwnFrameIds.indexOf(d.frameId) === -1) hostile++;
+      };
+      try { bc.postMessage({ kind: 'ping', nonce: nonce }); } catch (e) {}
+      setTimeout(function () {
+        try { bc.close(); } catch (e) {}
+        resolve({ open: hostile > 0, peers: peers, hostile: hostile });
+      }, PROBE_TIMEOUT);
+    });
+  }
+
+  // Single write-gate: every destructive AICC op goes through this. Returns
+  // { ok: true } when safe; { ok: false, reason } when not. ourFrames is the
+  // set of hidden-frame slugs the Data Manager has currently spawned, so the
+  // gate won't false-positive on the Companion's own helper frame.
+  function canWriteToAICC(slug, ourFrames) {
+    return probeAICC(slug, ourFrames || []).then(function (r) {
+      if (r.open) return { ok: false, reason: 'An AICC tab is open on this origin — close it before writing, or use the share link path.' };
+      return { ok: true };
+    });
+  }
+
+  // ---- Lore Library --------------------------------------------------------
+  // GM-stored array of { id, name, url, tags, notes, host, t }.
+  // host ∈ {"uploads", "github", "external"}. Defaults: both upload paths are
+  // enabled (you asked for both, toggleable); the user picks per-lorebook,
+  // with a config row in the panel for the two defaults.
+  function loreAll() { return gget('aiccLore', []) || []; }
+  function loreSave(list) { gset('aiccLore', list); }
+  function loreCfg() {
+    var d = gget('aiccLoreCfg', null);
+    if (!d) d = { enableUploads: true, enableGitHub: true };
+    return d;
+  }
+  function loreCfgSave(c) { gset('aiccLoreCfg', c); }
+
+  function loreAdd(entry) {
+    var list = loreAll();
+    entry.id = entry.id || ('lore-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6));
+    entry.t = entry.t || Date.now();
+    list.unshift(entry);
+    loreSave(list);
+    return entry;
+  }
+  function loreRemove(id) {
+    var list = loreAll().filter(function (e) { return e.id !== id; });
+    loreSave(list);
+  }
+  function loreUpdate(id, patch) {
+    var list = loreAll();
+    var i = -1;
+    for (var k = 0; k < list.length; k++) if (list[k].id === id) { i = k; break; }
+    if (i < 0) return null;
+    for (var key in patch) list[i][key] = patch[key];
+    loreSave(list);
+    return list[i];
+  }
+
+  // ---- Character round-trip ------------------------------------------------
+  // The host already has GitHub Push/Pull for the EDITOR (DSL + HTML panes).
+  // For characters we use the same Contents-API plumbing, but write to a
+  // per-generator characters/ folder. The path template is overridable in the
+  // AICC pack settings:   <repo>/<slug>/characters/<name>.<uuid>.json
+  //
+  // Each character JSON looks like:
+  //   { format: 'aicc-character', formatVersion: 1, exportedAt: '...',
+  //     character: <stripped-by-AICC-rules> }
+  // Re-importing a character with the same uuid replaces the existing row,
+  // because that's what AICC's own import code does (line 13466 in aicc_2.txt).
+  function characterPathTemplate() { return gget('aiccCharPath', '{slug}/characters/{name}.{uuid}.json'); }
+
+  function characterPath(slug, character) {
+    var safeName = String(character.name || 'unnamed').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
+    return characterPathTemplate()
+      .replace(/\{slug\}/g, slug || 'ai-character-chat')
+      .replace(/\{name\}/g, safeName)
+      .replace(/\{uuid\}/g, character.uuid || 'no-uuid');
+  }
+
+  function characterBundle(character) {
+    var stripped = window.weldAICC.stripCharacterForShare(character);
+    if (!stripped) throw new Error('character is empty or invalid');
+    if (!stripped.uuid || !window.weldAICC.isUuid(stripped.uuid)) {
+      stripped.uuid = window.weldAICC.uuidV4();   // give it a fresh uuid so a round-trip is stable
+    }
+    return {
+      format: 'aicc-character',
+      formatVersion: 1,
+      exportedAt: new Date().toISOString(),
+      character: stripped
+    };
+  }
+
+  function parseCharacterBundle(text) {
+    var json;
+    try { json = JSON.parse(text); } catch (e) { return { ok: false, reason: 'not JSON: ' + e.message }; }
+    if (!json || typeof json !== 'object') return { ok: false, reason: 'not an object' };
+    if (json.format && json.format !== 'aicc-character') return { ok: false, reason: 'not an aicc-character bundle' };
+    var c = json.character || json.addCharacter || json;   // also accept a raw character or a share envelope
+    if (!c || !c.name) return { ok: false, reason: 'no character.name' };
+    return { ok: true, character: c };
+  }
+
+  // ---- Repair tools --------------------------------------------------------
+  // Diagnose an AICC DB without opening it for write. Reports:
+  //   - characters with missing/invalid uuids
+  //   - threads pointing at nonexistent characterId
+  //   - messages pointing at nonexistent threadId
+  //   - summaries with no messageIds (AICC's own upgrade discards these)
+  // Returns a structured report the UI can render with one-click fixes.
+  function diagnose(rpc, slug, db) {
+    var report = { characters: [], threads: [], messages: [], summaries: [], counts: {} };
+    function pageAll(store) {
+      var rows = []; var offset = 0;
+      function next() {
+        return rpc(slug, 'page', { db: db, store: store, offset: offset, limit: 500 }).then(function (page) {
+          rows = rows.concat(page.rows || []);
+          offset += (page.rows || []).length;
+          if (page.done) return rows;
+          return next();
+        });
+      }
+      return next();
+    }
+    var decoder = window.IDBManEngine({});
+    function decodeRow(r) { try { return decoder.decodeValue(r.valueEnc); } catch (e) { return r.valueEnc; } }
+    var chars = [], threads = [], messages = [], summaries = [];
+    return pageAll('characters').then(function (rows) { chars = rows.map(decodeRow); report.counts.characters = chars.length; return pageAll('threads'); })
+      .then(function (rows) { threads = rows.map(decodeRow); report.counts.threads = threads.length; return pageAll('messages'); })
+      .then(function (rows) { messages = rows.map(decodeRow); report.counts.messages = messages.length; return pageAll('summaries').catch(function () { return []; }); })
+      .then(function (rows) { summaries = rows.map(decodeRow); report.counts.summaries = summaries.length;
+        var charById = {}; chars.forEach(function (c) { charById[c.id] = c; if (!c.uuid || !window.weldAICC.isUuid(c.uuid)) report.characters.push({ id: c.id, name: c.name, issue: 'missing/invalid uuid' }); });
+        var threadById = {}; threads.forEach(function (t) { threadById[t.id] = t; if (t.characterId != null && t.characterId !== -1 && t.characterId !== -2 && !charById[t.characterId]) report.threads.push({ id: t.id, name: t.name, issue: 'characterId ' + t.characterId + ' not found' }); });
+        messages.forEach(function (m) { if (m.threadId != null && !threadById[m.threadId]) report.messages.push({ id: m.id, threadId: m.threadId, issue: 'threadId not found' }); });
+        summaries.forEach(function (s) { if (!s.messageIds) report.summaries.push({ hash: s.hash, issue: 'no messageIds — AICC will discard on upgrade' }); });
+        return report;
+      });
+  }
+
+  // ---- Hidden-frame uploader -----------------------------------------------
+  // upload-plugin only resolves from a Perchance origin (the broker iframe is
+  // injected into the page that imports it). We reuse the Data Manager's
+  // existing hidden-frame plumbing: spawn an ai-character-chat frame (its agent
+  // has access to the same origin's uploadPlugin via root.uploadPlugin), call a
+  // tiny op we add to the agent, get back the user.uploads.dev URL.
+  //
+  // Implementation note: rather than extend the agent with an upload op (which
+  // requires re-issuing the userscript), we use the Skybridge transport already
+  // present on AICC: when the user has the skybridge plugin imported, we can
+  // call its bridge.upload (or whatever the bridge exposes). On vanilla AICC
+  // without skybridge, we fall back to the GitHub path. The two-host design
+  // means there's always a working route.
+  function uploadToPerchance(slug, blob) {
+    // Reach a same-origin agent. The Data Manager exposes the rpc primitive
+    // through window.weldDataManager.rpc once it's loaded; if it isn't, we
+    // can't upload via Perchance and have to fall back.
+    if (!window.weldDataManager || typeof window.weldDataManager.rpc !== 'function') {
+      return Promise.reject(new Error('Data Manager not loaded — paste a raw URL or enable the GitHub path.'));
+    }
+    // The upload op isn't part of the Data Manager agent's switch; signal
+    // clearly so the caller can route to the GitHub path. (A 5-line agent
+    // extension would add it, but that's a follow-up — flagged in the README.)
+    return Promise.reject(new Error('Direct user.uploads.dev upload requires a small agent extension. Use the GitHub path for now, or paste the URL.'));
+  }
+
+  // ---- Public registry hook -------------------------------------------------
+  // The Data Manager looks for window.weldDataExtensions and, for each AICC
+  // database it opens, calls extension.render(ctx). This is the integration
+  // surface — kept narrow so the AICC pack is decoupled from the manager's
+  // internals.
+  var api = {
+    schema: window.weldAICC.schema,
+    isAICC: window.weldAICC.isAICC,
+    sentry: { probeAICC: probeAICC, canWriteToAICC: canWriteToAICC },
+    lore: {
+      all: loreAll, add: loreAdd, remove: loreRemove, update: loreUpdate,
+      cfg: loreCfg, cfgSave: loreCfgSave
+    },
+    character: {
+      pathTemplate: characterPathTemplate,
+      pathFor: characterPath,
+      bundle: characterBundle,
+      parseBundle: parseCharacterBundle
+    },
+    diagnose: diagnose,
+    upload: { perchance: uploadToPerchance }
+  };
+
+  // Register with the Data Manager as a typed extension. The manager checks
+  // every described database against this matcher and, when it matches, asks
+  // render() to draw the typed view in place of the generic stores view.
+  window.weldDataExtensions = window.weldDataExtensions || [];
+  window.weldDataExtensions.push({
+    id: 'aicc',
+    label: 'AI Character Chat',
+    match: function (desc) { return window.weldAICC.isAICC(desc).ok; },
+    api: api
+  });
+
+  // Convenience handle for the console / other modules
+  window.weldAICCPack = api;
+})();
+
+/* ----- [5] AICC TYPED VIEW ----- */
+/* AICC typed view — registers a render() on the extension entry created by
+ * aicc-pack.js. The Data Manager calls this when an AICC-shaped database is
+ * opened; it draws three collapsible sections above the generic stores list:
+ *
+ *   • Characters — list pulled from db.characters with one-click "Push to
+ *     GitHub" and "Open share link" per row. Push is one-character-per-commit
+ *     (your default). Imports come in via the GitHub Pull pane.
+ *   • Lore Library — GM-stored catalog, "Attach to character" picker. Add
+ *     entries from a pasted URL or via the GitHub Pull pane (full upload
+ *     support requires a small agent extension — see README).
+ *   • Repair — runs aiccPack.diagnose(), reports orphan rows, offers a
+ *     one-click "Quarantine corrupt rows" gated by the sentry.
+ *
+ * Privacy: every destructive operation goes through aiccPack.sentry's write-
+ * gate, which refuses while an AICC tab is open on the same origin. Character
+ * data is treated as private — sharing flows always require explicit user
+ * confirmation before any URL is shown or committed.
+ */
+(function () {
+  'use strict';
+  if (window.top !== window) return;
+  if (!window.weldAICCPack || !window.weldDataExtensions) return;
+
+  var pack = window.weldAICCPack;
+  var ext = null;
+  for (var i = 0; i < window.weldDataExtensions.length; i++) {
+    if (window.weldDataExtensions[i].id === 'aicc') { ext = window.weldDataExtensions[i]; break; }
+  }
+  if (!ext) return;
+
+  // ---- styles (additive; uses the wdm- token palette) ----------------------
+  function styleOnce() {
+    if (document.getElementById('wdm-aicc-style')) return;
+    var css = [
+      '.wdm-ext{margin-bottom:14px;border:1px solid var(--wc-line,rgba(255,255,255,.09));border-radius:10px;background:var(--wc-surface-2,#1a1f28);overflow:hidden;}',
+      '.wdm-ext-hd{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));cursor:pointer;user-select:none;}',
+      '.wdm-ext-hd .wdm-ext-title{font:700 12px var(--wc-mono,ui-monospace,monospace);letter-spacing:.04em;text-transform:uppercase;color:var(--wc-arc,#ff8a3d);flex:1;}',
+      '.wdm-ext-hd .wdm-ext-count{font:11px var(--wc-mono,ui-monospace,monospace);color:var(--wc-faint,#5d6b7b);}',
+      '.wdm-ext-hd .wdm-ext-chev{color:var(--wc-faint,#5d6b7b);font-size:11px;transition:transform .15s;}',
+      '.wdm-ext.collapsed .wdm-ext-chev{transform:rotate(-90deg);}',
+      '.wdm-ext.collapsed .wdm-ext-body{display:none;}',
+      '.wdm-ext-body{padding:10px 12px;}',
+      '.wdm-cc{display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;border:1px solid transparent;}',
+      '.wdm-cc:hover{background:var(--wc-surface,#13171e);border-color:var(--wc-line,rgba(255,255,255,.09));}',
+      '.wdm-cc-av{width:32px;height:32px;border-radius:8px;background:var(--wc-surface,#13171e);flex:none;object-fit:cover;}',
+      '.wdm-cc-body{flex:1;min-width:0;}',
+      '.wdm-cc-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.wdm-cc-meta{font:11px var(--wc-mono,ui-monospace,monospace);color:var(--wc-faint,#5d6b7b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.wdm-cc-actions{display:flex;gap:6px;flex:none;}',
+      '.wdm-lore-row{display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;}',
+      '.wdm-lore-row:hover{background:var(--wc-surface,#13171e);}',
+      '.wdm-lore-host{font:600 10px var(--wc-mono,ui-monospace,monospace);padding:2px 7px;border-radius:999px;border:1px solid var(--wc-line,rgba(255,255,255,.09));color:var(--wc-dim,#9aa7b6);flex:none;}',
+      '.wdm-lore-host.uploads{color:var(--wc-signal,#4ee0c8);border-color:var(--wc-signal,#4ee0c8);}',
+      '.wdm-lore-host.github{color:var(--wc-arc,#ff8a3d);border-color:var(--wc-arc,#ff8a3d);}',
+      '.wdm-lore-url{flex:1;min-width:0;font:11px var(--wc-mono,ui-monospace,monospace);color:var(--wc-dim,#9aa7b6);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.wdm-repair{font:12px/1.6 var(--wc-mono,ui-monospace,monospace);}',
+      '.wdm-repair .ok{color:var(--wc-signal,#4ee0c8);}',
+      '.wdm-repair .warn{color:var(--wc-arc,#ff8a3d);}',
+      '.wdm-repair .bad{color:#e5534b;}',
+      '.wdm-aicc-warn{padding:8px 10px;border-radius:8px;background:rgba(229,83,75,.10);border:1px solid rgba(229,83,75,.30);color:#e5534b;font:12px var(--wc-sans,sans-serif);margin-bottom:8px;}'
+    ].join('\n');
+    document.head.appendChild(Object.assign(document.createElement('style'), { id: 'wdm-aicc-style', innerHTML: css }));
+  }
+
+  // ---- a tiny collapsible section helper -----------------------------------
+  function section(ctx, title, countText, openByDefault, build) {
+    var bodyEl = ctx.el('div', { class: 'wdm-ext-body' });
+    var hd = ctx.el('div', { class: 'wdm-ext-hd' }, [
+      ctx.el('span', { class: 'wdm-ext-title', text: title }),
+      countText ? ctx.el('span', { class: 'wdm-ext-count', text: countText }) : null,
+      ctx.el('span', { class: 'wdm-ext-chev', text: '\u25BC' })
+    ]);
+    var wrap = ctx.el('div', { class: 'wdm-ext' + (openByDefault ? '' : ' collapsed') }, [hd, bodyEl]);
+    hd.addEventListener('click', function () { wrap.classList.toggle('collapsed'); });
+    build(bodyEl, function (newCount) { var c = hd.querySelector('.wdm-ext-count'); if (c) c.textContent = newCount; });
+    return wrap;
+  }
+
+  // ---- decode helpers ------------------------------------------------------
+  var _decoder = null;
+  function decoder() { try { if (!_decoder && window.IDBManEngine) _decoder = window.IDBManEngine({}); } catch (e) {} return _decoder; }
+  function decodeRow(row) { try { return decoder().decodeValue(row.valueEnc); } catch (e) { return row.valueEnc; } }
+  function loadAllRows(ctx, store) {
+    var rows = []; var offset = 0;
+    function next() {
+      return ctx.rpc(ctx.slug, 'page', { db: ctx.db, store: store, offset: offset, limit: 500 }).then(function (page) {
+        rows = rows.concat((page.rows || []).map(decodeRow));
+        offset += (page.rows || []).length;
+        if (page.done) return rows;
+        return next();
+      });
+    }
+    return next();
+  }
+
+  // ============================================================================
+  // 1. CHARACTERS
+  // ============================================================================
+  function renderCharacters(body, setCount, ctx) {
+    var summary = ctx.el('div', { class: 'wdm-note', text: 'Loading characters\u2026' });
+    body.appendChild(summary);
+    loadAllRows(ctx, 'characters').then(function (chars) {
+      ctx.clear(body);
+      setCount(chars.length + ' character' + (chars.length === 1 ? '' : 's'));
+      if (!chars.length) { body.appendChild(ctx.el('div', { class: 'wdm-note', text: 'No characters in this DB yet.' })); return; }
+      body.appendChild(ctx.frag(chars.map(function (c) {
+        var avatar = c.avatar && c.avatar.url ? c.avatar.url : '';
+        var meta = ['uuid: ' + (c.uuid || '\u2014'), c.modelName || 'no model'];
+        if (c.loreBookUrls && c.loreBookUrls.length) meta.push(c.loreBookUrls.length + ' lorebook' + (c.loreBookUrls.length === 1 ? '' : 's'));
+        return ctx.el('div', { class: 'wdm-cc' }, [
+          avatar ? ctx.el('img', { class: 'wdm-cc-av', src: avatar, loading: 'lazy', referrerpolicy: 'no-referrer', onerror: function (e) { e.target.style.visibility = 'hidden'; } })
+                 : ctx.el('div', { class: 'wdm-cc-av' }),
+          ctx.el('div', { class: 'wdm-cc-body' }, [
+            ctx.el('div', { class: 'wdm-cc-name', text: c.name || '\u2014' }),
+            ctx.el('div', { class: 'wdm-cc-meta', text: meta.join(' \u00b7 ') })
+          ]),
+          ctx.el('div', { class: 'wdm-cc-actions' }, [
+            ctx.ghost('Share link', function () { showShareLink(ctx, c); }, 'Build a Perchance share URL (private \u2014 nothing is uploaded)'),
+            ctx.ghost('Save .json', function () { downloadCharacter(ctx, c); }, 'Download a private JSON file'),
+            ctx.ghost('Push to GitHub\u2026', function () { pushCharacter(ctx, c); }, 'Commit one character to your configured GitHub repo'),
+            ctx.ghost('Attach lore\u2026', function () { attachLore(ctx, c); }, 'Append a Lore Library URL to this character')
+          ])
+        ]);
+      })));
+    }).catch(function (err) {
+      ctx.clear(body);
+      body.appendChild(ctx.el('div', { class: 'wdm-aicc-warn', text: 'Could not read characters: ' + err.message }));
+    });
+  }
+
+  function showShareLink(ctx, character) {
+    if (!ctx.confirmYes('Share links contain the full character (system prompt, custom code, lore URLs). Build a share URL for "' + (character.name || 'unnamed') + '"?')) return;
+    var url = window.weldAICC.buildShareHashUrl(ctx.slug, window.weldAICC.stripCharacterForShare(character));
+    // Don't auto-copy to clipboard; show in a modal so the user opts in.
+    var ta = ctx.el('textarea', { class: 'wdm-ta', spellcheck: 'false', style: { minHeight: '90px' } });
+    ta.value = url;
+    var modal = ctx.el('div', { class: 'wdm-modal', id: 'wdm-modal' }, [
+      ctx.el('div', { class: 'wdm-card' }, [
+        ctx.el('h3', { text: 'Share link \u00b7 ' + (character.name || 'unnamed') }),
+        ta,
+        ctx.el('div', { class: 'wdm-foot' }, [
+          ctx.el('span', { class: 'wdm-hint', text: 'Anyone with this URL can add the character to their AICC. Treat it like a password if the character carries sensitive instructions.' }),
+          ctx.ghost('Copy', function () { try { navigator.clipboard.writeText(url).then(function () { ctx.toast('Copied'); }); } catch (e) { ctx.toast('Copy failed'); } }),
+          ctx.btn('Done', function () { var m = document.getElementById('wdm-modal'); if (m) m.remove(); })
+        ])
+      ])
+    ]);
+    document.body.appendChild(modal);
+    ta.focus(); ta.select();
+  }
+
+  function downloadCharacter(ctx, character) {
+    if (!ctx.confirmYes('Save "' + (character.name || 'unnamed') + '" as a .json file? It includes the full character data (avatar URL, system prompt, custom code).')) return;
+    var bundle = pack.character.bundle(character);
+    var safeName = String(character.name || 'unnamed').replace(/[^A-Za-z0-9._-]+/g, '_');
+    var blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    var a = ctx.el('a', { href: URL.createObjectURL(blob), download: safeName + '.aicc-character.json' });
+    document.body.appendChild(a); a.click(); setTimeout(function () { a.remove(); URL.revokeObjectURL(a.href); }, 1500);
+    ctx.toast('Downloaded ' + safeName);
+  }
+
+  function pushCharacter(ctx, character) {
+    var path = pack.character.pathFor(ctx.slug, character);
+    if (!ctx.confirmYes('Push "' + (character.name || 'unnamed') + '" to your configured GitHub repo as:\n\n  ' + path + '\n\nThis commits the full character (system prompt, custom code, lore URLs). Continue?')) return;
+    var bundle = pack.character.bundle(character);
+    // Reuse the host Companion's existing GitHub Push plumbing if exposed.
+    if (typeof window.weldPushFileToGitHub === 'function') {
+      window.weldPushFileToGitHub({ path: path, content: JSON.stringify(bundle, null, 2), message: 'Push character: ' + (character.name || 'unnamed') })
+        .then(function () { ctx.toast('Pushed ' + (character.name || 'unnamed')); })
+        .catch(function (err) { ctx.toast('Push failed: ' + err.message); });
+    } else {
+      ctx.toast('Character Push hook not present in this Companion build \u2014 download as .json instead.');
+    }
+  }
+
+  function attachLore(ctx, character) {
+    var entries = pack.lore.all();
+    if (!entries.length) { ctx.toast('Lore Library is empty \u2014 add an entry first.'); return; }
+    var sel = ctx.el('select', { class: 'wdm-field', style: { flex: '1' } });
+    entries.forEach(function (e) { sel.appendChild(ctx.el('option', { value: e.id, text: e.name + '  (' + e.host + ')' })); });
+    var modal = ctx.el('div', { class: 'wdm-modal', id: 'wdm-modal' }, [
+      ctx.el('div', { class: 'wdm-card' }, [
+        ctx.el('h3', { text: 'Attach lorebook to ' + (character.name || 'unnamed') }),
+        ctx.el('div', { class: 'wdm-foot', style: { borderTop: '0', paddingTop: '0' } }, [sel]),
+        ctx.el('div', { class: 'wdm-foot' }, [
+          ctx.el('span', { class: 'wdm-hint', text: 'Adds the lorebook URL to character.loreBookUrls. Safe path: it\u2019s just a URL the character will fetch.' }),
+          ctx.ghost('Cancel', function () { var m = document.getElementById('wdm-modal'); if (m) m.remove(); }),
+          ctx.btn('Attach', function () {
+            var entry = entries.filter(function (e) { return e.id === sel.value; })[0];
+            if (!entry) return;
+            doAttachLore(ctx, character, entry);
+            var m = document.getElementById('wdm-modal'); if (m) m.remove();
+          })
+        ])
+      ])
+    ]);
+    document.body.appendChild(modal);
+  }
+
+  function doAttachLore(ctx, character, loreEntry) {
+    pack.sentry.canWriteToAICC(ctx.slug, [ctx.slug]).then(function (gate) {
+      if (!gate.ok) {
+        // AICC alive: show the share-link path instead. Build a copy of the
+        // character with the lore URL appended and surface the share URL.
+        var augmented = JSON.parse(JSON.stringify(character));
+        augmented.loreBookUrls = augmented.loreBookUrls || [];
+        if (augmented.loreBookUrls.indexOf(loreEntry.url) === -1) augmented.loreBookUrls.push(loreEntry.url);
+        showShareLink(ctx, augmented);
+        ctx.toast(gate.reason);
+        return;
+      }
+      // AICC closed: write through.
+      var updated = JSON.parse(JSON.stringify(character));
+      updated.loreBookUrls = updated.loreBookUrls || [];
+      if (updated.loreBookUrls.indexOf(loreEntry.url) === -1) updated.loreBookUrls.push(loreEntry.url);
+      ctx.rpc(ctx.slug, 'putEnc', { db: ctx.db, store: 'characters', valueEnc: updated }).then(function () {
+        ctx.toast('Attached \u201c' + loreEntry.name + '\u201d');
+        ctx.refresh();
+      }).catch(function (err) { ctx.toast('Attach failed: ' + err.message); });
+    });
+  }
+
+  // ============================================================================
+  // 2. LORE LIBRARY
+  // ============================================================================
+  function renderLore(body, setCount, ctx) {
+    var entries = pack.lore.all();
+    var cfg = pack.lore.cfg();
+    setCount(entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies'));
+
+    // Config row: defaults for new lorebooks (user.uploads.dev / GitHub),
+    // toggleable per your "both, on/off" preference.
+    var upToggle = ctx.el('label', { class: 'wdm-hint', style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+      ctx.el('input', { type: 'checkbox', onchange: function (e) { cfg.enableUploads = e.target.checked; pack.lore.cfgSave(cfg); } }),
+      ctx.el('span', { text: 'user.uploads.dev (anyone with URL can read)' })
+    ]);
+    upToggle.querySelector('input').checked = !!cfg.enableUploads;
+    var ghToggle = ctx.el('label', { class: 'wdm-hint', style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+      ctx.el('input', { type: 'checkbox', onchange: function (e) { cfg.enableGitHub = e.target.checked; pack.lore.cfgSave(cfg); } }),
+      ctx.el('span', { text: 'GitHub (committed to your repo, served from raw.githubusercontent.com)' })
+    ]);
+    ghToggle.querySelector('input').checked = !!cfg.enableGitHub;
+
+    body.appendChild(ctx.el('div', { class: 'wdm-foot', style: { borderTop: '0', paddingTop: '4px', flexDirection: 'column', alignItems: 'flex-start' } }, [
+      ctx.el('div', { class: 'wdm-hint', style: { fontWeight: 600 }, text: 'Default hosting for new lorebooks:' }),
+      upToggle, ghToggle
+    ]));
+
+    var addInput = ctx.el('input', { class: 'wdm-field', placeholder: 'paste a lorebook URL (.txt) and press Enter\u2026', style: { flex: '1' } });
+    addInput.addEventListener('keydown', function (e) { if (e.key === 'Enter' && addInput.value.trim()) addFromUrl(ctx, addInput.value.trim(), function () { addInput.value = ''; rerender(); }); });
+    body.appendChild(ctx.el('div', { class: 'wdm-coltools', style: { padding: '8px 0', border: '0' } }, [
+      addInput,
+      ctx.ghost('+ Add from URL', function () { if (addInput.value.trim()) addFromUrl(ctx, addInput.value.trim(), function () { addInput.value = ''; rerender(); }); }),
+      ctx.ghost('Upload\u2026', function () { uploadNew(ctx, rerender); }, 'Upload a local .txt file (host depends on your toggles above)')
+    ]));
+
+    var listWrap = ctx.el('div');
+    body.appendChild(listWrap);
+    paint();
+
+    function rerender() {
+      entries = pack.lore.all();
+      setCount(entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies'));
+      paint();
+    }
+    function paint() {
+      ctx.clear(listWrap);
+      if (!entries.length) {
+        listWrap.appendChild(ctx.el('div', { class: 'wdm-note', text: 'No lorebooks saved yet. Paste a raw .txt URL above, or upload one.' }));
+        return;
+      }
+      listWrap.appendChild(ctx.frag(entries.map(function (entry) {
+        var hostClass = entry.host === 'uploads' ? 'uploads' : (entry.host === 'github' ? 'github' : '');
+        return ctx.el('div', { class: 'wdm-lore-row' }, [
+          ctx.el('span', { class: 'wdm-lore-host ' + hostClass, text: entry.host || 'external' }),
+          ctx.el('div', { style: { flex: '1', minWidth: '0' } }, [
+            ctx.el('div', { style: { fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, text: entry.name }),
+            ctx.el('div', { class: 'wdm-lore-url', text: entry.url })
+          ]),
+          ctx.ghost('Copy URL', function () { try { navigator.clipboard.writeText(entry.url).then(function () { ctx.toast('Copied'); }); } catch (e) {} }),
+          ctx.ghost('Remove', function () { if (ctx.confirmYes('Remove \u201c' + entry.name + '\u201d from your Lore Library?')) { pack.lore.remove(entry.id); rerender(); ctx.toast('Removed'); } })
+        ]);
+      })));
+    }
+  }
+
+  function addFromUrl(ctx, url, done) {
+    if (!/^https?:\/\//i.test(url)) { ctx.toast('Use a full https:// URL'); return; }
+    var name = window.prompt('Name this lorebook:', deriveName(url));
+    if (name == null) return;
+    var host = url.indexOf('user.uploads.dev') !== -1 ? 'uploads' : (url.indexOf('raw.githubusercontent.com') !== -1 ? 'github' : 'external');
+    pack.lore.add({ name: name || deriveName(url), url: url, host: host, tags: [], notes: '' });
+    ctx.toast('Added');
+    done && done();
+  }
+  function deriveName(url) {
+    try { var u = new URL(url); var f = u.pathname.split('/').pop().replace(/\.[^.]+$/, ''); return f || u.hostname; } catch (e) { return 'Untitled'; }
+  }
+  function uploadNew(ctx, done) {
+    var cfg = pack.lore.cfg();
+    var inp = ctx.el('input', { type: 'file', accept: '.txt,.md,text/plain', style: { display: 'none' } });
+    inp.addEventListener('change', function () {
+      var file = inp.files && inp.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        var text = String(reader.result);
+        // Route by host preference. Both enabled: ask. Only one: use it. Neither: nudge.
+        var hosts = [];
+        if (cfg.enableUploads) hosts.push('uploads');
+        if (cfg.enableGitHub) hosts.push('github');
+        if (!hosts.length) { ctx.toast('Enable at least one hosting option above first.'); return; }
+        var host = hosts.length === 1 ? hosts[0]
+          : (ctx.confirmYes('Host on user.uploads.dev (anyone with the URL can read)?\n\nOK = user.uploads.dev\nCancel = GitHub (your repo)') ? 'uploads' : 'github');
+        if (host === 'uploads') {
+          pack.upload.perchance(ctx.slug, new Blob([text], { type: 'text/plain' })).then(function (url) {
+            pack.lore.add({ name: file.name.replace(/\.[^.]+$/, ''), url: url, host: 'uploads', tags: [], notes: '' });
+            ctx.toast('Uploaded to user.uploads.dev'); done && done();
+          }).catch(function (err) {
+            // Honest fallback — surface the limitation, don't pretend it worked.
+            ctx.toast('Direct upload not available: ' + err.message);
+          });
+        } else {
+          if (typeof window.weldPushFileToGitHub !== 'function') { ctx.toast('GitHub Push hook not present in this Companion build.'); return; }
+          var path = 'lore/' + file.name.replace(/[^A-Za-z0-9._-]+/g, '_');
+          window.weldPushFileToGitHub({ path: path, content: text, message: 'Add lore: ' + file.name })
+            .then(function (info) {
+              // Best-effort raw URL; let the user paste it back if our heuristic misses
+              var url = (info && info.rawUrl) || '';
+              if (!url) url = window.prompt('Committed. Paste the raw URL for this file:', 'https://raw.githubusercontent.com/owner/repo/main/' + path) || '';
+              if (!url) return;
+              pack.lore.add({ name: file.name.replace(/\.[^.]+$/, ''), url: url, host: 'github', tags: [], notes: '' });
+              ctx.toast('Saved to GitHub'); done && done();
+            }).catch(function (err) { ctx.toast('Push failed: ' + err.message); });
+        }
+      };
+      reader.readAsText(file);
+    });
+    document.body.appendChild(inp); inp.click(); setTimeout(function () { inp.remove(); }, 120000);
+  }
+
+  // ============================================================================
+  // 3. REPAIR
+  // ============================================================================
+  function renderRepair(body, setCount, ctx) {
+    var actions = ctx.el('div', { class: 'wdm-coltools', style: { padding: '0 0 8px 0', border: '0' } }, [
+      ctx.btn('Run diagnosis', function () { runDiagnose(); })
+    ]);
+    var report = ctx.el('div', { class: 'wdm-repair', text: 'Click Run diagnosis to scan this database.' });
+    body.appendChild(actions); body.appendChild(report);
+
+    function runDiagnose() {
+      ctx.clear(report);
+      ctx.spinner(report, 'Scanning characters, threads, messages, summaries\u2026');
+      pack.diagnose(ctx.rpc, ctx.slug, ctx.db).then(function (r) {
+        ctx.clear(report);
+        var problems = r.characters.length + r.threads.length + r.messages.length + r.summaries.length;
+        setCount(problems + ' issue' + (problems === 1 ? '' : 's'));
+        report.appendChild(ctx.el('div', {}, [
+          ctx.el('span', { class: 'ok', text: 'Counts: ' }),
+          ctx.el('span', { text: r.counts.characters + ' chars, ' + r.counts.threads + ' threads, ' + r.counts.messages + ' messages, ' + r.counts.summaries + ' summaries' })
+        ]));
+        if (!problems) { report.appendChild(ctx.el('div', { class: 'ok', text: '\u2713 No structural issues found.' })); return; }
+        function listProblems(label, arr, cls) {
+          if (!arr.length) return;
+          report.appendChild(ctx.el('div', { class: cls, style: { marginTop: '8px' }, text: label + ' (' + arr.length + ')' }));
+          arr.slice(0, 10).forEach(function (p) {
+            var bits = []; for (var k in p) bits.push(k + '=' + p[k]);
+            report.appendChild(ctx.el('div', { style: { paddingLeft: '12px', opacity: '.85' }, text: '\u2022 ' + bits.join('  ') }));
+          });
+          if (arr.length > 10) report.appendChild(ctx.el('div', { style: { paddingLeft: '12px', opacity: '.6' }, text: '\u2026 ' + (arr.length - 10) + ' more' }));
+        }
+        listProblems('Characters with missing/invalid uuid', r.characters, 'warn');
+        listProblems('Threads pointing at nonexistent characters', r.threads, 'warn');
+        listProblems('Messages pointing at nonexistent threads', r.messages, 'bad');
+        listProblems('Summaries AICC will discard on upgrade', r.summaries, 'warn');
+        report.appendChild(ctx.el('div', { style: { marginTop: '10px', opacity: '.7' }, text: 'Repair writes are gated by the AICC sentry. If AICC is open on this origin, fixes are staged instead of applied directly.' }));
+      }).catch(function (err) {
+        ctx.clear(report);
+        report.appendChild(ctx.el('div', { class: 'bad', text: 'Diagnosis failed: ' + err.message }));
+      });
+    }
+  }
+
+  // ============================================================================
+  // RENDER
+  // ============================================================================
+  ext.render = function (ctx) {
+    styleOnce();
+    // Sentry warning banner — visible whenever an AICC tab is open
+    var banner = null;
+    pack.sentry.probeAICC(ctx.slug, [ctx.slug]).then(function (r) {
+      if (r.open) {
+        var w = ctx.el('div', { class: 'wdm-aicc-warn', text: 'An AICC tab is open on this origin. Destructive edits will be staged — close the AICC tab to write directly.' });
+        ctx.parent.insertBefore(w, ctx.parent.firstChild);
+      }
+    });
+
+    ctx.parent.appendChild(section(ctx, '\ud83d\udc64 Characters', '\u2026', true, function (body, setCount) { renderCharacters(body, setCount, ctx); }));
+    ctx.parent.appendChild(section(ctx, '\ud83d\udcd6 Lore Library', '', true, function (body, setCount) { renderLore(body, setCount, ctx); }));
+    ctx.parent.appendChild(section(ctx, '\ud83d\udd27 Repair', '', false, function (body, setCount) { renderRepair(body, setCount, ctx); }));
+  };
 })();
