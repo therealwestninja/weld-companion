@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.34.0
+// @version      1.36.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian, night light, read-aloud).
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -1756,9 +1756,35 @@
 
   // ============================================================ D. result tools (copy / save / pin / compare)
   function outputNode() {
-    return $('#output') || $('.generatorOutput') || $('[id*="output" i]') || null;
+    // The real result renders inside the cross-origin #outputIframeEl sandbox;
+    // the top page only holds Perchance chrome whose [id*="output"] wrappers
+    // contain inline scripts, an iframe, and the fullscreen/reload/warnings
+    // control strip. Skip non-content tags and chrome, and only accept a node
+    // whose text survives stripping — so plumbing can never pose as a result.
+    var list = [];
+    var a = $('#output'); if (a) list.push(a);
+    var b = $('.generatorOutput'); if (b) list.push(b);
+    document.querySelectorAll('[id*="output" i]').forEach(function (n) { if (list.indexOf(n) === -1) list.push(n); });
+    var chromeSel = 'script,style,noscript,template,iframe,'
+      + '[id*="fullscreen" i],[class*="fullscreen" i],[id*="reload" i],[class*="reload" i],'
+      + '[id*="warning" i],[class*="warning" i],[id*="control" i],[class*="control" i],'
+      + '[id*="toolbar" i],[class*="toolbar" i],[id*="spinner" i],[class*="spinner" i]';
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i];
+      var tag = (n.tagName || '').toUpperCase();
+      if (tag === 'IFRAME' || tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE' || tag === 'LINK') continue;
+      var clone = n.cloneNode(true);
+      var junk = clone.querySelectorAll(chromeSel);
+      for (var j = 0; j < junk.length; j++) { if (junk[j].parentNode) junk[j].parentNode.removeChild(junk[j]); }
+      var txt = (clone.innerText || clone.textContent || '').trim();
+      if (txt) { try { n.__wcCleanText = txt; } catch (e) {} return n; }
+    }
+    return null;
   }
-  function nodeToText(node) { return (node.innerText || node.textContent || '').trim(); }
+  function nodeToText(node) {
+    if (node && node.__wcCleanText) return node.__wcCleanText;
+    return (node.innerText || node.textContent || '').trim();
+  }
   function copyText(t) {
     try { navigator.clipboard.writeText(t); toast('Copied'); }
     catch (e) { var ta = el('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('Copied'); } catch (e2) { toast('Copy failed'); } ta.remove(); }
@@ -2544,7 +2570,7 @@
 
 /* =============================================================================
  * Weld Companion appended modules
- *  [1] IDB engine v1.3        [2] Data Manager v2.2
+ *  [1] IDB engine v1.3        [2] Data Manager v2.3 (pageText kind-aware, askWindow)
  *  [3] AICC core              [4] AICC pack (sentry, lore, recovery)
  *  [5] AICC typed view        [6] AICC tools (character files)
  *  [7] Story export core      [8] Library (scrapbook, stories, guardian)
@@ -3105,9 +3131,9 @@
   };
 });
 
-/* ----- [2] DATA MANAGER v2.2 ----- */
+/* ----- [2] DATA MANAGER v2.3 ----- */
 /* ============================================================================
- * Weld Companion — Data Manager v2.2  (federated IndexedDB / Dexie browser)
+ * Weld Companion — Data Manager v2.3  (federated IndexedDB / Dexie browser)
  * ----------------------------------------------------------------------------
  * Browse, edit, back up, export and import the IndexedDB databases stored by
  * every Perchance generator you've visited — full CRUD, organized by visited
@@ -3183,6 +3209,55 @@
           dump.name = a.as;
           return eng.importDatabase(dump, 'replace');
         });
+        case 'pageText': return (function () {
+          // The generator's rendered output lives inside this sandbox frame. The
+          // frame's <body> ALSO contains Perchance's own output-frame chrome
+          // (the fullscreen / warnings / reload / auto control strip), so a body
+          // read captures toolbar labels, not the result. Strategy:
+          //   1. Prefer a known content container, in priority order. AICC
+          //      renders into #messageFeed; classic generators use #output /
+          //      .generatorOutput / #root. A chat generator is reported as
+          //      kind:'chat' so the caller can point the user at Chat Stories
+          //      (the DB export is cleaner than any DOM scrape).
+          //   2. Never fall back to <body>. If nothing matches, return empty so
+          //      the caller can say "no output found" rather than emit chrome.
+          //   3. Strip scripts/styles/iframes AND remove any descendant that is
+          //      Perchance chrome (elements whose id/class mentions fullscreen,
+          //      reload, warning, controls, toolbar) before reading text.
+          try {
+            function cleanText(node) {
+              var clone = node.cloneNode(true);
+              var junk = clone.querySelectorAll('script,style,noscript,template,iframe,'
+                + '[id*="fullscreen" i],[class*="fullscreen" i],'
+                + '[id*="reload" i],[class*="reload" i],'
+                + '[id*="warning" i],[class*="warning" i],'
+                + '[id*="control" i],[class*="control" i],'
+                + '[id*="toolbar" i],[class*="toolbar" i],'
+                + '[id*="spinner" i],[class*="spinner" i]');
+              for (var i = 0; i < junk.length; i++) { if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]); }
+              return (clone.innerText || clone.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+            }
+            // AICC / chat-style: pull the visible message text directly.
+            var feed = document.querySelector('#messageFeed');
+            if (feed) {
+              var msgs = feed.querySelectorAll('.messageText, .message .messageWrap, .message');
+              var parts = [];
+              for (var k = 0; k < msgs.length; k++) {
+                var t = cleanText(msgs[k]);
+                if (t) parts.push(t);
+              }
+              var chatTxt = parts.join('\n\n').trim() || cleanText(feed);
+              return Promise.resolve({ text: chatTxt.slice(0, 200000), truncated: chatTxt.length > 200000, kind: 'chat' });
+            }
+            // Classic generator output containers, in priority order.
+            var sel = ['#output', '.generatorOutput', '.output', '#root', '#rootEl', 'main', '[role="main"]'];
+            var node = null;
+            for (var s = 0; s < sel.length; s++) { var c = document.querySelector(sel[s]); if (c) { node = c; break; } }
+            if (!node) return Promise.resolve({ text: '', truncated: false, kind: 'none' });
+            var txt = cleanText(node);
+            return Promise.resolve({ text: txt.slice(0, 200000), truncated: txt.length > 200000, kind: 'output' });
+          } catch (e) { return Promise.reject(new Error('pageText failed: ' + e.message)); }
+        })();
         case 'estimate': return (navigator.storage && navigator.storage.estimate)
           ? navigator.storage.estimate().then(function (e) { return { usage: e.usage || 0, quota: e.quota || 0 }; })
           : Promise.resolve(null);
@@ -3416,6 +3491,20 @@
         try { a.source.postMessage({ channel: CH, type: 'rpc', nonce: nonce, op: op, args: args || {} }, '*'); }
         catch (e) { clearTimeout(timer); delete pending[nonce]; reject(e); }
       });
+    });
+  }
+
+  // Ask a specific window (e.g. the visible generator iframe) instead of a
+  // slug-keyed hidden frame. Reuses the same nonce/pending mechanism, so the
+  // agent's rpcReply is matched exactly like any other call.
+  function askWindow(win, op, args, opTimeout) {
+    return new Promise(function (resolve, reject) {
+      if (!win) { reject(new Error('no target window')); return; }
+      var nonce = CH + ':' + (++seq) + ':' + Math.random().toString(36).slice(2);
+      var timer = setTimeout(function () { delete pending[nonce]; reject(new Error('Timed out: ' + op)); }, opTimeout || 8000);
+      pending[nonce] = { resolve: resolve, reject: reject, timer: timer };
+      try { win.postMessage({ channel: CH, type: 'rpc', nonce: nonce, op: op, args: args || {} }, '*'); }
+      catch (e) { clearTimeout(timer); delete pending[nonce]; reject(e); }
     });
   }
 
@@ -4198,7 +4287,7 @@
         if (!document.getElementById('wdm-root-panel')) { e.preventDefault(); open(); }
       }
     }, false);
-    var api = { open: open, renderTab: renderLaunch, sweep: sweepBackup, rpc: rpc, releaseFrame: releaseFrame };
+    var api = { open: open, renderTab: renderLaunch, sweep: sweepBackup, rpc: rpc, askWindow: askWindow, releaseFrame: releaseFrame };
     window.weldDataManager = api;
     try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.weldDataManager = api; } catch (e) {}
   }
@@ -5963,13 +6052,45 @@
   function notesAll() { return gget('genNotes', {}) || {}; }
   function noteSet(slug, text) { var n = notesAll(); if (text) n[slug] = text; else delete n[slug]; gset('genNotes', n); }
 
-  function saveCurrentOutput() {
+  // Perchance renders generator output inside a cross-origin sandbox iframe
+  // (#outputIframeEl) — the top page only holds Perchance's own chrome, so a
+  // top-frame DOM read can never see the real result. The agent already runs
+  // inside that visible frame (it announces on load), so we ask IT for the
+  // rendered text, targeting the visible window specifically so a hidden
+  // Data-Manager frame for the same slug can never shadow the on-screen roll.
+  function liveOutputResult() {
+    var dm = window.weldDataManager;
+    var iframe = document.querySelector('#outputIframeEl');
+    if (dm && typeof dm.askWindow === 'function' && iframe && iframe.contentWindow) {
+      return dm.askWindow(iframe.contentWindow, 'pageText', {}, 6000).catch(function () { return null; });
+    }
+    var slug = currentSlug();
+    if (dm && typeof dm.rpc === 'function' && slug) {
+      return dm.rpc(slug, 'pageText', {}, 8000).catch(function () { return null; });
+    }
+    return Promise.resolve(null);
+  }
+  // Returns { text, kind }. kind: 'chat' (AICC — steer to Chat stories),
+  // 'output' (classic generator), 'none' (nothing found), '' (top-frame hit).
+  function getOutputResult() {
     var h = hooks();
     var text = (typeof h.outputText === 'function') ? h.outputText() : '';
-    if (!text) { toast('No generator output found on this page'); return; }
-    var slug = currentSlug() || 'unknown';
-    var r = scrapAdd({ gen: slug, title: text.slice(0, 64).replace(/\s+/g, ' '), text: text, tags: [], note: '' });
-    toast('\u2713 Saved to Scrapbook' + (r.overflow ? ' (oldest entry rotated out \u2014 cap is ' + SCRAP_CAP + ')' : ''));
+    if (text) return Promise.resolve({ text: text, kind: 'output' });
+    return liveOutputResult().then(function (r) { return r || { text: '', kind: 'none' }; });
+  }
+  function saveCurrentOutput() {
+    return getOutputResult().then(function (res) {
+      if (res.kind === 'chat') {
+        toast('This is an AI Character Chat — use “Chat stories” below to save the whole conversation cleanly.', 4200);
+        return false;
+      }
+      var text = res.text;
+      if (!text) { toast('No generator output found on this page'); return false; }
+      var slug = currentSlug() || 'unknown';
+      var r = scrapAdd({ gen: slug, title: text.slice(0, 64).replace(/\s+/g, ' '), text: text, tags: [], note: '' });
+      toast('\u2713 Saved to Scrapbook' + (r.overflow ? ' (oldest entry rotated out \u2014 cap is ' + SCRAP_CAP + ')' : ''));
+      return true;
+    });
   }
 
   function renderScrapbook(bd, setCount) {
@@ -5979,7 +6100,7 @@
     search.addEventListener('input', function () { query = search.value.toLowerCase(); paint(); });
     bd.appendChild(el('div', { class: 'wlib-bar' }, [
       search,
-      el('button', { class: 'wlib-mini', text: '\u2913 Save current output', title: 'Save the open generator\u2019s current result to the Scrapbook', onclick: function () { saveCurrentOutput(); paint(); } }),
+      el('button', { class: 'wlib-mini', text: '\u2913 Save current output', title: 'Save the open generator\u2019s current result to the Scrapbook', onclick: function () { saveCurrentOutput().then(function () { paint(); }); } }),
       el('button', { class: 'wlib-mini', text: 'Export', title: 'Download the whole Scrapbook (incl. generator notes) as JSON', onclick: function () {
         download('weld-scrapbook.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify({ format: 'weld-scrapbook', formatVersion: 1, entries: scrapAll(), notes: notesAll() }, null, 2), 'application/json');
       } }),
@@ -6314,8 +6435,7 @@
     body.appendChild(el('div', { class: 'wlib-bar', style: { marginBottom: '10px' } }, [
       el('button', { class: 'wlib-mini', text: '\ud83c\udfb2 Random favorite', onclick: randomFavorite }),
       el('button', { class: 'wlib-mini', text: '\ud83d\udd0a Read this page\u2019s output', onclick: function () {
-        var h = hooks(); var t = (typeof h.outputText === 'function') ? h.outputText() : '';
-        if (t) speak(t); else toast('No generator output found on this page');
+        getOutputResult().then(function (res) { if (res.text) speak(res.text); else toast('No generator output found on this page'); });
       } }),
       el('button', { class: 'wlib-mini', text: '\u25a0 Stop reading', onclick: stopSpeak })
     ]));
