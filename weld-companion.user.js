@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.27.0
-// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite.
+// @version      1.30.0
+// @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager to browse, edit, back up, export and import IndexedDB/Dexie databases across the generators you have visited.
 // @author       therealwestninja
 // @match        https://perchance.org/*
 // @match        https://*.perchance.org/*
@@ -24,7 +24,6 @@
 // @connect      editor-copilot.perchance.org
 // @connect      *
 // @run-at       document-idle
-// @noframes
 // ==/UserScript==
 
 /*
@@ -50,6 +49,10 @@
 
 (function () {
   'use strict';
+
+  // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
+  // generator sandbox frames), every existing module below must stay in the top frame.
+  if (window.top !== window) return;
 
   // ============================================================ A. storage + utils
   var NS = 'weldCompanion';
@@ -1224,6 +1227,7 @@
   function tabDefs() {
     return [
       { id: 'generators', glyph: '\u2605', label: 'Generators' },
+      { id: 'data', glyph: '\u{1F5C3}', label: 'Data' },
       { id: 'github', glyph: '\u21C5', label: 'GitHub' },
       { id: 'comfort', glyph: '\u{1F441}', label: 'Comfort' },
       { id: 'snippets', glyph: '\u2702', label: 'Snippets' },
@@ -1286,10 +1290,18 @@
     var body = $('#wc-body'); if (!body) return;
     body.innerHTML = '';
     if (WC_TAB === 'generators') renderGenerators(body);
+    else if (WC_TAB === 'data') renderData(body);
     else if (WC_TAB === 'github') renderGitHub(body);
     else if (WC_TAB === 'comfort') renderComfort(body);
     else if (WC_TAB === 'snippets') renderSnippets(body);
     else if (WC_TAB === 'ai') renderAI(body);
+  }
+  // Data tab delegates to the Data Manager module appended at the end of this file.
+  // Fail-soft: if that block is removed, the tab explains itself.
+  function renderData(body) {
+    var h = window.weldDataManager;
+    if (h && typeof h.renderTab === 'function') { try { h.renderTab(body); return; } catch (e) {} }
+    body.appendChild(el('div', { class: 'wc-section-note', text: 'Data Manager module not loaded.' }));
   }
 
   // ============================================================ B. favorites & recently-used
@@ -2499,4 +2511,1619 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 
+})();
+
+
+/* =============================================================================
+ * Weld Companion — Data Manager v2.1  (engine v1.2 + agent + coordinator/UI)
+ * ========================================================================== */
+
+/* ----- [1] IDB ENGINE v1.2 ----- */
+/* IDB Manager Engine v1.2 — origin-scoped IndexedDB enumerate / describe / CRUD /
+ * search / export / import. Pure logic, no DOM. Runs in a browser frame (global
+ * indexedDB) or Node (inject an implementation via createIdbEngine(env)).
+ *
+ * If this source is ever embedded in a Perchance HTML panel, it stays clean of
+ * DSL-shaped string literals; object literals always use explicit key: value pairs. */
+(function (globalRoot, factory) {
+  var api = factory();
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else globalRoot.IDBManEngine = api;
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  // Sentinel for tagging non-JSON values on export. Real objects that already
+  // carry this key are escaped on encode and restored on decode.
+  var TAG = '__idbml__';
+
+  function seqEach(arr, fn) {
+    var p = Promise.resolve();
+    arr.forEach(function (item, i) { p = p.then(function () { return fn(item, i); }); });
+    return p;
+  }
+
+  function bytesToB64(bytes) {
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    var bin = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+  function b64ToBytes(b64) {
+    if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(b64, 'base64'));
+    var bin = atob(b64);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  return function createIdbEngine(env) {
+    env = env || {};
+    var idb = env.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
+    var BlobCtor = env.Blob || (typeof Blob !== 'undefined' ? Blob : null);
+    if (!idb) throw new Error('IndexedDB is not available in this environment');
+
+    function pReq(request) {
+      return new Promise(function (resolve, reject) {
+        request.onsuccess = function () { resolve(request.result); };
+        request.onerror = function () { reject(request.error || new Error('request failed')); };
+      });
+    }
+    function txDone(transaction) {
+      return new Promise(function (resolve, reject) {
+        transaction.oncomplete = function () { resolve(); };
+        transaction.onerror = function () { reject(transaction.error || new Error('transaction error')); };
+        transaction.onabort = function () { reject(transaction.error || new Error('transaction aborted')); };
+      });
+    }
+
+    // Open a database WITHOUT creating it: an open() on a missing name would create
+    // it empty at version 1, so the upgrade event (oldVersion 0) aborts, cleans up,
+    // and resolves null instead.
+    function openExisting(name) {
+      return new Promise(function (resolve, reject) {
+        var created = false;
+        var request = idb.open(name);
+        request.onupgradeneeded = function (ev) {
+          if (ev.oldVersion === 0) {
+            created = true;
+            try { ev.target.transaction.abort(); } catch (e) {}
+          }
+        };
+        request.onsuccess = function () {
+          var db = request.result;
+          if (created) {
+            try { db.close(); } catch (e) {}
+            idb.deleteDatabase(name);
+            resolve(null);
+            return;
+          }
+          resolve(db);
+        };
+        request.onerror = function () {
+          if (created) { resolve(null); return; }
+          reject(request.error || new Error('open failed: ' + name));
+        };
+        request.onblocked = function () { /* let success/error settle */ };
+      });
+    }
+
+    // Single open/close lifecycle. fn receives the db (or null when the database
+    // does not exist) and the connection is closed whether fn resolves or rejects —
+    // a leaked connection blocks later deleteDatabase / version-bump opens.
+    function withDb(name, fn) {
+      return openExisting(name).then(function (db) {
+        if (!db) return fn(null);
+        return Promise.resolve().then(function () { return fn(db); }).then(
+          function (res) { try { db.close(); } catch (e) {} return res; },
+          function (err) { try { db.close(); } catch (e) {} throw err; }
+        );
+      });
+    }
+
+    // Cursor walk. visit(cursor) may return false (stop), a positive number
+    // (advance that many), or anything else (continue). Resolves true when the
+    // cursor reached the end, false when visit stopped it early.
+    function cursorWalk(store, visit) {
+      return new Promise(function (resolve, reject) {
+        var req = store.openCursor();
+        req.onsuccess = function () {
+          var cursor = req.result;
+          if (!cursor) { resolve(true); return; }
+          var r;
+          try { r = visit(cursor); } catch (e) { reject(e); return; }
+          if (r === false) { resolve(false); return; }
+          if (typeof r === 'number' && r > 0) cursor.advance(r);
+          else cursor.continue();
+        };
+        req.onerror = function () { reject(req.error || new Error('cursor failed')); };
+      });
+    }
+
+    // ---- enumerate / describe -------------------------------------------------
+    function canEnumerate() { return typeof idb.databases === 'function'; }
+
+    function listDatabaseNames() {
+      if (!canEnumerate()) return Promise.resolve([]); // caller merges a manual registry
+      return idb.databases().then(function (list) {
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && list[i].name) out.push({ name: list[i].name, version: list[i].version || null });
+        }
+        return out;
+      });
+    }
+
+    function describeStore(db, storeName) {
+      var store = db.transaction(storeName, 'readonly').objectStore(storeName);
+      var indexes = [];
+      for (var i = 0; i < store.indexNames.length; i++) {
+        var idx = store.index(store.indexNames[i]);
+        indexes.push({ name: idx.name, keyPath: idx.keyPath, unique: !!idx.unique, multiEntry: !!idx.multiEntry });
+      }
+      return pReq(store.count()).then(function (count) {
+        return { name: store.name, keyPath: store.keyPath, autoIncrement: !!store.autoIncrement, indexes: indexes, count: count };
+      });
+    }
+
+    function describeDatabase(name) {
+      return withDb(name, function (db) {
+        if (!db) return null;
+        var storeNames = [];
+        for (var i = 0; i < db.objectStoreNames.length; i++) storeNames.push(db.objectStoreNames[i]);
+        var stores = [];
+        return seqEach(storeNames, function (sn) {
+          return describeStore(db, sn).then(function (desc) { stores.push(desc); });
+        }).then(function () { return { name: name, version: db.version, stores: stores }; });
+      });
+    }
+
+    // ---- record reads -----------------------------------------------------------
+    function getPage(name, storeName, offset, limit) {
+      offset = offset || 0;
+      limit = limit || 50;
+      return withDb(name, function (db) {
+        if (!db) return { rows: [], done: true };
+        var store = db.transaction(storeName, 'readonly').objectStore(storeName);
+        var rows = [];
+        var skipped = offset === 0;
+        return cursorWalk(store, function (cursor) {
+          if (!skipped) { skipped = true; return offset; }
+          rows.push({ key: cursor.key, primaryKey: cursor.primaryKey, value: cursor.value });
+          if (rows.length >= limit) return false;
+        }).then(function (reachedEnd) { return { rows: rows, done: reachedEnd }; });
+      });
+    }
+
+    function getRecord(name, storeName, key) {
+      return withDb(name, function (db) {
+        if (!db) return null;
+        return pReq(db.transaction(storeName, 'readonly').objectStore(storeName).get(key));
+      });
+    }
+
+    function searchStore(name, storeName, query, limit) {
+      limit = Math.min(limit || 100, 500);
+      var needle = String(query || '').toLowerCase();
+      return withDb(name, function (db) {
+        if (!db) return { rows: [], scanned: 0, done: true };
+        var store = db.transaction(storeName, 'readonly').objectStore(storeName);
+        var rows = [];
+        var scanned = 0;
+        return cursorWalk(store, function (cursor) {
+          scanned++;
+          var hay, keyHay;
+          try { hay = JSON.stringify(cursor.value); } catch (e) { hay = String(cursor.value); }
+          try { keyHay = typeof cursor.primaryKey === 'string' ? cursor.primaryKey : JSON.stringify(cursor.primaryKey); } catch (e) { keyHay = String(cursor.primaryKey); }
+          if (!needle || (hay && hay.toLowerCase().indexOf(needle) !== -1) || (keyHay && keyHay.toLowerCase().indexOf(needle) !== -1)) {
+            rows.push({ key: cursor.key, primaryKey: cursor.primaryKey, value: cursor.value });
+            if (rows.length >= limit) return false;
+          }
+        }).then(function (reachedEnd) { return { rows: rows, scanned: scanned, done: reachedEnd }; });
+      });
+    }
+
+    // ---- record writes ------------------------------------------------------------
+    // In-line-key stores carry the key in the value; out-of-line stores need explicitKey.
+    function putRecord(name, storeName, value, explicitKey) {
+      return withDb(name, function (db) {
+        if (!db) throw new Error('database not found: ' + name);
+        var transaction = db.transaction(storeName, 'readwrite');
+        var store = transaction.objectStore(storeName);
+        var request = (store.keyPath !== null && store.keyPath !== undefined)
+          ? store.put(value)
+          : store.put(value, explicitKey);
+        var keyOut = null;
+        request.onsuccess = function () { keyOut = request.result; };
+        return txDone(transaction).then(function () { return keyOut; });
+      });
+    }
+
+    function deleteRecord(name, storeName, key) {
+      return withDb(name, function (db) {
+        if (!db) throw new Error('database not found: ' + name);
+        var transaction = db.transaction(storeName, 'readwrite');
+        transaction.objectStore(storeName).delete(key);
+        return txDone(transaction).then(function () { return true; });
+      });
+    }
+
+    function clearStore(name, storeName) {
+      return withDb(name, function (db) {
+        if (!db) throw new Error('database not found: ' + name);
+        var transaction = db.transaction(storeName, 'readwrite');
+        transaction.objectStore(storeName).clear();
+        return txDone(transaction).then(function () { return true; });
+      });
+    }
+
+    // ---- schema ---------------------------------------------------------------------
+    // stores: [{ name, keyPath (string|array|null), autoIncrement, indexes: [{ name, keyPath, unique, multiEntry }] }]
+    function applySchema(db, ev, stores) {
+      for (var i = 0; i < stores.length; i++) {
+        var spec = stores[i];
+        var opts = {};
+        if (spec.keyPath !== null && spec.keyPath !== undefined) opts.keyPath = spec.keyPath;
+        if (spec.autoIncrement) opts.autoIncrement = true;
+        var store = db.objectStoreNames.contains(spec.name)
+          ? ev.target.transaction.objectStore(spec.name)
+          : db.createObjectStore(spec.name, opts);
+        var idxs = spec.indexes || [];
+        for (var j = 0; j < idxs.length; j++) {
+          if (!store.indexNames.contains(idxs[j].name)) {
+            store.createIndex(idxs[j].name, idxs[j].keyPath, { unique: !!idxs[j].unique, multiEntry: !!idxs[j].multiEntry });
+          }
+        }
+      }
+    }
+
+    function createDatabase(name, stores, version) {
+      return new Promise(function (resolve, reject) {
+        var request = idb.open(name, version || 1);
+        request.onupgradeneeded = function (ev) { applySchema(request.result, ev, stores || []); };
+        request.onsuccess = function () {
+          var db = request.result;
+          var v = db.version;
+          try { db.close(); } catch (e) {}
+          resolve({ name: name, version: v });
+        };
+        request.onerror = function () { reject(request.error || new Error('createDatabase failed')); };
+      });
+    }
+
+    function deleteDatabase(name) {
+      return new Promise(function (resolve, reject) {
+        var request = idb.deleteDatabase(name);
+        request.onsuccess = function () { resolve(true); };
+        request.onerror = function () { reject(request.error || new Error('deleteDatabase failed')); };
+        request.onblocked = function () { resolve(true); /* settles once connections close */ };
+      });
+    }
+
+    // ---- typed value codec ------------------------------------------------------------
+    // The core is synchronous: the whole tree is encoded in one pass, and Blob byte
+    // reads (the only async type) are collected and patched in a single Promise.all.
+    // This avoids a microtask per node, which dominates on large dumps.
+    function isPlainObject(v) {
+      if (v === null || typeof v !== 'object') return false;
+      var proto = Object.getPrototypeOf(v);
+      return proto === Object.prototype || proto === null;
+    }
+    function tagged(kind, payload) { var o = {}; o[TAG] = kind; o.v = payload; return o; }
+
+    function encSync(v, blobs) {
+      if (v === undefined) return tagged('undef', 0);
+      if (v === null) return null;
+      var t = typeof v;
+      if (t === 'number') {
+        if (v !== v) return tagged('num', 'NaN');
+        if (v === Infinity) return tagged('num', 'Infinity');
+        if (v === -Infinity) return tagged('num', '-Infinity');
+        return v;
+      }
+      if (t === 'bigint') return tagged('bigint', v.toString());
+      if (t === 'string' || t === 'boolean') return v;
+      if (v instanceof Date) return tagged('Date', v.toISOString());
+      if (v instanceof ArrayBuffer) return tagged('ArrayBuffer', bytesToB64(new Uint8Array(v)));
+      if (ArrayBuffer.isView(v)) {
+        var ctorName = v.constructor && v.constructor.name ? v.constructor.name : 'Uint8Array';
+        return tagged('TypedArray', { kind: ctorName, b64: bytesToB64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)) });
+      }
+      if (BlobCtor && v instanceof BlobCtor) {
+        var holder = { type: v.type || '', name: v.name || null, b64: null };
+        blobs.push({ blob: v, holder: holder });
+        return tagged('Blob', holder);
+      }
+      if (v instanceof Map) {
+        var pairs = [];
+        v.forEach(function (val, key) { pairs.push([encSync(key, blobs), encSync(val, blobs)]); });
+        return tagged('Map', pairs);
+      }
+      if (v instanceof Set) {
+        var items = [];
+        v.forEach(function (val) { items.push(encSync(val, blobs)); });
+        return tagged('Set', items);
+      }
+      if (v instanceof RegExp) return tagged('RegExp', { source: v.source, flags: v.flags });
+      if (Array.isArray(v)) {
+        var arr = [];
+        for (var i = 0; i < v.length; i++) arr[i] = encSync(v[i], blobs);
+        return arr;
+      }
+      if (isPlainObject(v)) {
+        var out = {};
+        var keys = Object.keys(v);
+        for (var k = 0; k < keys.length; k++) out[keys[k]] = encSync(v[keys[k]], blobs);
+        return Object.prototype.hasOwnProperty.call(v, TAG) ? tagged('escObj', out) : out;
+      }
+      // exotic objects: stringify so export never throws
+      var json;
+      try { json = JSON.stringify(v); } catch (e) { json = String(v); }
+      return tagged('json', json);
+    }
+    function patchBlobs(blobs) {
+      if (!blobs.length) return Promise.resolve();
+      return Promise.all(blobs.map(function (job) {
+        return job.blob.arrayBuffer().then(function (buf) { job.holder.b64 = bytesToB64(new Uint8Array(buf)); });
+      })).then(function () {});
+    }
+    function encodeValue(v) {
+      var blobs = [];
+      var out = encSync(v, blobs);
+      if (!blobs.length) return Promise.resolve(out);
+      return patchBlobs(blobs).then(function () { return out; });
+    }
+
+    function decodeValue(v) {
+      if (v === null || typeof v !== 'object') return v;
+      if (Array.isArray(v)) {
+        var arr = [];
+        for (var i = 0; i < v.length; i++) arr[i] = decodeValue(v[i]);
+        return arr;
+      }
+      if (Object.prototype.hasOwnProperty.call(v, TAG)) {
+        var kind = v[TAG];
+        var payload = v.v;
+        if (kind === 'undef') return undefined;
+        if (kind === 'num') return payload === 'NaN' ? NaN : (payload === 'Infinity' ? Infinity : -Infinity);
+        if (kind === 'bigint') return (typeof BigInt !== 'undefined') ? BigInt(payload) : Number(payload);
+        if (kind === 'Date') return new Date(payload);
+        if (kind === 'ArrayBuffer') return b64ToBytes(payload).buffer;
+        if (kind === 'TypedArray') {
+          var bytes = b64ToBytes(payload.b64);
+          var ctor = (typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : {}))[payload.kind];
+          if (!ctor) return bytes;
+          if (payload.kind === 'DataView') return new DataView(bytes.buffer);
+          return new ctor(bytes.buffer);
+        }
+        if (kind === 'Blob') {
+          var b = b64ToBytes(payload.b64);
+          return BlobCtor ? new BlobCtor([b], { type: payload.type || '' }) : b;
+        }
+        if (kind === 'Map') {
+          var m = new Map();
+          for (var mi = 0; mi < payload.length; mi++) m.set(decodeValue(payload[mi][0]), decodeValue(payload[mi][1]));
+          return m;
+        }
+        if (kind === 'Set') {
+          var s = new Set();
+          for (var si = 0; si < payload.length; si++) s.add(decodeValue(payload[si]));
+          return s;
+        }
+        if (kind === 'RegExp') return new RegExp(payload.source, payload.flags);
+        if (kind === 'json') { try { return JSON.parse(payload); } catch (e) { return payload; } }
+        if (kind === 'escObj') return decodePlain(payload);
+        return payload;
+      }
+      return decodePlain(v);
+    }
+    function decodePlain(v) {
+      var out = {};
+      var keys = Object.keys(v);
+      for (var i = 0; i < keys.length; i++) out[keys[i]] = decodeValue(v[keys[i]]);
+      return out;
+    }
+
+    // ---- export / import ------------------------------------------------------------
+    function dumpStore(name, storeDesc) {
+      return withDb(name, function (db) {
+        var store = db.transaction(storeDesc.name, 'readonly').objectStore(storeDesc.name);
+        var hasInlineKey = (store.keyPath !== null && store.keyPath !== undefined);
+        var records = [];
+        var blobs = [];
+        return cursorWalk(store, function (cursor) {
+          var rec = { value: encSync(cursor.value, blobs) };
+          if (!hasInlineKey) rec.key = encSync(cursor.primaryKey, blobs);
+          records.push(rec);
+        }).then(function () { return patchBlobs(blobs); }).then(function () {
+          return {
+            name: storeDesc.name,
+            keyPath: storeDesc.keyPath,
+            autoIncrement: storeDesc.autoIncrement,
+            indexes: storeDesc.indexes,
+            records: records
+          };
+        });
+      });
+    }
+
+    function exportDatabase(name) {
+      return describeDatabase(name).then(function (desc) {
+        if (!desc) return null;
+        var outStores = [];
+        return seqEach(desc.stores, function (sd) {
+          return dumpStore(name, sd).then(function (dumped) { outStores.push(dumped); });
+        }).then(function () { return { name: desc.name, version: desc.version, stores: outStores }; });
+      });
+    }
+
+    function exportStore(name, storeName) {
+      return describeDatabase(name).then(function (desc) {
+        if (!desc) return null;
+        var sd = null;
+        for (var i = 0; i < desc.stores.length; i++) if (desc.stores[i].name === storeName) sd = desc.stores[i];
+        return sd ? dumpStore(name, sd) : null;
+      });
+    }
+
+    function exportAll(originLabel) {
+      return listDatabaseNames().then(function (names) {
+        var dbs = [];
+        return seqEach(names, function (n) {
+          return exportDatabase(n.name).then(function (d) { if (d) dbs.push(d); });
+        }).then(function () {
+          return { format: 'idbml-export', formatVersion: 1, origin: originLabel || null, exportedAt: new Date().toISOString(), databases: dbs };
+        });
+      });
+    }
+
+    function loadStoreRecords(name, storeDump) {
+      return withDb(name, function (db) {
+        if (!db) throw new Error('database not found: ' + name);
+        var transaction = db.transaction(storeDump.name, 'readwrite');
+        var store = transaction.objectStore(storeDump.name);
+        var hasInlineKey = (store.keyPath !== null && store.keyPath !== undefined);
+        var recs = storeDump.records || [];
+        for (var i = 0; i < recs.length; i++) {
+          var value = decodeValue(recs[i].value);
+          if (hasInlineKey) store.put(value);
+          else store.put(value, decodeValue(recs[i].key));
+        }
+        return txDone(transaction).then(function () { return true; });
+      });
+    }
+
+    // mode 'replace' deletes any existing DB first; 'merge' writes into matching stores.
+    function importDatabase(dbDump, mode) {
+      mode = mode || 'replace';
+      var name = dbDump.name;
+      var schema = dbDump.stores.map(function (s) {
+        return { name: s.name, keyPath: (s.keyPath === undefined ? null : s.keyPath), autoIncrement: !!s.autoIncrement, indexes: s.indexes || [] };
+      });
+      var pre = (mode === 'replace') ? deleteDatabase(name) : Promise.resolve(true);
+      return pre
+        .then(function () { return createDatabase(name, schema, dbDump.version || 1); })
+        .then(function () { return seqEach(dbDump.stores, function (s) { return loadStoreRecords(name, s); }); })
+        .then(function () { return { name: name, ok: true }; });
+    }
+
+    // mode 'replace' clears the store first; 'merge' puts on top. A missing store is
+    // created via a version bump using the dump's schema.
+    function importStore(name, storeDump, mode) {
+      mode = mode || 'merge';
+      return withDb(name, function (db) {
+        if (!db) throw new Error('database not found: ' + name);
+        return { exists: db.objectStoreNames.contains(storeDump.name), version: db.version };
+      }).then(function (info) {
+        if (info.exists) return;
+        return new Promise(function (resolve, reject) {
+          var request = idb.open(name, info.version + 1);
+          request.onupgradeneeded = function (ev) {
+            applySchema(request.result, ev, [{
+              name: storeDump.name,
+              keyPath: (storeDump.keyPath === undefined ? null : storeDump.keyPath),
+              autoIncrement: !!storeDump.autoIncrement,
+              indexes: storeDump.indexes || []
+            }]);
+          };
+          request.onsuccess = function () { try { request.result.close(); } catch (e) {} resolve(); };
+          request.onerror = function () { reject(request.error || new Error('store creation failed')); };
+        });
+      }).then(function () {
+        return (mode === 'replace') ? clearStore(name, storeDump.name) : true;
+      }).then(function () {
+        return loadStoreRecords(name, storeDump);
+      }).then(function () { return { name: name, store: storeDump.name, ok: true }; });
+    }
+
+    function importDump(dump, mode) {
+      var dbs = (dump && dump.databases) || [];
+      var results = [];
+      return seqEach(dbs, function (d) {
+        return importDatabase(d, mode).then(function (r) { results.push(r); });
+      }).then(function () { return results; });
+    }
+
+    // ---- public surface ------------------------------------------------------------
+    return {
+      TAG: TAG,
+      canEnumerate: canEnumerate,
+      listDatabaseNames: listDatabaseNames,
+      describeDatabase: describeDatabase,
+      getPage: getPage,
+      getRecord: getRecord,
+      putRecord: putRecord,
+      deleteRecord: deleteRecord,
+      clearStore: clearStore,
+      createDatabase: createDatabase,
+      deleteDatabase: deleteDatabase,
+      exportDatabase: exportDatabase,
+      exportAll: exportAll,
+      searchStore: searchStore,
+      exportStore: exportStore,
+      importStore: importStore,
+      importDatabase: importDatabase,
+      importDump: importDump,
+      encodeValue: encodeValue,
+      decodeValue: decodeValue
+    };
+  };
+});
+
+/* ----- [2] DATA MANAGER v2.1 ----- */
+/* ============================================================================
+ * Weld Companion — Data Manager v2.1  (federated IndexedDB / Dexie browser)
+ * ----------------------------------------------------------------------------
+ * Browse, edit, back up, export and import the IndexedDB databases stored by
+ * every Perchance generator you've visited — full CRUD, organized by visited
+ * history, styled on the Companion's --wc-* tokens.
+ *
+ * Two roles in one script: an AGENT inside each generator's hex sandbox frame
+ * (the only place that origin's IDB is reachable) answering RPC over nonce-
+ * matched postMessage, and a COORDINATOR + UI in the top frame driving hidden
+ * iframes on demand. Reach = generators that have run on this device; touching
+ * one wakes it briefly. Integration (no @noframes, guarded host IIFE, drawer
+ * Data tab) is already applied in this file.
+ * ========================================================================== */
+(function () {
+  'use strict';
+  var CH = 'weldDataMgr/2';
+
+  /* ===================================================================== */
+  /* ROLE: AGENT — hex-sandbox frames only. Broker and other service       */
+  /* iframes also match *.perchance.org, but only the 32-hex sandbox holds */
+  /* generator data, so everything else exits before doing any work.       */
+  /* ===================================================================== */
+  if (window.top !== window) {
+    if (!/^[0-9a-f]{32}\.perchance\.org$/i.test(location.hostname)) return;
+
+    var engine = null;
+    function getEngine() {
+      if (engine) return engine;
+      try { engine = window.IDBManEngine ? window.IDBManEngine({}) : null; } catch (e) { engine = null; }
+      return engine;
+    }
+    function slugOf() { return (location.pathname.replace(/^\//, '').split('/')[0] || '').trim(); }
+
+    function announce() {
+      try {
+        window.top.postMessage({
+          channel: CH, type: 'agentReady',
+          origin: location.origin, host: location.hostname,
+          slug: slugOf(), isData: true, hasEngine: !!window.IDBManEngine
+        }, '*');
+      } catch (e) {}
+    }
+
+    function encodeRows(eng, rows) {
+      // encodeValue is sync-core (async only for Blob bytes); Promise.all keeps order
+      return Promise.all(rows.map(function (r) {
+        return eng.encodeValue(r.value).then(function (enc) { return { primaryKey: r.primaryKey, valueEnc: enc }; });
+      }));
+    }
+
+    function runOp(eng, op, a) {
+      a = a || {};
+      switch (op) {
+        case 'list': return eng.listDatabaseNames();
+        case 'describe': return eng.describeDatabase(a.db);
+        case 'page': return eng.getPage(a.db, a.store, a.offset, a.limit).then(function (p) {
+          return encodeRows(eng, p.rows).then(function (rows) { return { rows: rows, done: p.done }; });
+        });
+        case 'search': return eng.searchStore(a.db, a.store, a.query, a.limit).then(function (res) {
+          return encodeRows(eng, res.rows).then(function (rows) { return { rows: rows, scanned: res.scanned, done: res.done }; });
+        });
+        case 'getEnc': return eng.getRecord(a.db, a.store, a.key).then(function (v) { return eng.encodeValue(v); });
+        case 'putEnc': return eng.putRecord(a.db, a.store, eng.decodeValue(a.valueEnc), a.key);
+        case 'del': return eng.deleteRecord(a.db, a.store, a.key);
+        case 'clear': return eng.clearStore(a.db, a.store);
+        case 'exportDb': return eng.exportDatabase(a.db);
+        case 'exportStore': return eng.exportStore(a.db, a.store);
+        case 'importStore': return eng.importStore(a.db, a.storeDump, a.mode);
+        case 'exportAll': return eng.exportAll(location.origin);
+        case 'deleteDb': return eng.deleteDatabase(a.db);
+        case 'import': return eng.importDump(a.dump, a.mode);
+        case 'dupDb': return eng.exportDatabase(a.db).then(function (dump) {
+          if (!dump) throw new Error('source database not found');
+          dump.name = a.as;
+          return eng.importDatabase(dump, 'replace');
+        });
+        case 'estimate': return (navigator.storage && navigator.storage.estimate)
+          ? navigator.storage.estimate().then(function (e) { return { usage: e.usage || 0, quota: e.quota || 0 }; })
+          : Promise.resolve(null);
+        case 'ping': return Promise.resolve({ origin: location.origin, slug: slugOf() });
+        default: return Promise.reject(new Error('unknown op: ' + op));
+      }
+    }
+
+    window.addEventListener('message', function (ev) {
+      var d = ev.data;
+      if (!d || d.channel !== CH || d.type !== 'rpc') return;
+      var reply = function (payload) {
+        payload.channel = CH; payload.type = 'rpcReply'; payload.nonce = d.nonce;
+        try { (ev.source || window.top).postMessage(payload, '*'); } catch (e) {}
+      };
+      var eng = getEngine();
+      if (!eng) { reply({ ok: false, error: 'IndexedDB engine unavailable on ' + location.origin }); return; }
+      runOp(eng, d.op, d.args).then(function (res) { reply({ ok: true, result: res }); })
+        .catch(function (err) { reply({ ok: false, error: (err && err.message) ? err.message : String(err) }); });
+    }, false);
+
+    announce();
+    setTimeout(announce, 400);
+    setTimeout(announce, 1500);
+    return;
+  }
+
+  /* ===================================================================== */
+  /* ROLE: COORDINATOR + UI — top frame only.                              */
+  /* ===================================================================== */
+  var NS = 'weldCompanion';
+  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+
+  /* ---- small helpers ----------------------------------------------------- */
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (k === 'style' && typeof attrs[k] === 'object') { for (var s in attrs[k]) n.style[s] = attrs[k][s]; }
+      else if (k === 'class') n.className = attrs[k];
+      else if (k === 'text') n.textContent = attrs[k];
+      else if (k === 'html') n.innerHTML = attrs[k];
+      else if (k.slice(0, 2) === 'on' && typeof attrs[k] === 'function') n.addEventListener(k.slice(2), attrs[k]);
+      else n.setAttribute(k, attrs[k]);
+    }
+    (kids || []).forEach(function (c) { if (c != null) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
+  function frag(kids) { var f = document.createDocumentFragment(); kids.forEach(function (k) { if (k) f.appendChild(k); }); return f; }
+  function btn(label, onClick, opts) {
+    opts = opts || {};
+    var a = { class: 'wdm-btn' + (opts.kind ? ' ' + opts.kind : ''), text: label, onclick: onClick };
+    if (opts.title) a.title = opts.title;
+    return el('button', a);
+  }
+  function ghost(label, onClick, title) { return btn(label, onClick, { kind: 'ghost', title: title }); }
+  function sub(text) { return el('span', { class: 'wdm-sub', style: { flex: '1' }, text: text }); }
+  function fail(prefix) { return function (err) { toast(prefix + ': ' + ((err && err.message) || err)); }; }
+  function tryJson(text) { try { return { ok: true, value: JSON.parse(text) }; } catch (e) { return { ok: false, error: e.message }; } }
+  function jsonOrString(text) { var r = tryJson(text); return r.ok ? r.value : text; }
+  function seqEach(arr, fn) { var p = Promise.resolve(); arr.forEach(function (x, i) { p = p.then(function () { return fn(x, i); }); }); return p; }
+  function debounce(fn, ms) { var t; return function () { var a = arguments; clearTimeout(t); t = setTimeout(function () { fn.apply(null, a); }, ms); }; }
+  function confirmYes(msg) { try { return window.confirm(msg); } catch (e) { return false; } }
+
+  function toastHost() {
+    var h = document.getElementById('wdm-toasts');
+    if (!h) { h = el('div', { id: 'wdm-toasts', class: 'wdm-toasthost' }); document.body.appendChild(h); }
+    return h;
+  }
+  function toast(msg, opts) {
+    opts = opts || {};
+    var kids = [el('span', { class: 'wdm-toastmsg', text: msg })];
+    if (opts.action) {
+      kids.push(el('button', { class: 'wdm-toastact', text: opts.action.label, onclick: function () {
+        try { opts.action.fn(); } catch (e) {}
+        dismiss();
+      } }));
+    }
+    var t = el('div', { class: 'wdm-toast' }, kids);
+    toastHost().appendChild(t);
+    requestAnimationFrame(function () { t.classList.add('wdm-show'); });
+    var timer = setTimeout(dismiss, opts.ms || (opts.action ? 7000 : 2800));
+    function dismiss() { clearTimeout(timer); t.classList.remove('wdm-show'); setTimeout(function () { t.remove(); }, 250); }
+    return { dismiss: dismiss };
+  }
+
+  function download(filename, text) {
+    var url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    var a = el('a', { href: url, download: filename });
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { a.remove(); URL.revokeObjectURL(url); }, 1500);
+  }
+  function pickFile() {
+    return new Promise(function (resolve) {
+      var inp = el('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } });
+      inp.addEventListener('change', function () {
+        var file = inp.files && inp.files[0];
+        if (!file) { resolve(null); return; }
+        var reader = new FileReader();
+        reader.onload = function () { resolve({ name: file.name, text: String(reader.result) }); };
+        reader.onerror = function () { resolve(null); };
+        reader.readAsText(file);
+      });
+      document.body.appendChild(inp); inp.click();
+      setTimeout(function () { inp.remove(); }, 120000);
+    });
+  }
+  function stamp() { return new Date().toISOString().replace(/[:.]/g, '-'); }
+  function fmtBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+  function timeAgo(t) {
+    var s = Math.max(1, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return s + 's ago';
+    var m = Math.round(s / 60); if (m < 60) return m + 'm ago';
+    var h = Math.round(m / 60); if (h < 24) return h + 'h ago';
+    return Math.round(h / 24) + 'd ago';
+  }
+
+  /* ---- agent registry + RPC ----------------------------------------------- */
+  var agents = {};        // origin -> { source, slug, hasEngine, t }
+  var agentWaiters = [];
+  var pending = {};       // nonce -> { resolve, reject, timer }
+  var frames = {};        // slug -> iframe
+  var seq = 0;
+
+  window.addEventListener('message', function (ev) {
+    var d = ev.data;
+    if (!d || d.channel !== CH) return;
+    if (d.type === 'agentReady') {
+      agents[d.origin] = { source: ev.source, slug: d.slug, hasEngine: !!d.hasEngine, t: Date.now() };
+      for (var i = agentWaiters.length - 1; i >= 0; i--) { try { agentWaiters[i](d); } catch (e) {} }
+      return;
+    }
+    if (d.type === 'rpcReply') {
+      var p = pending[d.nonce]; if (!p) return;
+      clearTimeout(p.timer); delete pending[d.nonce];
+      if (d.ok) p.resolve(d.result); else p.reject(new Error(d.error || 'rpc failed'));
+    }
+  }, false);
+
+  function dataAgentFor(slug) {
+    for (var origin in agents) { var a = agents[origin]; if (a.hasEngine && a.slug === slug) return a; }
+    return null;
+  }
+
+  function ensureAgent(slug, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var existing = dataAgentFor(slug);
+      if (existing) { resolve(existing); return; }
+      var settled = false;
+      function cleanup() { clearTimeout(timer); var i = agentWaiters.indexOf(waiter); if (i >= 0) agentWaiters.splice(i, 1); }
+      var waiter = function (d) {
+        if (settled || !d.hasEngine || d.slug !== slug) return;
+        settled = true; cleanup(); resolve(dataAgentFor(slug));
+      };
+      agentWaiters.push(waiter);
+      if (!frames[slug]) {
+        frames[slug] = el('iframe', { 'aria-hidden': 'true', src: 'https://perchance.org/' + encodeURIComponent(slug),
+          style: { position: 'fixed', width: '360px', height: '260px', left: '-12000px', top: '-12000px', opacity: '0', border: '0', pointerEvents: 'none' } });
+        document.body.appendChild(frames[slug]);
+      }
+      var timer = setTimeout(function () {
+        if (settled) return; settled = true; cleanup();
+        releaseFrame(slug);
+        reject(new Error('Timed out reaching \u201c' + slug + '\u201d \u2014 it may block framing, or never finished loading.'));
+      }, timeoutMs || 16000);
+    });
+  }
+
+  function releaseFrame(slug) {
+    var f = frames[slug];
+    if (f) { try { f.remove(); } catch (e) {} delete frames[slug]; }
+    for (var origin in agents) { if (agents[origin].slug === slug) delete agents[origin]; }
+  }
+  function releaseAllExcept(keepSlug) {
+    Object.keys(frames).forEach(function (slug) { if (slug !== keepSlug) releaseFrame(slug); });
+  }
+
+  function rpc(slug, op, args, opTimeout) {
+    return ensureAgent(slug).then(function (a) {
+      return new Promise(function (resolve, reject) {
+        var nonce = CH + ':' + (++seq) + ':' + Math.random().toString(36).slice(2);
+        var timer = setTimeout(function () {
+          delete pending[nonce];
+          releaseFrame(slug); // stale handle — respawn next time
+          reject(new Error('Timed out: ' + op));
+        }, opTimeout || 30000);
+        pending[nonce] = { resolve: resolve, reject: reject, timer: timer };
+        try { a.source.postMessage({ channel: CH, type: 'rpc', nonce: nonce, op: op, args: args || {} }, '*'); }
+        catch (e) { clearTimeout(timer); delete pending[nonce]; reject(e); }
+      });
+    });
+  }
+
+  /* ---- candidate list (visited history first) ------------------------------ */
+  function candidateGenerators() {
+    var recent = gget('recent', []) || [];
+    var favs = gget('favorites', []) || [];
+    var dir = gget('directory', null);
+    var scan = gget('wdmScan', {}) || {};          // slug -> { dbs, bytes, t }
+    var byName = {};
+    recent.forEach(function (r) { byName[r.name] = { name: r.name, title: r.title || r.name, t: r.t || 0, fav: favs.indexOf(r.name) !== -1 }; });
+    favs.forEach(function (n) { if (!byName[n]) byName[n] = { name: n, title: n, t: 0, fav: true }; });
+    if (dir && dir.names) dir.names.forEach(function (n) { if (!byName[n]) byName[n] = { name: n, title: n, t: 0, fav: favs.indexOf(n) !== -1 }; });
+    var cur = (window.generatorName || (location.pathname.replace(/^\//, '').split('/')[0]) || '').trim();
+    if (cur) {
+      if (!byName[cur]) byName[cur] = { name: cur, title: (document.title || cur).replace(/ \u2015 Perchance.*$/, '').trim() || cur, t: Date.now() + 1, fav: favs.indexOf(cur) !== -1 };
+      byName[cur].current = true;
+    }
+    return Object.keys(byName).map(function (k) {
+      var g = byName[k];
+      var sc = scan[g.name];
+      if (sc) { g.dbs = sc.dbs; g.bytes = sc.bytes; }
+      return g;
+    });
+  }
+  function sortGenerators(list, mode) {
+    var copy = list.slice();
+    if (mode === 'name') copy.sort(function (a, b) { return a.name.localeCompare(b.name); });
+    else if (mode === 'fav') copy.sort(function (a, b) { return (b.fav ? 1 : 0) - (a.fav ? 1 : 0) || (b.t - a.t); });
+    else if (mode === 'data') copy.sort(function (a, b) { return ((b.dbs || 0) - (a.dbs || 0)) || (b.t - a.t); });
+    else copy.sort(function (a, b) { return (b.current ? 1 : 0) - (a.current ? 1 : 0) || (b.t - a.t); });
+    return copy;
+  }
+  function rememberScan(slug, dbs, bytes) {
+    var scan = gget('wdmScan', {}) || {};
+    scan[slug] = { dbs: dbs, bytes: bytes || null, t: Date.now() };
+    gset('wdmScan', scan);
+  }
+
+  /* ---- decoded-value previews ----------------------------------------------- */
+  var _decoder = null;
+  function decoder() { try { if (!_decoder && window.IDBManEngine) _decoder = window.IDBManEngine({}); } catch (e) {} return _decoder; }
+  function describeVal(v) {
+    if (v === null) return 'null';
+    if (v === undefined) return 'undefined';
+    if (v instanceof Date) return 'Date(' + v.toISOString() + ')';
+    if (typeof Blob !== 'undefined' && v instanceof Blob) return 'Blob(' + fmtBytes(v.size) + (v.type ? ', ' + v.type : '') + ')';
+    if (v instanceof ArrayBuffer) return 'ArrayBuffer(' + v.byteLength + ')';
+    if (ArrayBuffer.isView(v)) return (v.constructor && v.constructor.name || 'TypedArray') + '(' + v.length + ')';
+    if (v instanceof Map) return 'Map(' + v.size + ')';
+    if (v instanceof Set) return 'Set(' + v.size + ')';
+    if (v instanceof RegExp) return String(v);
+    if (typeof v === 'bigint') return v.toString() + 'n';
+    if (Array.isArray(v)) {
+      var parts = [];
+      for (var i = 0; i < Math.min(v.length, 6); i++) parts.push(describeVal(v[i]));
+      return '[' + parts.join(', ') + (v.length > 6 ? ', \u2026' : '') + ']';
+    }
+    if (typeof v === 'object') {
+      var keys = Object.keys(v);
+      var inner = [];
+      for (var j = 0; j < Math.min(keys.length, 6); j++) inner.push(keys[j] + ': ' + describeVal(v[keys[j]]));
+      return '{' + inner.join(', ') + (keys.length > 6 ? ', \u2026' : '') + '}';
+    }
+    if (typeof v === 'string') return JSON.stringify(v);
+    return String(v);
+  }
+  function humanPreview(v, max) {
+    max = max || 160;
+    var s = describeVal(v);
+    return s.length > max ? s.slice(0, max) + '\u2026' : s;
+  }
+  function keyPreview(k) {
+    var s = typeof k === 'string' ? k : (function () { try { return JSON.stringify(k); } catch (e) { return String(k); } })();
+    return s.length > 42 ? s.slice(0, 42) + '\u2026' : s;
+  }
+  // Previews are computed once per fetched row, not on every filter keystroke.
+  function annotateRows(rows) {
+    var d = decoder();
+    rows.forEach(function (row) {
+      var decoded;
+      try { decoded = d ? d.decodeValue(row.valueEnc) : row.valueEnc; } catch (e) { decoded = row.valueEnc; }
+      row.hp = humanPreview(decoded, 200);
+      row.kp = keyPreview(row.primaryKey);
+      row.hay = (row.hp + ' ' + row.kp).toLowerCase();
+    });
+    return rows;
+  }
+
+  /* ---- undo (pre-op snapshots; in-memory ring) -------------------------------- */
+  var UNDO_CAP_BYTES = 12 * 1048576;
+  var undoStack = [];
+  function pushUndo(label, fn) {
+    undoStack.push({ label: label, fn: fn });
+    if (undoStack.length > 20) undoStack.shift();
+  }
+  function offerUndo(label, doneMsg) {
+    var entry = undoStack[undoStack.length - 1];
+    if (!entry || entry.label !== label) { toast(doneMsg); return; }
+    toast(doneMsg, { action: { label: 'Undo', fn: function () {
+      undoStack.pop();
+      entry.fn().then(function () { toast('Restored \u2713'); refreshCurrent(); }).catch(fail('Undo failed'));
+    } } });
+  }
+  function snapshotTooBig(obj) {
+    try { return JSON.stringify(obj).length > UNDO_CAP_BYTES; } catch (e) { return true; }
+  }
+
+  /* ===================================================================== */
+  /* STYLES — on the Companion's --wc-* tokens (with fallbacks)            */
+  /* ===================================================================== */
+  function styleOnce() {
+    if (document.getElementById('wdm-style')) return;
+    var css = [
+      '.wdm-root{all:revert;font-family:var(--wc-sans,system-ui,sans-serif);color:var(--wc-ink,#eef2f6);line-height:1.5;-webkit-font-smoothing:antialiased;text-align:left;}',
+      '.wdm-root *{box-sizing:border-box;}',
+      '.wdm-scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2147483600;}',
+      '.wdm{position:fixed;inset:20px;max-width:1180px;margin:0 auto;z-index:2147483601;display:flex;flex-direction:column;',
+      '  background:var(--wc-surface,#13171e);border:1px solid var(--wc-line,rgba(255,255,255,.09));border-radius:14px;overflow:hidden;',
+      '  box-shadow:var(--wc-shadow,0 24px 64px -16px rgba(0,0,0,.78));font-size:14px;}',
+      '.wdm-hd{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));flex:none;flex-wrap:wrap;}',
+      '.wdm-brand{display:flex;align-items:center;gap:8px;font:700 12px/1 var(--wc-mono,ui-monospace,monospace);letter-spacing:1px;text-transform:uppercase;}',
+      '.wdm-brand .wdm-dot{width:8px;height:8px;border-radius:50%;background:var(--wc-arc,#ff8a3d);box-shadow:0 0 10px var(--wc-arc,#ff8a3d);}',
+      '.wdm-crumbs{display:flex;align-items:center;gap:6px;font:12px var(--wc-mono,ui-monospace,monospace);color:var(--wc-dim,#9aa7b6);min-width:0;flex:1;flex-wrap:wrap;}',
+      '.wdm-crumb{cursor:pointer;padding:2px 6px;border-radius:6px;white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis;}',
+      '.wdm-crumb:hover{background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#eef2f6);}',
+      '.wdm-crumb.wdm-here{color:var(--wc-arc,#ff8a3d);cursor:default;}',
+      '.wdm-crumb.wdm-here:hover{background:transparent;}',
+      '.wdm-sep{color:var(--wc-faint,#5d6b7b);}',
+      '.wdm-x{margin-left:auto;width:28px;height:28px;border-radius:8px;border:1px solid var(--wc-line,rgba(255,255,255,.09));background:var(--wc-surface-2,#1a1f28);',
+      '  color:var(--wc-dim,#9aa7b6);font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;}',
+      '.wdm-x:hover{color:#fff;background:#c0392b;border-color:#c0392b;}',
+      '.wdm-body{flex:1;display:flex;min-height:0;}',
+      '.wdm-col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--wc-line-2,rgba(255,255,255,.05));}',
+      '.wdm-gens{width:280px;flex:none;}',
+      '.wdm-mid{width:300px;flex:none;}',
+      '.wdm-main{flex:1;min-width:0;border-right:0;}',
+      '.wdm.wdm-narrow .wdm-col{display:none;width:100%;flex:1;border-right:0;}',
+      '.wdm.wdm-narrow .wdm-col.wdm-active{display:flex;}',
+      '.wdm-coltools{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));align-items:center;flex-wrap:wrap;flex:none;}',
+      '.wdm-list{overflow:auto;flex:1;padding:6px;}',
+      '.wdm-item{padding:8px 10px;border-radius:9px;cursor:pointer;display:flex;flex-direction:column;gap:2px;border:1px solid transparent;}',
+      '.wdm-item:hover{background:var(--wc-surface-2,#1a1f28);}',
+      '.wdm-item.wdm-on{background:var(--wc-arc-soft,rgba(255,138,61,.14));border-color:var(--wc-arc,#ff8a3d);}',
+      '.wdm-item .wdm-t{font-weight:600;display:flex;align-items:center;gap:6px;min-width:0;}',
+      '.wdm-item .wdm-t .wdm-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.wdm-item .wdm-m{font:11px var(--wc-mono,ui-monospace,monospace);color:var(--wc-faint,#5d6b7b);}',
+      '.wdm-pill{flex:none;font:600 10px var(--wc-mono,ui-monospace,monospace);padding:1px 7px;border-radius:999px;border:1px solid var(--wc-line,rgba(255,255,255,.09));color:var(--wc-dim,#9aa7b6);}',
+      '.wdm-pill.wdm-has{color:var(--wc-signal,#4ee0c8);border-color:var(--wc-signal,#4ee0c8);}',
+      '.wdm-star{color:var(--wc-gold,#ffcd4d);flex:none;}',
+      '.wdm-btn{appearance:none;background:var(--wc-arc,#ff8a3d);color:#1a1208;border:0;border-radius:8px;padding:6px 12px;cursor:pointer;font:600 12px var(--wc-sans,sans-serif);}',
+      '.wdm-btn:hover{filter:brightness(1.07);}',
+      '.wdm-btn.ghost{background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#eef2f6);border:1px solid var(--wc-line,rgba(255,255,255,.09));}',
+      '.wdm-btn.ghost:hover{background:var(--wc-surface-3,#222936);}',
+      '.wdm-btn.danger{background:transparent;color:#e5534b;border:1px solid rgba(229,83,75,.45);}',
+      '.wdm-btn.danger:hover{background:rgba(229,83,75,.12);}',
+      '.wdm-btn:disabled{opacity:.4;cursor:not-allowed;}',
+      '.wdm-field{background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#eef2f6);border:1px solid var(--wc-line,rgba(255,255,255,.09));border-radius:8px;padding:6px 9px;font:13px var(--wc-sans,sans-serif);}',
+      '.wdm-field:focus{outline:none;border-color:var(--wc-arc,#ff8a3d);}',
+      '.wdm-search{flex:1;min-width:80px;}',
+      '.wdm-sub{color:var(--wc-dim,#9aa7b6);font:12px var(--wc-mono,ui-monospace,monospace);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.wdm-main-tools{display:flex;gap:7px;padding:9px 12px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));align-items:center;flex-wrap:wrap;flex:none;}',
+      '.wdm-main-body{overflow:auto;flex:1;padding:10px 12px;}',
+      '.wdm-note{color:var(--wc-dim,#9aa7b6);font:12px/1.6 var(--wc-sans,sans-serif);padding:14px;}',
+      '.wdm-tbl{width:100%;border-collapse:collapse;font:12px var(--wc-mono,ui-monospace,monospace);}',
+      '.wdm-tbl th,.wdm-tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));vertical-align:top;}',
+      '.wdm-tbl th{color:var(--wc-faint,#5d6b7b);font-weight:600;position:sticky;top:0;background:var(--wc-surface,#13171e);z-index:1;}',
+      '.wdm-tbl tr.wdm-rec:hover{background:var(--wc-surface-2,#1a1f28);cursor:pointer;}',
+      '.wdm-key{color:var(--wc-signal,#4ee0c8);white-space:nowrap;}',
+      '.wdm-val{color:var(--wc-ink,#eef2f6);word-break:break-word;opacity:.92;}',
+      '.wdm-pager{display:flex;gap:8px;align-items:center;padding:10px 0;color:var(--wc-dim,#9aa7b6);font:12px var(--wc-mono,ui-monospace,monospace);flex-wrap:wrap;}',
+      '.wdm-spin{display:flex;align-items:center;gap:9px;color:var(--wc-dim,#9aa7b6);font:12px var(--wc-mono,ui-monospace,monospace);padding:16px;}',
+      '.wdm-spin::before{content:"";width:14px;height:14px;border-radius:50%;border:2px solid var(--wc-line,rgba(255,255,255,.09));border-top-color:var(--wc-arc,#ff8a3d);animation:wdm-rot .7s linear infinite;}',
+      '@keyframes wdm-rot{to{transform:rotate(360deg);}}',
+      '.wdm-modal{position:fixed;inset:0;z-index:2147483650;display:grid;place-items:center;background:rgba(0,0,0,.5);}',
+      '.wdm-card{width:min(760px,94vw);max-height:88vh;display:flex;flex-direction:column;background:var(--wc-surface,#13171e);border:1px solid var(--wc-line,rgba(255,255,255,.09));border-radius:12px;overflow:hidden;box-shadow:var(--wc-shadow,0 24px 64px -16px rgba(0,0,0,.78));}',
+      '.wdm-card h3{margin:0;padding:12px 16px;border-bottom:1px solid var(--wc-line-2,rgba(255,255,255,.05));font:700 13px var(--wc-mono,ui-monospace,monospace);color:var(--wc-ink,#eef2f6);}',
+      '.wdm-ta{flex:1;min-height:260px;margin:12px 16px 4px;background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#eef2f6);border:1px solid var(--wc-line,rgba(255,255,255,.09));border-radius:8px;padding:10px;font:12px/1.55 var(--wc-mono,ui-monospace,monospace);resize:vertical;}',
+      '.wdm-ta:focus{outline:none;border-color:var(--wc-arc,#ff8a3d);}',
+      '.wdm-jsonstate{margin:0 16px;font:11px var(--wc-mono,ui-monospace,monospace);height:16px;}',
+      '.wdm-jsonstate.ok{color:var(--wc-signal,#4ee0c8);}','.wdm-jsonstate.bad{color:#e5534b;}',
+      '.wdm-foot{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--wc-line-2,rgba(255,255,255,.05));align-items:center;flex-wrap:wrap;}',
+      '.wdm-hint{color:var(--wc-faint,#5d6b7b);font:11px/1.4 var(--wc-sans,sans-serif);flex:1;min-width:120px;}',
+      '.wdm-toasthost{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:2147483660;display:flex;flex-direction:column-reverse;gap:8px;align-items:center;pointer-events:none;}',
+      '.wdm-toast{display:flex;align-items:center;gap:12px;background:var(--wc-surface-2,#1a1f28);color:var(--wc-ink,#eef2f6);border:1px solid var(--wc-line,rgba(255,255,255,.09));',
+      '  border-radius:10px;padding:9px 14px;font:13px var(--wc-sans,sans-serif);opacity:0;transform:translateY(10px);transition:.22s;max-width:90vw;pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,.4);}',
+      '.wdm-toast.wdm-show{opacity:1;transform:translateY(0);}',
+      '.wdm-toastact{appearance:none;background:transparent;border:1px solid var(--wc-arc,#ff8a3d);color:var(--wc-arc,#ff8a3d);border-radius:7px;padding:3px 10px;font:600 12px var(--wc-sans,sans-serif);cursor:pointer;}',
+      '.wdm-toastact:hover{background:var(--wc-arc-soft,rgba(255,138,61,.14));}',
+      '.wdm-sweep{font:12px var(--wc-mono,ui-monospace,monospace);}',
+      '.wdm-sweep .row{display:flex;gap:8px;padding:4px 0;align-items:baseline;}',
+      '.wdm-sweep .ok{color:var(--wc-signal,#4ee0c8);}','.wdm-sweep .bad{color:#e5534b;}','.wdm-sweep .dim{color:var(--wc-faint,#5d6b7b);}',
+      '.wdm-launch{display:flex;flex-direction:column;gap:10px;padding:4px 2px;}',
+      '.wdm-launch .wdm-lrow{display:flex;gap:8px;flex-wrap:wrap;}',
+      '.wdm-launch .wdm-litem{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;cursor:pointer;border:1px solid transparent;}',
+      '.wdm-launch .wdm-litem:hover{background:var(--wc-surface-2,#1a1f28);border-color:var(--wc-line,rgba(255,255,255,.09));}'
+    ].join('\n');
+    document.head.appendChild(el('style', { id: 'wdm-style', html: css }));
+  }
+
+  /* ===================================================================== */
+  /* PANEL                                                                 */
+  /* ===================================================================== */
+  var state = {
+    slug: null, db: null, store: null, storeDesc: null,
+    offset: 0, pageSize: gget('wdmPageSize', 50),
+    sort: gget('wdmSort', 'recent'),
+    filter: '', searchHits: null, pane: 'gens'
+  };
+  var refs = {};
+
+  function open() {
+    styleOnce();
+    if (document.getElementById('wdm-root-panel')) return;
+    var scrim = el('div', { class: 'wdm-root wdm-scrim', id: 'wdm-scrim', onclick: closePanel });
+
+    refs.crumbs = el('div', { class: 'wdm-crumbs' });
+    refs.gensList = el('div', { class: 'wdm-list' });
+    refs.search = el('input', { class: 'wdm-field wdm-search', placeholder: 'Search generators\u2026', oninput: debounce(renderGens, 120) });
+    var sortSel = el('select', { class: 'wdm-field', style: { flex: 'none' }, onchange: function () { state.sort = sortSel.value; gset('wdmSort', state.sort); renderGens(); } });
+    [['recent', 'Recent'], ['name', 'A\u2192Z'], ['fav', 'Favorites'], ['data', 'Has data']].forEach(function (o) {
+      var op = el('option', { value: o[0], text: o[1] }); if (o[0] === state.sort) op.selected = true; sortSel.appendChild(op);
+    });
+    refs.gensCol = el('div', { class: 'wdm-col wdm-gens' }, [
+      el('div', { class: 'wdm-coltools' }, [refs.search, sortSel,
+        ghost('\u29C9 Sweep', sweepBackup, 'Back up every listed generator into one file (and refresh the data badges)')]),
+      refs.gensList
+    ]);
+
+    refs.midTools = el('div', { class: 'wdm-coltools' });
+    refs.midList = el('div', { class: 'wdm-list' });
+    refs.midCol = el('div', { class: 'wdm-col wdm-mid' }, [refs.midTools, refs.midList]);
+
+    refs.mainTools = el('div', { class: 'wdm-main-tools' });
+    refs.mainBody = el('div', { class: 'wdm-main-body' });
+    refs.mainCol = el('div', { class: 'wdm-col wdm-main' }, [refs.mainTools, refs.mainBody]);
+
+    refs.panel = el('div', { class: 'wdm-root wdm', id: 'wdm-root-panel' }, [
+      el('div', { class: 'wdm-hd' }, [
+        el('span', { class: 'wdm-brand' }, [el('span', { class: 'wdm-dot' }), el('span', { text: 'Weld Data' })]),
+        refs.crumbs,
+        el('button', { class: 'wdm-x', title: 'Close (Esc)', text: '\u2715', onclick: closePanel })
+      ]),
+      el('div', { class: 'wdm-body' }, [refs.gensCol, refs.midCol, refs.mainCol])
+    ]);
+
+    document.body.appendChild(scrim);
+    document.body.appendChild(refs.panel);
+    window.addEventListener('resize', applyLayout);
+    applyLayout();
+    renderCrumbs();
+    renderGens();
+    resetMid('Pick a generator to load its databases.');
+    resetMain('Your visited history is the candidate list. Loading a generator briefly runs it in a hidden frame so its on-device data can be read.');
+    document.addEventListener('keydown', escClose, true);
+  }
+  function applyLayout() {
+    if (!refs.panel) return;
+    var narrow = window.innerWidth < 900;
+    refs.panel.classList.toggle('wdm-narrow', narrow);
+    if (narrow) setPane(state.pane);
+    else [refs.gensCol, refs.midCol, refs.mainCol].forEach(function (c) { c.classList.remove('wdm-active'); });
+  }
+  function setPane(p) {
+    state.pane = p;
+    if (!refs.panel || !refs.panel.classList.contains('wdm-narrow')) return;
+    refs.gensCol.classList.toggle('wdm-active', p === 'gens');
+    refs.midCol.classList.toggle('wdm-active', p === 'dbs');
+    refs.mainCol.classList.toggle('wdm-active', p === 'main');
+  }
+  // Esc closes the topmost layer: editor modal first, then the panel.
+  function escClose(e) {
+    if (e.key !== 'Escape') return;
+    var modal = document.getElementById('wdm-modal');
+    if (modal) { e.stopPropagation(); e.preventDefault(); modal.remove(); return; }
+    if (document.getElementById('wdm-root-panel')) { e.stopPropagation(); closePanel(); }
+  }
+  function closePanel() {
+    document.removeEventListener('keydown', escClose, true);
+    window.removeEventListener('resize', applyLayout);
+    releaseAllExcept(null);
+    var r = document.getElementById('wdm-root-panel'); if (r) r.remove();
+    var s = document.getElementById('wdm-scrim'); if (s) s.remove();
+  }
+  function resetMid(msg) { clear(refs.midTools); clear(refs.midList); refs.midList.appendChild(el('div', { class: 'wdm-note', text: msg })); }
+  function resetMain(msg) { clear(refs.mainTools); clear(refs.mainBody); refs.mainBody.appendChild(el('div', { class: 'wdm-note', text: msg })); }
+  function spinner(parent, msg) { clear(parent); parent.appendChild(el('div', { class: 'wdm-spin', text: msg })); }
+
+  function renderCrumbs() {
+    clear(refs.crumbs);
+    function crumb(label, here, fn) {
+      return el('span', { class: 'wdm-crumb' + (here ? ' wdm-here' : ''), text: label, title: label, onclick: here ? null : fn });
+    }
+    var kids = [crumb('generators', !state.slug, function () {
+      state.slug = state.db = state.store = null;
+      releaseAllExcept(null);
+      renderCrumbs(); renderGens();
+      resetMid('Pick a generator.'); resetMain('');
+      setPane('gens');
+    })];
+    if (state.slug) {
+      kids.push(el('span', { class: 'wdm-sep', text: '/' }));
+      kids.push(crumb(state.slug, !state.db, function () { selectGenerator(state.slug); }));
+    }
+    if (state.db) {
+      kids.push(el('span', { class: 'wdm-sep', text: '/' }));
+      kids.push(crumb(state.db, !state.store, function () { selectDb(state.slug, state.db); }));
+    }
+    if (state.store) {
+      kids.push(el('span', { class: 'wdm-sep', text: '/' }));
+      kids.push(crumb(state.store, true, null));
+    }
+    refs.crumbs.appendChild(frag(kids));
+  }
+
+  function renderGens() {
+    var q = (refs.search.value || '').toLowerCase();
+    var list = sortGenerators(candidateGenerators(), state.sort).filter(function (g) {
+      return !q || g.name.toLowerCase().indexOf(q) !== -1 || (g.title || '').toLowerCase().indexOf(q) !== -1;
+    });
+    clear(refs.gensList);
+    if (!list.length) {
+      refs.gensList.appendChild(el('div', { class: 'wdm-note', text: 'No visited generators yet. Open some generators (or use \u201cLoad all\u201d in the Generators tab) to populate this list.' }));
+      return;
+    }
+    refs.gensList.appendChild(frag(list.map(function (g) {
+      var meta = [g.name];
+      if (g.current) meta.push('open now'); else if (g.t) meta.push(timeAgo(g.t));
+      if (g.bytes != null) meta.push('\u2248 ' + fmtBytes(g.bytes));
+      var titleKids = [];
+      if (g.fav) titleKids.push(el('span', { class: 'wdm-star', text: '\u2605' }));
+      titleKids.push(el('span', { class: 'wdm-name', text: g.title || g.name }));
+      if (g.dbs != null) titleKids.push(el('span', { class: 'wdm-pill' + (g.dbs > 0 ? ' wdm-has' : ''), text: g.dbs > 0 ? (g.dbs + ' DB' + (g.dbs > 1 ? 's' : '')) : 'no data' }));
+      return el('div', { class: 'wdm-item' + (g.name === state.slug ? ' wdm-on' : ''), onclick: function () { selectGenerator(g.name); } }, [
+        el('div', { class: 'wdm-t' }, titleKids),
+        el('div', { class: 'wdm-m', text: meta.join(' \u00b7 ') })
+      ]);
+    })));
+  }
+
+  function refreshCurrent() {
+    if (state.store && state.storeDesc) renderRecords(state.slug, state.db, state.storeDesc);
+    else if (state.db) selectDb(state.slug, state.db);
+    else if (state.slug) selectGenerator(state.slug);
+  }
+
+  function selectGenerator(slug) {
+    state.slug = slug; state.db = null; state.store = null; state.storeDesc = null;
+    releaseAllExcept(slug);
+    renderCrumbs(); renderGens(); setPane('dbs');
+    clear(refs.midTools);
+    refs.midTools.appendChild(sub(slug));
+    spinner(refs.midList, 'Loading databases\u2026');
+    resetMain('');
+    Promise.all([rpc(slug, 'list', {}), rpc(slug, 'estimate', {}).catch(function () { return null; })]).then(function (results) {
+      var dbs = results[0];
+      var est = results[1];
+      rememberScan(slug, dbs.length, est && est.usage);
+      renderGens();
+      clear(refs.midTools);
+      refs.midTools.appendChild(frag([
+        sub(dbs.length + ' database(s)' + (est ? ' \u00b7 \u2248 ' + fmtBytes(est.usage) + ' used' : '')),
+        ghost('\u21bb', function () { selectGenerator(slug); }, 'Reload databases'),
+        ghost('Export all', function () { exportAll(slug); }, 'Export every database on this origin'),
+        ghost('Import', function () { importInto(slug); }, 'Import an idbml dump into this origin')
+      ]));
+      clear(refs.midList);
+      if (!dbs.length) {
+        refs.midList.appendChild(el('div', { class: 'wdm-note', text: 'No IndexedDB databases on this origin.' }));
+        resetMain('This generator has not stored IndexedDB data on this device.');
+        return;
+      }
+      refs.midList.appendChild(frag(dbs.map(function (info) {
+        return el('div', { class: 'wdm-item' + (info.name === state.db ? ' wdm-on' : ''), onclick: function () { selectDb(slug, info.name); } }, [
+          el('div', { class: 'wdm-t' }, [el('span', { class: 'wdm-name', text: info.name })]),
+          el('div', { class: 'wdm-m', text: 'v' + (info.version || '?') })
+        ]);
+      })));
+      resetMain('Pick a database to see its stores.');
+    }).catch(function (err) {
+      clear(refs.midList);
+      refs.midList.appendChild(el('div', { class: 'wdm-note', text: 'Could not read this generator: ' + err.message }));
+    });
+  }
+
+  function selectDb(slug, db) {
+    state.db = db; state.store = null; state.storeDesc = null;
+    renderCrumbs(); setPane('main');
+    markMidSelection();
+    clear(refs.mainTools);
+    refs.mainTools.appendChild(frag([
+      sub(db),
+      ghost('\u21bb', function () { selectDb(slug, db); }, 'Reload schema'),
+      ghost('Export DB', function () { exportDb(slug, db); }),
+      ghost('Duplicate as\u2026', function () { duplicateDb(slug, db); }),
+      btn('Delete DB', function () { deleteDb(slug, db); }, { kind: 'danger' })
+    ]));
+    spinner(refs.mainBody, 'Reading schema\u2026');
+    rpc(slug, 'describe', { db: db }).then(function (desc) {
+      clear(refs.mainBody);
+      if (!desc) { refs.mainBody.appendChild(el('div', { class: 'wdm-note', text: 'Database not found.' })); return; }
+      refs.mainBody.appendChild(frag(desc.stores.map(function (st) {
+        var idxTxt = st.indexes.length ? ('indexes: ' + st.indexes.map(function (x) { return x.name; }).join(', ')) : 'no indexes';
+        var keyTxt = (st.keyPath === null || st.keyPath === undefined) ? 'out-of-line key' : ('key: ' + JSON.stringify(st.keyPath) + (st.autoIncrement ? ' ++' : ''));
+        return el('div', { class: 'wdm-item', onclick: function () { selectStore(slug, db, st); } }, [
+          el('div', { class: 'wdm-t' }, [el('span', { class: 'wdm-name', text: st.name }), el('span', { class: 'wdm-pill', text: String(st.count) })]),
+          el('div', { class: 'wdm-m', text: keyTxt + ' \u00b7 ' + idxTxt })
+        ]);
+      })));
+    }).catch(function (err) { clear(refs.mainBody); refs.mainBody.appendChild(el('div', { class: 'wdm-note', text: 'Error: ' + err.message })); });
+  }
+  function markMidSelection() {
+    Array.prototype.forEach.call(refs.midList.querySelectorAll('.wdm-item'), function (n) {
+      var nameEl = n.querySelector('.wdm-name');
+      n.classList.toggle('wdm-on', !!nameEl && nameEl.textContent === state.db);
+    });
+  }
+
+  function selectStore(slug, db, st) {
+    state.store = st.name; state.storeDesc = st; state.offset = 0; state.filter = ''; state.searchHits = null;
+    renderCrumbs(); setPane('main');
+    renderRecords(slug, db, st);
+  }
+
+  function renderRecords(slug, db, st) {
+    state.storeDesc = st;
+    clear(refs.mainTools);
+    var lastPage = null;
+    var repaint = debounce(paintRows, 120);
+    var filterBox = el('input', { class: 'wdm-field wdm-search', placeholder: 'Filter this page \u2014 Enter scans the whole store\u2026', value: state.filter,
+      oninput: function () { state.filter = filterBox.value; if (state.searchHits) state.searchHits = null; repaint(); },
+      onkeydown: function (e) { if (e.key === 'Enter' && filterBox.value.trim()) deepScan(slug, db, st, filterBox.value.trim()); } });
+    var sizeSel = el('select', { class: 'wdm-field', style: { flex: 'none' }, title: 'Page size', onchange: function () {
+      state.pageSize = parseInt(sizeSel.value, 10); gset('wdmPageSize', state.pageSize); state.offset = 0; renderRecords(slug, db, st);
+    } });
+    [25, 50, 100, 250].forEach(function (n) {
+      var op = el('option', { value: String(n), text: String(n) + '/page' });
+      if (n === state.pageSize) op.selected = true;
+      sizeSel.appendChild(op);
+    });
+    refs.mainTools.appendChild(frag([
+      filterBox, sizeSel,
+      ghost('\u21bb', function () { renderRecords(slug, db, st); }, 'Reload records'),
+      ghost('Export store', function () { exportStoreUi(slug, db, st); }),
+      ghost('Import\u2026', function () { importStoreUi(slug, db, st); }, 'Import records into this store'),
+      btn('+ Record', function () { editRecord(slug, db, st, null); }),
+      btn('Clear', function () { clearStoreUi(slug, db, st); }, { kind: 'danger', title: 'Delete every record in this store' })
+    ]));
+
+    function paintRows() {
+      clear(refs.mainBody);
+      var rows = state.searchHits ? state.searchHits.rows : (lastPage ? lastPage.rows : []);
+      var hasInline = !(st.keyPath === null || st.keyPath === undefined);
+      var needle = state.searchHits ? '' : state.filter.toLowerCase();
+      var tbl = el('table', { class: 'wdm-tbl' });
+      tbl.appendChild(el('tr', {}, [el('th', { text: 'key' }), el('th', { text: 'value' })]));
+      var trs = [];
+      rows.forEach(function (row) {
+        if (needle && row.hay.indexOf(needle) === -1) return;
+        trs.push(el('tr', { class: 'wdm-rec', onclick: function () { editRecord(slug, db, st, { key: row.primaryKey, valueEnc: row.valueEnc, hasInline: hasInline }); } }, [
+          el('td', { class: 'wdm-key', text: row.kp }),
+          el('td', { class: 'wdm-val', text: row.hp })
+        ]));
+      });
+      if (!trs.length) trs.push(el('tr', {}, [el('td', { class: 'wdm-val', html: '<span style="opacity:.55">\u2014 ' + (rows.length ? 'no matches on this page (Enter = scan whole store)' : 'empty') + ' \u2014</span>' }), el('td', {})]));
+      tbl.appendChild(frag(trs));
+      refs.mainBody.appendChild(tbl);
+
+      if (state.searchHits) {
+        refs.mainBody.appendChild(el('div', { class: 'wdm-pager' }, [
+          el('span', { text: 'deep scan: ' + state.searchHits.rows.length + ' match(es) of ' + state.searchHits.scanned + ' scanned' + (state.searchHits.done ? '' : ' (capped)') }),
+          ghost('Back to pages', function () { state.searchHits = null; renderRecords(slug, db, st); })
+        ]));
+      } else if (lastPage) {
+        refs.mainBody.appendChild(el('div', { class: 'wdm-pager' }, [
+          ghost('\u2039 prev', function () { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.pageSize); renderRecords(slug, db, st); } }),
+          el('span', { text: 'rows ' + (state.offset + 1) + '\u2013' + (state.offset + lastPage.rows.length) + ' of ' + st.count }),
+          ghost('next \u203a', function () { if (!lastPage.done) { state.offset += state.pageSize; renderRecords(slug, db, st); } })
+        ]));
+      }
+    }
+
+    if (state.searchHits) { annotateRows(state.searchHits.rows); paintRows(); return; }
+    spinner(refs.mainBody, 'Loading records\u2026');
+    rpc(slug, 'page', { db: db, store: st.name, offset: state.offset, limit: state.pageSize }).then(function (page) {
+      lastPage = page;
+      annotateRows(page.rows);
+      paintRows();
+    }).catch(function (err) { clear(refs.mainBody); refs.mainBody.appendChild(el('div', { class: 'wdm-note', text: 'Error: ' + err.message })); });
+  }
+
+  function deepScan(slug, db, st, query) {
+    spinner(refs.mainBody, 'Scanning every record in ' + st.name + '\u2026');
+    rpc(slug, 'search', { db: db, store: st.name, query: query, limit: 200 }, 90000).then(function (res) {
+      state.searchHits = res;
+      renderRecords(slug, db, st);
+    }).catch(function (err) { toast('Scan failed: ' + err.message); renderRecords(slug, db, st); });
+  }
+
+  /* ---- record editor ---------------------------------------------------- */
+  function editRecord(slug, db, st, existing) {
+    var isNew = !existing;
+    var hasInline = isNew ? !(st.keyPath === null || st.keyPath === undefined) : existing.hasInline;
+    var ta = el('textarea', { class: 'wdm-ta', spellcheck: 'false' });
+    ta.value = isNew ? JSON.stringify({}, null, 2) : JSON.stringify(existing.valueEnc, null, 2);
+    var jsonState = el('div', { class: 'wdm-jsonstate ok', text: 'valid JSON' });
+    ta.addEventListener('input', debounce(function () {
+      var r = tryJson(ta.value);
+      jsonState.className = 'wdm-jsonstate ' + (r.ok ? 'ok' : 'bad');
+      jsonState.textContent = r.ok ? 'valid JSON' : ('invalid: ' + r.error);
+    }, 150));
+    var keyField = null;
+    if (!hasInline) {
+      keyField = el('input', { class: 'wdm-field', placeholder: 'key (required)', style: { flex: 'none', minWidth: '150px' } });
+      if (!isNew) keyField.value = typeof existing.key === 'string' ? existing.key : JSON.stringify(existing.key);
+    }
+    var footKids = [];
+    if (keyField) footKids.push(keyField);
+    footKids.push(el('span', { class: 'wdm-hint', text: 'Stored form, special types tagged (Date, bytes, Map\u2026); tags round-trip on save.' }));
+    footKids.push(ghost('Format', function () {
+      var r = tryJson(ta.value);
+      if (!r.ok) { toast('Invalid JSON: ' + r.error); return; }
+      ta.value = JSON.stringify(r.value, null, 2);
+    }, 'Pretty-print'));
+    footKids.push(ghost('Copy', function () {
+      try { navigator.clipboard.writeText(ta.value).then(function () { toast('Copied'); }, function () { toast('Copy failed'); }); } catch (e) { toast('Copy failed'); }
+    }));
+    if (!isNew) {
+      footKids.push(ghost('Duplicate', doDuplicate, hasInline ? 'Save a copy (clears its key so the store assigns a new one)' : 'Save a copy under a new key'));
+      footKids.push(btn('Delete', doDelete, { kind: 'danger' }));
+    }
+    footKids.push(ghost('Cancel', closeModal));
+    footKids.push(btn('Save', doSave));
+
+    document.body.appendChild(el('div', { class: 'wdm-root wdm-modal', id: 'wdm-modal' }, [
+      el('div', { class: 'wdm-card' }, [
+        el('h3', { text: (isNew ? 'New record' : 'Edit record') + ' \u00b7 ' + db + '/' + st.name }),
+        ta, jsonState,
+        el('div', { class: 'wdm-foot' }, footKids)
+      ])
+    ]));
+    ta.focus();
+
+    function closeModal() { var m = document.getElementById('wdm-modal'); if (m) m.remove(); }
+    function parsedValue() {
+      var r = tryJson(ta.value);
+      if (!r.ok) toast('Invalid JSON: ' + r.error);
+      return r;
+    }
+    function explicitKey() {
+      if (!keyField) return { ok: true };
+      if (keyField.value === '') { toast('This store needs an explicit key.'); return { ok: false }; }
+      return { ok: true, key: jsonOrString(keyField.value) };
+    }
+    function doSave() {
+      var pv = parsedValue(); if (!pv.ok) return;
+      var ek = explicitKey(); if (!ek.ok) return;
+      var args = { db: db, store: st.name, valueEnc: pv.value };
+      if (keyField) args.key = ek.key;
+      rpc(slug, 'putEnc', args).then(function () { closeModal(); toast('Saved'); refreshCount(slug, db, st); })
+        .catch(fail('Save failed'));
+    }
+    function doDuplicate() {
+      var pv = parsedValue(); if (!pv.ok) return;
+      var value = pv.value;
+      if (hasInline && typeof st.keyPath === 'string' && value && typeof value === 'object') {
+        delete value[st.keyPath];   // auto-increment assigns a fresh key
+      }
+      var args = { db: db, store: st.name, valueEnc: value };
+      if (keyField) {
+        var nk = window.prompt('Key for the duplicate:', '');
+        if (nk == null || nk === '') return;
+        args.key = jsonOrString(nk);
+      }
+      rpc(slug, 'putEnc', args).then(function () { closeModal(); toast('Duplicated'); refreshCount(slug, db, st); })
+        .catch(fail('Duplicate failed'));
+    }
+    function doDelete() {
+      if (!confirmYes('Delete this record?')) return;
+      var snapshotEnc = existing.valueEnc;
+      var snapshotKey = existing.key;
+      rpc(slug, 'del', { db: db, store: st.name, key: existing.key }).then(function () {
+        closeModal();
+        pushUndo('record', function () {
+          var args = { db: db, store: st.name, valueEnc: snapshotEnc };
+          if (!hasInline) args.key = snapshotKey;
+          return rpc(slug, 'putEnc', args);
+        });
+        offerUndo('record', 'Record deleted');
+        refreshCount(slug, db, st);
+      }).catch(fail('Delete failed'));
+    }
+  }
+  function refreshCount(slug, db, st) {
+    rpc(slug, 'describe', { db: db }).then(function (desc) {
+      var fresh = desc && desc.stores.filter(function (x) { return x.name === st.name; })[0];
+      renderRecords(slug, db, fresh || st);
+    }).catch(function () { renderRecords(slug, db, st); });
+  }
+
+  /* ---- store / DB tools --------------------------------------------------- */
+  function clearStoreUi(slug, db, st) {
+    if (!confirmYes('Clear ALL ' + st.count + ' record(s) in \u201c' + st.name + '\u201d?')) return;
+    rpc(slug, 'exportStore', { db: db, store: st.name }, 120000).then(function (dump) {
+      var canUndo = dump && !snapshotTooBig(dump);
+      return rpc(slug, 'clear', { db: db, store: st.name }).then(function () {
+        if (canUndo) {
+          pushUndo('clear', function () { return rpc(slug, 'importStore', { db: db, storeDump: dump, mode: 'merge' }, 180000); });
+          offerUndo('clear', 'Store cleared');
+        } else toast('Store cleared (too large to snapshot for undo)');
+        refreshCount(slug, db, st);
+      });
+    }).catch(fail('Clear failed'));
+  }
+  function deleteDb(slug, db) {
+    if (!confirmYes('Delete the ENTIRE database \u201c' + db + '\u201d? All stores and records will be destroyed.')) return;
+    rpc(slug, 'exportDb', { db: db }, 180000).then(function (dump) {
+      var canUndo = dump && !snapshotTooBig(dump);
+      return rpc(slug, 'deleteDb', { db: db }).then(function () {
+        if (canUndo) {
+          pushUndo('deleteDb', function () { return rpc(slug, 'import', { dump: { databases: [dump] }, mode: 'replace' }, 240000); });
+          offerUndo('deleteDb', 'Database deleted');
+        } else toast('Database deleted (too large to snapshot for undo)');
+        selectGenerator(slug);
+      });
+    }).catch(fail('Delete failed'));
+  }
+  function duplicateDb(slug, db) {
+    var as = window.prompt('Duplicate \u201c' + db + '\u201d as:', db + '-copy');
+    if (!as || as === db) return;
+    toast('Duplicating\u2026');
+    rpc(slug, 'dupDb', { db: db, as: as }, 240000).then(function () { toast('Duplicated as \u201c' + as + '\u201d'); selectGenerator(slug); })
+      .catch(fail('Duplicate failed'));
+  }
+  function exportDb(slug, db) {
+    toast('Exporting ' + db + '\u2026');
+    rpc(slug, 'exportDb', { db: db }, 180000).then(function (dump) {
+      download(slug + '.' + db + '.' + stamp() + '.idbml.json',
+        JSON.stringify({ format: 'idbml-export', formatVersion: 1, slug: slug, exportedAt: new Date().toISOString(), databases: [dump] }, null, 2));
+      toast('Exported ' + db);
+    }).catch(fail('Export failed'));
+  }
+  function exportStoreUi(slug, db, st) {
+    toast('Exporting ' + st.name + '\u2026');
+    rpc(slug, 'exportStore', { db: db, store: st.name }, 120000).then(function (dump) {
+      download(slug + '.' + db + '.' + st.name + '.' + stamp() + '.idbml-store.json',
+        JSON.stringify({ format: 'idbml-store', formatVersion: 1, slug: slug, db: db, exportedAt: new Date().toISOString(), store: dump }, null, 2));
+      toast('Exported ' + dump.records.length + ' record(s)');
+    }).catch(fail('Export failed'));
+  }
+  function importStoreUi(slug, db, st) {
+    pickFile().then(function (f) {
+      if (!f) return;
+      var r = tryJson(f.text);
+      if (!r.ok) { toast('Not valid JSON'); return; }
+      var parsed = r.value;
+      var storeDump = null;
+      if (parsed && parsed.format === 'idbml-store' && parsed.store) storeDump = parsed.store;
+      else if (parsed && parsed.format === 'idbml-export' && parsed.databases) {
+        // pull a same-named store out of a full dump
+        parsed.databases.forEach(function (dbd) {
+          (dbd.stores || []).forEach(function (s) { if (s.name === st.name) storeDump = s; });
+        });
+        if (!storeDump) { toast('That dump has no store named \u201c' + st.name + '\u201d.'); return; }
+      } else { toast('File is not an idbml store/export'); return; }
+      storeDump.name = st.name;   // import INTO this store regardless of source name
+      var mode = confirmYes('Import ' + (storeDump.records || []).length + ' record(s) into \u201c' + st.name + '\u201d?\n\nOK = REPLACE store contents\nCancel = MERGE on top') ? 'replace' : 'merge';
+      toast('Importing (' + mode + ')\u2026');
+      rpc(slug, 'importStore', { db: db, storeDump: storeDump, mode: mode }, 180000).then(function () { toast('Imported'); refreshCount(slug, db, st); })
+        .catch(fail('Import failed'));
+    });
+  }
+  function exportAll(slug) {
+    toast('Exporting all databases on ' + slug + '\u2026');
+    rpc(slug, 'exportAll', {}, 240000).then(function (dump) {
+      dump.slug = slug;
+      download(slug + '.all.' + stamp() + '.idbml.json', JSON.stringify(dump, null, 2));
+      toast('Exported ' + (dump.databases ? dump.databases.length : 0) + ' database(s)');
+    }).catch(fail('Export failed'));
+  }
+  function importInto(slug) {
+    pickFile().then(function (f) {
+      if (!f) return;
+      var r = tryJson(f.text);
+      if (!r.ok) { toast('Not valid JSON'); return; }
+      var dump = r.value;
+      if (!dump || !dump.databases) { toast('File is not an idbml export'); return; }
+      var mode = confirmYes('Import ' + dump.databases.length + ' database(s) into \u201c' + slug + '\u201d?\n\nOK = REPLACE matching databases\nCancel = MERGE into existing') ? 'replace' : 'merge';
+      toast('Importing (' + mode + ')\u2026');
+      rpc(slug, 'import', { dump: dump, mode: mode }, 240000).then(function (res) { toast('Imported ' + res.length + ' database(s)'); selectGenerator(slug); })
+        .catch(fail('Import failed'));
+    });
+  }
+
+  /* ---- sweep: back up every listed generator into one file ------------------ */
+  var sweeping = false;
+  function sweepBackup() {
+    if (sweeping) { toast('A sweep is already running'); return; }
+    var list = sortGenerators(candidateGenerators(), 'recent');
+    if (!list.length) { toast('Nothing to sweep \u2014 no visited generators'); return; }
+    if (!confirmYes('Back up ' + list.length + ' generator(s)?\n\nEach is loaded briefly in a hidden frame, one at a time. Generators with no data are recorded and skipped. This can take a while.')) return;
+    sweeping = true;
+    state.slug = state.db = state.store = null;
+    renderCrumbs(); setPane('main');
+    clear(refs.mainTools);
+    var stopAsked = false;
+    var stopBtn = btn('Stop after current', function () { stopAsked = true; stopBtn.disabled = true; }, { kind: 'danger' });
+    refs.mainTools.appendChild(frag([sub('Sweep backup \u2014 ' + list.length + ' generator(s)'), stopBtn]));
+    clear(refs.mainBody);
+    var log = el('div', { class: 'wdm-sweep' });
+    refs.mainBody.appendChild(log);
+    function line(cls, slug, msg) {
+      log.appendChild(el('div', { class: 'row' }, [el('span', { class: cls, text: slug }), el('span', { class: 'dim', text: msg })]));
+      refs.mainBody.scrollTop = refs.mainBody.scrollHeight;
+    }
+
+    var bundle = { format: 'idbml-sweep', formatVersion: 1, exportedAt: new Date().toISOString(), generators: [] };
+    var ok = 0, empty = 0, failed = 0;
+    seqEach(list, function (g) {
+      if (stopAsked) return;
+      line('dim', g.name, 'loading\u2026');
+      return rpc(g.name, 'exportAll', {}, 240000).then(function (dump) {
+        var n = (dump.databases || []).length;
+        var bytes = 0;
+        try { bytes = JSON.stringify(dump.databases || []).length; } catch (e) {}
+        rememberScan(g.name, n, bytes);
+        if (n > 0) { ok++; bundle.generators.push({ slug: g.name, dump: dump }); line('ok', g.name, n + ' DB(s), \u2248 ' + fmtBytes(bytes)); }
+        else { empty++; line('dim', g.name, 'no data'); }
+      }).catch(function (err) {
+        failed++;
+        rememberScan(g.name, 0, null);
+        line('bad', g.name, err.message);
+      }).then(function () { releaseFrame(g.name); });
+    }).then(function () {
+      sweeping = false;
+      renderGens();
+      line('dim', '\u2014', 'done: ' + ok + ' with data, ' + empty + ' empty, ' + failed + ' failed' + (stopAsked ? ' (stopped early)' : ''));
+      if (bundle.generators.length) {
+        download('perchance-sweep.' + stamp() + '.idbml-sweep.json', JSON.stringify(bundle));
+        toast('Sweep complete \u2014 ' + bundle.generators.length + ' generator(s) backed up');
+      } else toast('Sweep complete \u2014 nothing to back up');
+    });
+  }
+
+  /* ---- drawer tab launcher --------------------------------------------------- */
+  function renderLaunch(body) {
+    styleOnce();
+    var wrap = el('div', { class: 'wdm-root wdm-launch' });
+    wrap.appendChild(el('div', { class: 'wdm-lrow' }, [
+      btn('Open Data Manager', open),
+      ghost('\u29C9 Sweep backup', function () { open(); setTimeout(sweepBackup, 60); }, 'Back up every visited generator into one file')
+    ]));
+    wrap.appendChild(frag(sortGenerators(candidateGenerators(), 'recent').slice(0, 8).map(function (g) {
+      var pill = (g.dbs != null)
+        ? el('span', { class: 'wdm-pill' + (g.dbs > 0 ? ' wdm-has' : ''), text: g.dbs > 0 ? (g.dbs + ' DB' + (g.dbs > 1 ? 's' : '')) : 'no data' })
+        : el('span', { class: 'wdm-pill', text: '?' });
+      return el('div', { class: 'wdm-litem', onclick: function () { open(); setTimeout(function () { selectGenerator(g.name); }, 60); } }, [
+        el('span', { style: { flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, text: (g.fav ? '\u2605 ' : '') + (g.title || g.name) }),
+        pill
+      ]);
+    })));
+    wrap.appendChild(el('div', { class: 'wdm-note', style: { padding: '4px 2px 0' }, text: 'Browse, edit, back up, export & import every generator\u2019s IndexedDB \u2014 reach is your visited history. Shift+D opens the manager anywhere.' }));
+    body.appendChild(wrap);
+  }
+
+  /* ---- entry points ------------------------------------------------------------ */
+  function boot() {
+    try { GM_registerMenuCommand('Weld: Data manager (browse all databases)', open); } catch (e) {}
+    try { GM_registerMenuCommand('Weld: Sweep backup (all visited generators)', function () { open(); setTimeout(sweepBackup, 60); }); } catch (e) {}
+    document.addEventListener('keydown', function (e) {
+      var tag = (e.target && e.target.tagName) || '';
+      if (e.shiftKey && (e.key === 'D' || e.key === 'd') && !/INPUT|TEXTAREA|SELECT/.test(tag) && !e.target.isContentEditable) {
+        if (!document.getElementById('wdm-root-panel')) { e.preventDefault(); open(); }
+      }
+    }, false);
+    var api = { open: open, renderTab: renderLaunch, sweep: sweepBackup };
+    window.weldDataManager = api;
+    try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.weldDataManager = api; } catch (e) {}
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 })();
