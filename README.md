@@ -7,7 +7,7 @@
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.37.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.44.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -57,7 +57,7 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 | Tab | What's in it |
 | :-- | :----------- |
 | ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort, and per-row open/edit. A **This Generator** panel gives the open generator two-way GitHub sync (Pull/Push), rename, delete, and backup. |
-| 📒 **Library** | The reader's home: a permanent **Scrapbook** of saved results from any generator (searchable, taggable, exportable), **Chat stories** (read or export any AI Character Chat thread as styled HTML, Markdown, or text — without opening AICC), a **backup guardian** with overdue reminders and storage health, **night light** (auto comfort theme on a schedule), per-generator notes, read-aloud, and a random-favorite button. |
+| 📒 **Library** | The reader's home, grouped by task. **📚 Collect**: a permanent **Scrapbook** of saved results (searchable, taggable, exportable), **Chat stories** (read or export any AICC thread as styled HTML, Markdown, or text), **clipboard history**, and your **👍/👎 ratings**. **🛡 Care**: a **backup guardian**, a **time tracker** (per-generator minutes, CSV export), a **time capsule**, **output rules** (post-processing on save), and **Move everything** (full state export/import). Plus **search everything**, **session replay**, and a **spaced-repetition review queue** in Collect; **My Perchance** stats, **tab snapshots**, **My boundaries**, and a **Ctrl/Cmd+Shift+S** quick-save hotkey; a **keepsake HTML archive** and **recommendation bundles** to share generators; **lore link health** (catches removed/quarantined uploads before they break a character), **generator watch** (update notifications for favorites), and a one-click **platform speed check**; night light gains an **ambient mode** that follows hour and season. A sticky header keeps save / read-aloud / rate / random-favorite in reach. |
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
 | 👁 **Comfort** | Eye-comfort theme filters, font size, line height, max width, a dyslexia-friendly font, focus mode — and an option to apply the same sizing to the **code editor**. |
 | 🛠 **Tools** | Tool cards. **AI Helper**: a custom instruction, or route the helper to your own OpenAI / Anthropic / Google model with your key. **Character Files**: import and export AI Character Chat character `.json` files, or fetch one straight from a GitHub raw URL. |
@@ -119,9 +119,33 @@ Everything in the **📒 Library** tab is for people who *use* generators rather
 
 A permanent, cross-generator collection of saved results. The drawer's **Save** button downloads a one-shot file and **Pins** are per-generator and capped at 12 — the Scrapbook is where great rolls actually live. One click saves the open generator's current output — captured from **inside the generator's sandbox frame** via the agent, reading the real output container and skipping Perchance's own frame chrome (the fullscreen / reload / warnings strip) and any inline scripts. On an AI Character Chat page it recognises the conversation and points you to **Chat stories** instead, where the whole thread exports cleanly from the database; every entry is searchable (text, generator, tags, notes), taggable, annotatable, readable aloud, and links back to the generator it came from. The whole collection (including your per-generator notes) exports to a single JSON file and imports back with duplicate-safe merging. Capacity is 500 entries; when full, the oldest entry rotates out and the save tells you so.
 
+##### 🔍 Search everything
+
+One box that searches everything you've kept, across every generator: Scrapbook entries (title, text, tags, notes), clipboard history, per-generator notes, your 👍/👎 ratings, and recently visited generators — ranked by kind and recency. Copy a hit's text or jump straight to its generator.
+
+##### ⏺ Sessions
+
+Capture the current page's roll history — the same ring the ◀ ▶ history bar walks — as a named, read-only session (up to 20 kept). Replay it in a transcript view with per-roll copy, or export the whole session as Markdown. Works wherever the result-history bar works: generators that render output on the page itself.
+
+##### 🔁 Review
+
+Spaced repetition over your Scrapbook: enroll any entry — vocabulary, names, prompts you want to internalise — and it surfaces here when due. "Got it" stretches the next review out along a 1 → 3 → 7 → 21 → 60-day ladder; "Again" starts the ladder over. Due items appear oldest-first, five at a time.
+
+##### ⭐ Recommend
+
+Recommend a generator to a friend as a small file: the generator slug, your note on why, and an optional sample output. They open it in their Companion — a card shows your note and sample with one-click "Add to favorites" or "Open it." Travels like a character file: no server, no account. (Validated on import; a non-recommendation file is rejected cleanly.)
+
+##### 📋 Clipboard history
+
+Anything you copy on a Perchance page — including text selected *inside* a generator's sandbox frame, which the top page normally can't see (the agent captures the selection at copy time and pushes it up) — lands in a local ring buffer, newest first, capped at 50 with consecutive duplicates skipped. Retrieve a clip an hour after you copied over it: copy it back out, or promote it to a Scrapbook entry in one click. Stored only in this browser; never reads the clipboard itself, only the selection at the moment you copy.
+
+##### 👍 My ratings
+
+Thumbs-up / thumbs-down buttons in the Library header log whether the current roll was good, building a private per-generator quality record (capped at 500 entries with a best-effort snippet). The ratings view tallies 👍/👎 per generator so you can see which ones consistently deliver for you.
+
 ##### 📖 Chat stories
 
-People write long roleplay stories in AI Character Chat with no good way to keep or share them — the raw database export is unreadable. This panel lists every chat thread in any AICC-compatible generator (newest first, with character names), and each thread can be **read** in a clean transcript modal — with read-aloud — or **exported** as a styled HTML page (chat-bubble layout, avatars, light/dark aware), Markdown, or plain text. Strictly read-only: nothing is ever written to the chat database. Message visibility follows AICC's own rules — messages hidden from the user stay hidden, system messages are excluded by default, and all exported HTML is fully escaped (generator HTML is never re-emitted), with only a small safe markdown subset rendered.
+People write long roleplay stories in AI Character Chat with no good way to keep or share them — the raw database export is unreadable. This panel lists every chat thread in any AICC-compatible generator (newest first, with character names), and each thread can be **read** in a clean transcript modal — with read-aloud and a reading-progress bar — or **exported** as a styled HTML page (chat-bubble layout, avatars, light/dark aware), Markdown, or plain text. Strictly read-only: nothing is ever written to the chat database. Message visibility follows AICC's own rules — messages hidden from the user stay hidden, system messages are excluded by default, and all exported HTML is fully escaped (generator HTML is never re-emitted), with only a small safe markdown subset rendered.
 
 #### 🛡 Care — keeping your data safe
 
@@ -129,9 +153,61 @@ People write long roleplay stories in AI Character Chat with no good way to keep
 
 The most common disaster for casual users is the browser quietly evicting months of chats. The guardian shows when your last sweep backup ran, this origin's storage usage against its quota, and whether the browser has marked the storage **persistent** (if not, it says so plainly — eviction is a real risk). One click runs a sweep. If backups are more than 14 days overdue, a gentle reminder toast appears at most once per day.
 
+##### 📊 My Perchance
+
+A reflective summary of your activity, entirely local: time today and this week, your current daily streak, total saves, your 👍/👎 split, the generators you spend the most time with, and the ones you save from most.
+
+##### 📸 Tab snapshots
+
+Save the set of Perchance tabs you have open right now — every tab with the Companion running answers a presence ping over a BroadcastChannel — as a named snapshot (up to 15 kept), and restore the whole working set later with one click. "Fantasy campaign, session 4": five generators, reopened together. Your browser may ask to allow pop-ups for perchance.org the first time you restore.
+
+##### 🔗 Lore link health
+
+The Lore Library stores URLs, and uploads on user.uploads.dev get removed or quarantined over time — silently breaking any character that references them. This card checks each stored lore URL (at most once a day per link, ten per pass, politely spaced) and classifies it: alive, **returned a page** (the tell-tale quarantine signature — an HTML page where a file should be), or dead. Broken links surface with a direct path to the quarantine list. *(online)*
+
+##### 👀 Generator watch
+
+Watches your starred generators' page source and flags when one changes — "this generator was updated." Honest caveat stated in the card: generators with dynamic shell HTML can flag without a real edit; "mark seen" re-baselines. Checks run on demand, up to 30 favorites, spaced half a second apart. *(online)*
+
+##### 🚦 Platform check
+
+"Is Perchance slow right now, or is it me?" One click times a fetch of the platform root and answers plainly: fast (a slow generator is that generator's fault), normal, slow (the platform itself is sluggish), or unreachable. *(online)*
+
+##### ⏱ Time on Perchance
+
+A 30-second heartbeat counts time per generator per day — only while the tab is visible *and* focused, only in this browser, never uploaded. The card shows today and the last 7 days with your top generators, and exports the full log as CSV. Entries older than 90 days are pruned automatically.
+
+##### ⏳ Time capsule
+
+Write a message, pick a future date, seal it. The first time you open Perchance on or after that date, it surfaces — a reminder to revisit a story, a note to your future self. Delivered capsules stay readable in the card until you delete them.
+
+##### ✂ Output rules
+
+Per-generator post-processing applied when output is *saved* (Save current output or quick-save) — the live page is never modified. Rule types: literal or regex find/replace, prefix, suffix, trim, and whitespace collapse; rules can be reordered, toggled off, or set under "all generators" to run everywhere. A bad regex skips that rule instead of poisoning the chain.
+
+##### 🧳 Move everything
+
+One file containing everything the Companion remembers — Scrapbook, clips, capsules, ratings, time log, notes, rules, favorites — exported as JSON and importable on any other browser. **Merge** mode unions lists (by id, local wins on conflicts), sums time-tracking numbers, and shallow-merges note maps so an import never silently destroys local work; **replace** mode makes the file win wholesale per key.
+
+##### ⌨ Quick-save hotkey
+
+**Ctrl/Cmd+Shift+S** anywhere on a Perchance page: if text is selected — even inside the generator's sandbox frame, where the agent captures it — the selection is saved straight to the Scrapbook (tagged `quicksave`); with nothing selected, the generator's current output is saved instead, with your output rules applied.
+
+##### 🛡 My boundaries
+
+Topics you don't want, styles that distress you, lines not to cross — written once, kept locally. One click copies it prefixed as an instruction ("My boundaries for this conversation — please respect them throughout") to paste as the first message of any AI chat. Honest scope: the Companion can't inject this into chats automatically, so it stays a deliberate, visible step rather than invisible plumbing.
+
+##### 📜 Keepsake archive
+
+A single self-contained HTML page holding your saved results and time capsules — readable by anyone with a browser, no app or extension or Perchance account. Made for keeping, printing, or passing on. All saved text is fully HTML-escaped so arbitrary content can't break the page. (Chat stories live in AICC's own database; export those from the Chat stories card.)
+
+##### 🗒 Note badge
+
+If you've saved a note on a generator, a small floating 🗒 badge appears when you visit it — click to read or edit without opening the drawer.
+
 ##### Small comforts
 
-**Read aloud** speaks the current page's output, any Scrapbook entry, or a whole chat story using the browser's built-in speech — local, no network, no key. **Per-generator notes** let you jot "great for elf names" on any generator, searchable from the Scrapbook box. **🎲 Random favorite** (in the sticky header) jumps to a random starred generator. **Night light** now lives in the **Comfort** tab beside the theme it controls — it auto-applies a comfort theme (Warm, Dim, Sepia, Gray, or Dark) on an hour schedule, e.g. Warm from 20:00 to 07:00, restoring your previous theme outside those hours; your manual comfort settings always win when it's off.
+**Read aloud** speaks the current page's output, any Scrapbook entry, or a whole chat story using the browser's built-in speech — local, no network, no key. **Per-generator notes** let you jot "great for elf names" on any generator, searchable from the Scrapbook box. **🎲 Random favorite** (in the sticky header) jumps to a random starred generator. **Night light** now lives in the **Comfort** tab beside the theme it controls — it auto-applies a comfort theme (Warm, Dim, Sepia, Gray, or Dark) on an hour schedule, e.g. Warm from 20:00 to 07:00 — or in **ambient mode**, where the theme follows the hour and season (warm in the evening, earlier in winter, later in summer; dark late at night; southern-hemisphere aware) — restoring your previous theme outside those hours; your manual comfort settings always win when it's off.
 
 ### Tools — AI Helper & character files
 
@@ -318,14 +394,116 @@ Under the hood it's a two-way `postMessage` handshake between the Companion (top
 
 Weld is a suite of composable plugins for building Perchance AI generators. **Weld Companion is its first userscript** — the layer that improves the experience *around* any generator, which a plugin (running inside the sandbox) structurally cannot do.
 
-Planned additions:
-- **Weld Lint overlay** — run Weld's brace-trap scanner live in the editor and underline issues as you type.
-- **A richer GitHub manager** — a sync-status badge and pre-Pull/Push diff, building on the two-way sync that's already here.
-- **Atomic GitHub commits** — push DSL + HTML as a single commit rather than two.
-- **Discover** — browse Perchance's public generator gallery from the drawer, with a "surprise me" random-generator button. (Needs careful, fail-soft parsing of the gallery; deferred until that can be verified against the live site.)
-- **Continue where you left off** — a home surface listing your most recent chats and rolls across generators, with one click back in. (Needs a cached-freshness design so it doesn't spawn hidden frames on every page load.)
-- **Character gallery** — a visual avatar-grid browser for your AICC characters with favorites and "chat now", growing out of the Data Manager's typed view.
-- **Share a roll as an image** — render a Scrapbook entry to a shareable PNG card.
+## Roadmap
+
+Items are grouped by the capability or tool they extend, then sorted easiest-first within each group. **Offline** items need no network access; **Online** items use the Companion's `fetch` capability or an external API.
+
+---
+
+### 🗃 Data Manager & storage
+*All offline unless noted.*
+
+- **Companion-to-Companion sync** — encode full state as a QR code or short link; scan on another device to import. No server. *(offline)*
+- **Asset manager** — inventory every external asset a generator loads, check liveness, offer to re-host dead ones to user.uploads.dev, maintain a personal asset library reusable across generators. *(online)*
+- **Grief recovery / session archaeology** — given any IndexedDB dump, reconstruct a human-readable timeline including deleted rows. Not just "here are your characters" but the full database history. *(offline)*
+
+---
+
+### 📒 Library — Scrapbook & reading
+*All offline unless noted.*
+
+- **Manuscript assembler** — drag saved Scrapbook entries into order, add prose between them, export as `.docx` or `.md`. Perchance as a drafting tool. *(offline)*
+- **Scheduled generators** — run a generator on a schedule and save the result to the Scrapbook automatically. Daily tarot pull, weekly writing prompt. *(offline / background)*
+- **"Send to…" output routing** — pipe output into another open generator as its seed, append to an Obsidian note, post to a Discord webhook, or copy shaped for a specific app. *(online for webhooks)*
+- **Ambient generation / prefetch cache** — maintain a pool of pre-generated outputs for favourite generators, silently refreshing in the background. Zero wait time on open. *(offline)*
+- **Research collector on external sites** — extend the userscript to Wikipedia and other research sites; offer "save to research library" with title, URL, excerpt, and tag — integrated with the existing Scrapbook. *(online)*
+- **Publishing pipeline** — push formatted output to Ghost, Substack, GitHub Pages, or Ko-fi. The generator as the first step in a content pipeline. *(online)*
+
+---
+
+### 👁 Comfort & reading experience
+*All offline.*
+
+- **Accessibility as first-class** — full keyboard navigation with visible focus indicators, voice command input (speech API already wired for output), switch access compatibility, session state that survives accidental tab closes. *(offline)*
+- **Font/contrast override on generator request** — a generator can request a specific Comfort preset via the bus when it loads, for accessibility-sensitive audiences. *(offline)*
+- **Neurodivergent-friendly session tools** — hyperfocus timer with gentle nudge, "session wrap-up" that saves the thread, "where was I" context reconstruction. *(offline)*
+
+---
+
+### ⭐ Generators tab & discovery
+*Mixed.*
+
+- **Dead generator detection and repair suggestions** — health-check starred generators; flag broken ones with a ⚠ badge; suggest fixes for renamed imports. *(online)*
+- **Discover** — browse Perchance's public gallery from the drawer with a "surprise me" button. Needs fail-soft parsing of the live gallery. *(online)*
+- **Competitive awareness for authors** — monitor generators in the same category as yours; alert when a notable one appears or changes; compare outputs side by side. *(online)*
+- **Community generator index** — opt-in anonymised signal aggregation for a community-maintained directory that doesn't require a central authority. *(online)*
+
+---
+
+### 🔧 Tools tab & authoring
+*Mixed.*
+
+- **Ritual and habit support** — honour daily creative rituals; quiet streak tracking; gentle prompt if you haven't done your morning pull. *(offline)*
+- **Living style guide** — extract implicit consistency rules from saved outputs ("all your northern city names end in -vik"), surface them, flag when a new output breaks your canon. *(offline)*
+- **Weld Lint overlay** — run the brace-trap scanner live in the editor; underline issues as you type. *(offline)*
+- **Accessibility audit** — basic check of output contrast ratio, font size, `prefers-reduced-motion` compliance. One-line result in the Generators tab. *(offline)*
+- **Local version history** — track every edit to your generators over time; rollback to any previous version; diff between any two. *(offline)*
+- **Contextual platform tutorial** — "how does this work?" panel explaining the DSL, HTML panel, and imports for the specific generator you're looking at. *(offline)*
+- **DSL reader / explainer** — "explain this generator in plain English," "what does this line do." The AI Helper writes code; this reads it. *(online — uses AI)*
+- **Atomic GitHub commits** — push DSL + HTML as a single commit rather than two. *(online)*
+- **Richer GitHub manager** — sync-status badge and pre-Pull/Push diff. *(online)*
+- **Conflict detection for collaborators** — hash editor content, detect divergence via the bus, alert both authors before either saves. *(offline)*
+- **Taste learning from your Scrapbook** — analyse saved outputs to identify what you consistently like; suggest generator prompt adjustments. *(online — uses AI)*
+- **Creative writing coach** — identify recurring themes, stylistic patterns, and tendencies in your writing; suggest prompts to develop range. *(online — uses AI)*
+- **Platform changelog** — observe when things stop working; crowd-sourced platform observability. *(online, opt-in)*
+
+---
+
+### 🌐 Skybridge — cross-generator & multiplayer
+*All require Skybridge plugin in the generator. All offline unless noted.*
+
+- **Notification / async signal** — when a long generation finishes, publish to the bus; the Companion shows a toast across tabs. *(offline)*
+- **Co-presence signal** — opt-in, anonymous awareness that someone else is using the same generator right now. Not chat, not identity. *(offline / bus)*
+- **Reading journal / progress tracker** — track chapters read, choices made, where you left off. Two tabs stay in sync via bus. *(offline)*
+- **Shared table / multiplayer rolls** — one player's roll appears in another's output via the bus. Requires both users to have the Companion installed. *(offline / bus)*
+- **Shared timer / game clock** — publish tick events; a companion clock generator subscribes and displays the countdown. *(offline / bus)*
+- **Live leaderboard / session stats** — quiz scores written to Companion storage; a scores generator renders the leaderboard. *(offline)*
+- **Persistent world state across "rooms"** — multiple generators as interconnected rooms, sharing player state via the bus, persisting across sessions. *(offline)*
+- **Offline-capable map + journal** — an exploration generator writes discovered locations to IDB; a map generator reads the same store and renders what's been found. *(offline)*
+- **Companion as game master** — multiple generators coordinated as a rules system; cross-generator rules enforced; world state managed in Companion storage. *(offline)*
+- **Emotional continuity for AI chat** — maintain a relationship layer outside AICC: session count, sentiment, recurring themes. Inject lightweight context at each session start. *(offline)*
+- **Grounded storytelling** — before generating, fetch current date, a Wikipedia summary, or today's weather and inject it into the prompt. *(online)*
+- **Physical world bridge** — post a roll result to a Home Assistant webhook, Raspberry Pi, or IFTTT trigger. The output escapes the browser. *(online)*
+
+---
+
+### 📦 Device capabilities
+*New surfaces beyond the current Perchance page.*
+
+- **Opportunistic extension integration** — if Grammarly is active, route output through it for proofread. If a dictionary extension is present, wire up "define this word." *(offline)*
+- **Dictation input** — use the microphone to dictate a note attached to a Scrapbook entry. *(offline)*
+- **Camera — photograph physical assets** — photograph a physical character sheet or map and add it to your collection. *(offline)*
+- **Geolocation tagging** — tag a Scrapbook entry with where you were when you saved it. *(offline)*
+- **Generator as headless content API** — a Service Worker endpoint that other tools (Obsidian, scripts, curl) can query for fresh generator output on demand. *(offline / local)*
+
+---
+
+### 🤝 Social & sharing
+*Mixed.*
+
+- **Companion-to-Companion sync via QR** — encode state as a QR code; scan on another device to import. *(offline)*
+- **Content moderation layer** — for community generators: flag outputs, require review steps, log locally within the group's shared storage. *(offline)*
+- **Safe space signal** — generator authors flag a generator as a safe space; the Companion applies specific UI behaviours on that page. *(offline)*
+- **Cross-tool export formatting** — export characters as Campfire cards, lore as World Anvil articles, locations as Obsidian notes. Formatted for the destination. *(online for some targets)*
+
+---
+
+### 🧑‍⚕️ Human-centred & wellbeing
+*All offline.*
+
+- **Character preservation and grief support** — extra backup redundancy for flagged characters; read-only memorial archive; restore path in plain human terms. *(offline)*
+- **Mental health awareness** — opt-in, private session pattern tracking. Gentle check-in if patterns suggest distress. *(offline)*
+- **Bereavement and attachment care** — treat cherished characters like photographs; long-term archival in plain readable JSON. *(offline)*
 
 ## Contributing
 

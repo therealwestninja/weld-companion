@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.38.0
+// @version      1.44.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -1328,7 +1328,11 @@
       outputText: function () { var o = outputNode(); return o ? nodeToText(o) : ''; },
       comfortGet: function () { return comfortSettings(); },
       comfortSet: function (v) { gset('comfort:' + genName(), v); gset('comfort:_default', v); },
-      applyComfort: function () { applyComfort(); }
+      applyComfort: function () { applyComfort(); },
+      // Read-only copy of the result-history ring (E. below) so modules can
+      // capture a session. histStack is var-hoisted in this scope; at call
+      // time it is the live, populated array.
+      histList: function () { try { return histStack.slice(); } catch (e) { return []; } }
     });
   } catch (e) {}
 
@@ -2583,10 +2587,14 @@
 
 /* =============================================================================
  * Weld Companion appended modules
- *  [1] IDB engine v1.3        [2] Data Manager v2.3
- *  [3] AICC core              [4] AICC pack
- *  [5] AICC typed view        [6] AICC tools
- *  [7] Story export core      [8] Library (task sub-nav: Collect / Care)
+ *  [1] IDB engine v1.3        [2] Data Manager v2.5 (copy + quick-save push)
+ *  [3] AICC core              [4] AICC pack (sentry, lore, recovery)
+ *  [5] AICC typed view        [6] AICC tools (character files)
+ *  [7] Story export core      [8] Library (Collect / Care; ambient night light)
+ *  [9] Offline pack v5 (capsules, clips, ratings, time, rules, search,
+ *      quick-save, state i/o, stats, sessions, snapshots, review, boundaries,
+ *      keepsake archive, recommendations)
+ * [10] Online pack v1 (lore link health, generator watch, platform check)
  * ========================================================================== */
 
 /* ----- [1] IDB ENGINE v1.3 ----- */
@@ -3144,9 +3152,9 @@
   };
 });
 
-/* ----- [2] DATA MANAGER v2.3 ----- */
+/* ----- [2] DATA MANAGER v2.5 ----- */
 /* ============================================================================
- * Weld Companion — Data Manager v2.3  (federated IndexedDB / Dexie browser)
+ * Weld Companion — Data Manager v2.4  (federated IndexedDB / Dexie browser)
  * ----------------------------------------------------------------------------
  * Browse, edit, back up, export and import the IndexedDB databases stored by
  * every Perchance generator you've visited — full CRUD, organized by visited
@@ -3335,6 +3343,31 @@
     announce();
     setTimeout(announce, 400);
     setTimeout(announce, 1500);
+
+    // Clipboard history: copies happen INSIDE this sandbox frame, where the top
+    // frame can't see them. Capture the selection at copy time and push it up;
+    // the coordinator hands it to the offline pack's ring buffer (fail-soft if
+    // that module isn't loaded). Selection text only — never reads the
+    // clipboard itself.
+    document.addEventListener('copy', function () {
+      try {
+        var sel = String(document.getSelection() || '').trim();
+        if (sel.length < 3) return;
+        window.top.postMessage({ channel: CH, type: 'copyEvent', text: sel.slice(0, 10000), slug: slugOf() }, '*');
+      } catch (e) {}
+    });
+
+    // Quick-save chord (Ctrl/Cmd+Shift+S) pressed while focus is INSIDE the
+    // sandbox frame: push the selection up so the top frame can save it.
+    document.addEventListener('keydown', function (e) {
+      try {
+        if (!(e.key === 'S' || e.key === 's') || !e.shiftKey || !(e.ctrlKey || e.metaKey)) return;
+        var sel = String(document.getSelection() || '').trim();
+        if (sel.length < 3) return;   // nothing selected here; let the top frame handle it
+        e.preventDefault();
+        window.top.postMessage({ channel: CH, type: 'quickSaveEvent', text: sel.slice(0, 10000), slug: slugOf() }, '*');
+      } catch (e2) {}
+    });
     return;
   }
 
@@ -3445,6 +3478,14 @@
   window.addEventListener('message', function (ev) {
     var d = ev.data;
     if (!d || d.channel !== CH) return;
+    if (d.type === 'copyEvent') {
+      try { if (window.weldOffline && typeof window.weldOffline.recordCopy === 'function') window.weldOffline.recordCopy(d.text, d.slug); } catch (e) {}
+      return;
+    }
+    if (d.type === 'quickSaveEvent') {
+      try { if (window.weldOffline && typeof window.weldOffline.quickSaveSelection === 'function') window.weldOffline.quickSaveSelection(d.text, d.slug); } catch (e) {}
+      return;
+    }
     if (d.type === 'agentReady') {
       agents[d.origin] = { source: ev.source, slug: d.slug, hasEngine: !!d.hasEngine, t: Date.now() };
       for (var i = agentWaiters.length - 1; i >= 0; i--) { try { agentWaiters[i](d); } catch (e) {} }
@@ -6136,6 +6177,7 @@
       var text = res.text;
       if (!text) { toast('No generator output found on this page'); return false; }
       var slug = currentSlug() || 'unknown';
+      try { var o = window.weldOffline; if (o && typeof o.applyRules === 'function') text = o.applyRules(slug, text); } catch (e) {}
       var r = scrapAdd({ gen: slug, title: text.slice(0, 64).replace(/\s+/g, ' '), text: text, tags: [], note: '' });
       toast('\u2713 Saved to Scrapbook' + (r.overflow ? ' (oldest entry rotated out \u2014 cap is ' + SCRAP_CAP + ')' : ''));
       return true;
@@ -6341,8 +6383,14 @@
         el('div', { class: 'tx', text: m.content })
       ]));
     });
+    var prog = el('div', { style: { height: '3px', background: 'var(--wc-arc,#ff8a3d)', width: '0%', transition: 'width .1s', borderRadius: '0 2px 2px 0', flex: 'none' } });
+    pb.addEventListener('scroll', function () {
+      var max = pb.scrollHeight - pb.clientHeight;
+      prog.style.width = (max > 0 ? Math.min(100, Math.round((pb.scrollTop / max) * 100)) : 100) + '%';
+    });
     var overlay = el('div', { class: 'wlib-reader' }, [
       el('div', { class: 'pane' }, [
+        prog,
         el('div', { class: 'ph' }, [
           el('span', { class: 't', text: tr.title }),
           el('button', { class: 'wlib-mini', text: '\ud83d\udd0a', title: 'Read aloud', onclick: function () { speak(tr.items.map(function (m) { return m.name + '. ' + m.content; }).join('\n')); } }),
@@ -6434,11 +6482,22 @@
     var cfg = libCfg(); var nl = cfg.nightlight || {};
     var h = hooks();
     if (!nl.on || typeof h.comfortGet !== 'function' || typeof h.comfortSet !== 'function' || typeof h.applyComfort !== 'function') return;
-    var active = nightActive(nl, new Date().getHours());
+    var active, wantTheme = nl.theme;
+    if (nl.mode === 'ambient') {
+      // Ambient: theme picked from local hour + season (offline pack core).
+      // Falls back to the schedule if that module isn't loaded.
+      var off = window.weldOffline;
+      var pick = (off && off.core && typeof off.core.ambientTheme === 'function')
+        ? off.core.ambientTheme(new Date(), nl.hemisphere || 'north') : null;
+      if (pick === null) { active = nightActive(nl, new Date().getHours()); }
+      else { active = pick !== 'off'; if (active) wantTheme = pick; }
+    } else {
+      active = nightActive(nl, new Date().getHours());
+    }
     var cur = h.comfortGet();
-    if (active && cur.theme !== nl.theme) {
+    if (active && cur.theme !== wantTheme) {
       if (nlPrevTheme === null) nlPrevTheme = cur.theme || 'off';
-      h.comfortSet(Object.assign({}, cur, { theme: nl.theme })); h.applyComfort();
+      h.comfortSet(Object.assign({}, cur, { theme: wantTheme })); h.applyComfort();
     } else if (!active && nlPrevTheme !== null) {
       h.comfortSet(Object.assign({}, h.comfortGet(), { theme: nlPrevTheme })); h.applyComfort();
       nlPrevTheme = null;
@@ -6457,6 +6516,8 @@
     }
     function save() { cfg.nightlight = nl; libCfgSave(cfg); setCount(nl.on ? 'on' : 'off'); nightTick(); }
     var onToggle = el('input', { type: 'checkbox', onchange: function (e) { nl.on = e.target.checked; save(); } }); onToggle.checked = !!nl.on;
+    var modeSel = el('select', { class: 'wlib-field', style: { flex: '0 0 100px' }, onchange: function (e) { nl.mode = e.target.value; save(); schedRow.style.display = nl.mode === 'ambient' ? 'none' : ''; ambNote.style.display = nl.mode === 'ambient' ? '' : 'none'; } });
+    [['schedule', 'schedule'], ['ambient', 'ambient']].forEach(function (m) { var o = el('option', { value: m[0], text: m[1] }); if ((nl.mode || 'schedule') === m[0]) o.selected = true; modeSel.appendChild(o); });
     var theme = el('select', { class: 'wlib-field', style: { flex: '0 0 110px' }, onchange: function (e) { nl.theme = e.target.value; save(); } });
     ['dim', 'warm', 'sepia', 'gray', 'dark'].forEach(function (t) { var o = el('option', { value: t, text: t }); if (t === nl.theme) o.selected = true; theme.appendChild(o); });
     function hourSel(val, onpick) {
@@ -6464,13 +6525,18 @@
       for (var i = 0; i < 24; i++) { var o = el('option', { value: String(i), text: (i < 10 ? '0' : '') + i + ':00' }); if (i === val) o.selected = true; s.appendChild(o); }
       return s;
     }
-    bd.appendChild(el('div', { class: 'wlib-bar' }, [
-      el('label', { class: 'wlib-note', style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [onToggle, el('span', { text: 'Auto-apply' })]),
+    var schedRow = el('span', { style: { display: (nl.mode === 'ambient' ? 'none' : ''), gap: '6px', alignItems: 'center' } }, [
       theme,
       el('span', { class: 'wlib-note', text: 'from' }), hourSel(nl.from, function (v) { nl.from = v; }),
       el('span', { class: 'wlib-note', text: 'to' }), hourSel(nl.to, function (v) { nl.to = v; })
+    ]);
+    schedRow.style.display = (nl.mode === 'ambient') ? 'none' : 'inline-flex';
+    var ambNote = el('span', { class: 'wlib-note', style: { display: (nl.mode === 'ambient' ? '' : 'none') }, text: 'theme follows the hour and season — warm in the evening (earlier in winter), dark late at night' });
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { flexWrap: 'wrap' } }, [
+      el('label', { class: 'wlib-note', style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [onToggle, el('span', { text: 'Auto-apply' })]),
+      modeSel, schedRow, ambNote
     ]));
-    bd.appendChild(el('div', { class: 'wlib-note', text: 'Applies the comfort theme during these hours and restores your previous theme outside them. Your manual comfort settings always win when night light is off.' }));
+    bd.appendChild(el('div', { class: 'wlib-note', text: 'Applies the comfort theme on schedule (or ambiently) and restores your previous theme outside those hours. Your manual comfort settings always win when night light is off.' }));
   }
 
   /* ====================== random favorite =================================== */
@@ -6515,6 +6581,8 @@
           getOutputResult().then(function (res) { if (res.text) speak(res.text); else toast('No generator output found on this page'); });
         } }),
         el('button', { class: 'wlib-mini', text: '\u25a0 Stop', onclick: stopSpeak }),
+        el('button', { class: 'wlib-mini', text: '\ud83d\udc4d', title: 'Log this roll as good (private quality record)', onclick: function () { var o = window.weldOffline; if (o && o.rate) o.rate(1); else toast('Offline pack not loaded'); } }),
+        el('button', { class: 'wlib-mini', text: '\ud83d\udc4e', title: 'Log this roll as bad', onclick: function () { var o = window.weldOffline; if (o && o.rate) o.rate(-1); else toast('Offline pack not loaded'); } }),
         el('button', { class: 'wlib-mini', text: '\ud83c\udfb2 Random favorite', onclick: randomFavorite })
       ]),
       el('div', { class: 'wlib-nav' }, [navCollect, navCare])
@@ -6529,13 +6597,32 @@
       var n = counts();
       navCollect.querySelector('.badge').textContent = n.sb ? String(n.sb) : '';
       work.innerHTML = '';
+      var off = window.weldOffline || {};
       if (LIB_VIEW === 'collect') {
-        work.appendChild(el('div', { class: 'wlib-intro', text: 'The things you keep \u2014 saved rolls and saved conversations, searchable and exportable.' }));
+        work.appendChild(el('div', { class: 'wlib-intro', text: 'The things you keep \u2014 saved rolls, saved conversations, clips, and your quality record.' }));
+        if (typeof off.renderSearchSection === 'function') work.appendChild(section('\ud83d\udd0d Search everything', '', false, function (bd) { off.renderSearchSection(bd); }));
         work.appendChild(section('\ud83d\udccc Scrapbook', '', true, renderScrapbook));
         work.appendChild(section('\ud83d\udcd6 Chat stories', '', false, renderStories));
+        if (typeof off.renderSessionsCard === 'function') work.appendChild(section('\u23fa Sessions', '', false, off.renderSessionsCard));
+        if (typeof off.renderReviewCard === 'function') work.appendChild(section('\ud83d\udd01 Review', '', false, off.renderReviewCard));
+        if (typeof off.renderClipboardSection === 'function') work.appendChild(section('\ud83d\udccb Clipboard history', '', false, off.renderClipboardSection));
+        if (typeof off.renderRatingsCard === 'function') work.appendChild(section('\ud83d\udc4d My ratings', '', false, off.renderRatingsCard));
+        if (typeof off.renderRecCard === 'function') work.appendChild(section('\u2b50 Recommend', '', false, off.renderRecCard));
       } else {
-        work.appendChild(el('div', { class: 'wlib-intro', text: 'Keep your generator data safe. (Reading comfort and night light live in the Comfort tab.)' }));
+        work.appendChild(el('div', { class: 'wlib-intro', text: 'Keep your generator data safe, and a few quiet helpers. (Reading comfort and night light live in the Comfort tab.)' }));
         work.appendChild(section('\ud83d\udee1 Backup guardian', '', true, renderGuardian));
+        if (typeof off.renderStatsCard === 'function') work.appendChild(section('\ud83d\udcca My Perchance', '', false, off.renderStatsCard));
+        if (typeof off.renderSnapshotCard === 'function') work.appendChild(section('\ud83d\udcf8 Tab snapshots', '', false, off.renderSnapshotCard));
+        var on = window.weldOnline || {};
+        if (typeof on.renderLoreHealthCard === 'function') work.appendChild(section('\ud83d\udd17 Lore link health', '', false, on.renderLoreHealthCard));
+        if (typeof on.renderWatchCard === 'function') work.appendChild(section('\ud83d\udc40 Generator watch', '', false, on.renderWatchCard));
+        if (typeof on.renderSpeedCard === 'function') work.appendChild(section('\ud83d\udea6 Platform check', '', false, on.renderSpeedCard));
+        if (typeof off.renderTimeCard === 'function') work.appendChild(section('\u23f1 Time on Perchance', '', false, off.renderTimeCard));
+        if (typeof off.renderCapsuleCard === 'function') work.appendChild(section('\u23f3 Time capsule', '', false, off.renderCapsuleCard));
+        if (typeof off.renderRulesCard === 'function') work.appendChild(section('\u2702 Output rules', '', false, off.renderRulesCard));
+        if (typeof off.renderBoundariesCard === 'function') work.appendChild(section('\ud83d\udee1 My boundaries', '', false, off.renderBoundariesCard));
+        if (typeof off.renderPortabilityCard === 'function') work.appendChild(section('\ud83e\uddf3 Move everything', '', false, function (bd) { off.renderPortabilityCard(bd); }));
+        if (typeof off.renderLegacyCard === 'function') work.appendChild(section('\ud83d\udcdc Keepsake archive', '', false, function (bd) { off.renderLegacyCard(bd); }));
       }
     }
   }
@@ -6553,4 +6640,1509 @@
     speak: speak, stopSpeak: stopSpeak
   };
 })();
+
+/* ----- [9] OFFLINE PACK v5 ----- */
+/* Weld Offline Pack — the first batch of offline roadmap items. No network,
+ * no AI, no platform dependencies: everything here is GM storage + DOM.
+ *
+ *   ⏳ Time capsule       — write a message today, set a date; it surfaces the
+ *                           next time Perchance is opened after that date.
+ *   📋 Clipboard history  — every copy on a Perchance page (including inside
+ *                           generator sandbox frames, captured by the agent and
+ *                           pushed to the top frame) lands in a local ring
+ *                           buffer. Cap 50, consecutive duplicates skipped.
+ *   🗒 Annotation badge   — if you saved a note on this generator (Library →
+ *                           Scrapbook), a small floating badge shows it exists;
+ *                           click to read or edit without opening the drawer.
+ *   👍 Quality log        — thumbs-up / thumbs-down the current roll; builds a
+ *                           private per-generator ratings tally over time.
+ *   ⏱ Time tracker       — 30-second heartbeat while the tab is visible and
+ *                           focused; per-generator per-day minutes, CSV export.
+ *   📊 Reading progress   — (lives in library.js's reader modal; this module
+ *                           only holds the shared core.)
+ *
+ * Structure: createOfflineCore() is pure logic (Node-testable, UMD-exported);
+ * the browser IIFE below it wires storage, UI cards, and the boot hooks, and
+ * exposes window.weldOffline for the Library tab to mount.
+ */
+(function (globalRoot, moduleRef) {
+  'use strict';
+
+  function createOfflineCore() {
+
+    // ---- clipboard ring -----------------------------------------------------
+    // push(list, text, slug, now) -> new list (newest first). Rules: trim, skip
+    // <3 chars, hard-cap entry at 10k chars, skip if identical to newest entry,
+    // cap list at 50.
+    var CLIP_CAP = 50, CLIP_MIN = 3, CLIP_MAXLEN = 10000;
+    function clipPush(list, text, slug, now) {
+      var t = String(text == null ? '' : text).trim();
+      if (t.length < CLIP_MIN) return list;
+      if (t.length > CLIP_MAXLEN) t = t.slice(0, CLIP_MAXLEN);
+      if (list.length && list[0].text === t) return list;
+      var next = [{ text: t, gen: slug || 'unknown', t: now || Date.now() }].concat(list);
+      return next.length > CLIP_CAP ? next.slice(0, CLIP_CAP) : next;
+    }
+
+    // ---- time capsules ------------------------------------------------------
+    // A capsule: { id, msg, due (ms), created, delivered (ms|null) }.
+    function capsulesDue(list, now) {
+      now = now || Date.now();
+      return (list || []).filter(function (c) { return c && !c.delivered && c.due <= now; });
+    }
+    function capsuleDeliver(list, ids, now) {
+      now = now || Date.now();
+      return (list || []).map(function (c) {
+        return (c && ids.indexOf(c.id) !== -1) ? Object.assign({}, c, { delivered: now }) : c;
+      });
+    }
+
+    // ---- time tracking ------------------------------------------------------
+    // Store shape: { "YYYY-MM-DD|slug": seconds }. dayKey uses LOCAL date so a
+    // session at 23:50 counts toward the day the user experienced.
+    function dayKey(d) {
+      d = d || new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function trackAdd(map, slug, seconds, d) {
+      var k = dayKey(d) + '|' + (slug || 'unknown');
+      var next = Object.assign({}, map);
+      next[k] = (next[k] || 0) + seconds;
+      return next;
+    }
+    function trackAggregate(map, now) {
+      now = now || new Date();
+      var todayK = dayKey(now);
+      var weekCut = new Date(now.getTime() - 6 * 86400000);
+      var today = 0, week = 0, perGenWeek = {};
+      for (var k in map) {
+        var parts = k.split('|');
+        var date = parts[0], slug = parts.slice(1).join('|');
+        var secs = map[k] || 0;
+        if (date === todayK) today += secs;
+        // string compare works for zero-padded ISO dates
+        if (date >= dayKey(weekCut)) {
+          week += secs;
+          perGenWeek[slug] = (perGenWeek[slug] || 0) + secs;
+        }
+      }
+      var top = Object.keys(perGenWeek)
+        .map(function (s) { return { gen: s, seconds: perGenWeek[s] }; })
+        .sort(function (a, b) { return b.seconds - a.seconds; })
+        .slice(0, 5);
+      return { todaySeconds: today, weekSeconds: week, topWeek: top };
+    }
+    function trackToCsv(map) {
+      var rows = [['date', 'generator', 'minutes']];
+      Object.keys(map).sort().forEach(function (k) {
+        var parts = k.split('|');
+        rows.push([parts[0], parts.slice(1).join('|'), String(Math.round((map[k] || 0) / 60))]);
+      });
+      return rows.map(function (r) {
+        return r.map(function (c) { return /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c; }).join(',');
+      }).join('\n');
+    }
+    // prune entries older than `days` (default 90) so the map can't grow forever
+    function trackPrune(map, days, now) {
+      var cut = dayKey(new Date((now ? now.getTime() : Date.now()) - (days || 90) * 86400000));
+      var next = {};
+      for (var k in map) { if (k.split('|')[0] >= cut) next[k] = map[k]; }
+      return next;
+    }
+
+    // ---- ratings ------------------------------------------------------------
+    var RATE_CAP = 500;
+    function ratePush(list, gen, vote, snippet, now) {
+      var entry = { gen: gen || 'unknown', vote: vote > 0 ? 1 : -1, snippet: String(snippet || '').slice(0, 200), t: now || Date.now() };
+      var next = [entry].concat(list || []);
+      return next.length > RATE_CAP ? next.slice(0, RATE_CAP) : next;
+    }
+    function rateTally(list) {
+      var byGen = {};
+      (list || []).forEach(function (r) {
+        if (!r || !r.gen) return;
+        var g = byGen[r.gen] || (byGen[r.gen] = { gen: r.gen, up: 0, down: 0, last: 0 });
+        if (r.vote > 0) g.up++; else g.down++;
+        if (r.t > g.last) g.last = r.t;
+      });
+      return Object.keys(byGen).map(function (k) { return byGen[k]; })
+        .sort(function (a, b) { return (b.up + b.down) - (a.up + a.down); });
+    }
+
+    // ---- output post-processing rules --------------------------------------
+    // A rule: { type: 'replace'|'prefix'|'suffix'|'trim'|'collapse',
+    //           find, with, regex, flags, off }. Applied in order; a bad regex
+    //           skips that rule rather than poisoning the chain.
+    function ruleApply(rules, text) {
+      var t = String(text == null ? '' : text);
+      (rules || []).forEach(function (r) {
+        if (!r || r.off) return;
+        try {
+          if (r.type === 'replace') {
+            if (r.regex) t = t.replace(new RegExp(r.find, r.flags || 'g'), r.with == null ? '' : String(r.with));
+            else if (r.find) t = t.split(r.find).join(r.with == null ? '' : String(r.with));
+          } else if (r.type === 'prefix') t = String(r.text || '') + t;
+          else if (r.type === 'suffix') t = t + String(r.text || '');
+          else if (r.type === 'trim') t = t.trim();
+          else if (r.type === 'collapse') t = t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
+        } catch (e) { /* bad rule: skip */ }
+      });
+      return t;
+    }
+
+    // ---- full-state merge ----------------------------------------------------
+    // Per-key strategies so an import never silently nukes local work:
+    //   lists    -> union (by id when present, else text/gen+t), newest first
+    //   sum-maps -> numeric sum per key (time tracking)
+    //   obj-maps -> shallow merge, incoming wins per field
+    //   scalars  -> incoming wins
+    // mode 'replace' skips all of that: incoming wins per key wholesale.
+    function stateMerge(current, incoming, mode) {
+      if (mode === 'replace') return Object.assign({}, current, incoming);
+      var out = Object.assign({}, current);
+      Object.keys(incoming || {}).forEach(function (k) {
+        var inc = incoming[k], cur = out[k];
+        if (cur == null) { out[k] = inc; return; }
+        if (Array.isArray(cur) && Array.isArray(inc)) {
+          var seen = {}, merged = [];
+          cur.concat(inc).forEach(function (e) {
+            var id = e && (e.id != null ? 'i' + e.id : ((e.text || e.gen || '') + '|' + (e.t || '')));
+            if (id && seen[id]) return;
+            if (id) seen[id] = 1;
+            merged.push(e);
+          });
+          merged.sort(function (a, b) { return ((b && b.t) || 0) - ((a && a.t) || 0); });
+          out[k] = merged;
+        } else if (typeof cur === 'object' && typeof inc === 'object') {
+          var incKeys = Object.keys(inc), curKeys = Object.keys(cur);
+          var numeric = incKeys.length && incKeys.every(function (kk) { return typeof inc[kk] === 'number'; }) &&
+                        curKeys.every(function (kk) { return typeof cur[kk] === 'number'; });
+          if (numeric) {
+            var m = Object.assign({}, cur);
+            incKeys.forEach(function (kk) { m[kk] = (m[kk] || 0) + inc[kk]; });
+            out[k] = m;
+          } else out[k] = Object.assign({}, cur, inc);
+        } else out[k] = inc;
+      });
+      return out;
+    }
+
+    // ---- unified search --------------------------------------------------------
+    // sources: { scrapbook: [], clips: [], ratings: [], notes: {slug:text}, recents: [] }
+    // Plain case-insensitive substring; ranked by kind weight then recency.
+    function searchAll(q, sources) {
+      q = String(q || '').trim().toLowerCase();
+      if (q.length < 2) return [];
+      var hits = [];
+      function has(s) { return s && String(s).toLowerCase().indexOf(q) !== -1; }
+      ((sources && sources.scrapbook) || []).forEach(function (e) {
+        if (has(e.title) || has(e.text) || has(e.gen) || has(e.note) || (e.tags || []).some(has))
+          hits.push({ kind: 'scrapbook', w: 4, gen: e.gen, title: e.title || (e.text || '').slice(0, 60), snippet: (e.text || '').slice(0, 140), t: e.t || 0, ref: e });
+      });
+      var notes = (sources && sources.notes) || {};
+      Object.keys(notes).forEach(function (slug) {
+        if (has(slug) || has(notes[slug]))
+          hits.push({ kind: 'note', w: 3, gen: slug, title: 'Note on ' + slug, snippet: String(notes[slug]).slice(0, 140), t: 0, ref: slug });
+      });
+      ((sources && sources.clips) || []).forEach(function (c) {
+        if (has(c.text) || has(c.gen))
+          hits.push({ kind: 'clip', w: 2, gen: c.gen, title: (c.text || '').slice(0, 60), snippet: (c.text || '').slice(0, 140), t: c.t || 0, ref: c });
+      });
+      ((sources && sources.ratings) || []).forEach(function (r) {
+        if (has(r.gen) || has(r.snippet))
+          hits.push({ kind: 'rating', w: 1, gen: r.gen, title: (r.vote > 0 ? '+ ' : '- ') + r.gen, snippet: (r.snippet || '').slice(0, 140), t: r.t || 0, ref: r });
+      });
+      ((sources && sources.recents) || []).forEach(function (g) {
+        var nm = typeof g === 'string' ? g : (g && g.name);
+        if (has(nm)) hits.push({ kind: 'generator', w: 2, gen: nm, title: nm, snippet: '', t: (g && g.t) || 0, ref: nm });
+      });
+      hits.sort(function (a, b) { return (b.w - a.w) || (b.t - a.t); });
+      return hits.slice(0, 40);
+    }
+
+    // ---- usage stats -----------------------------------------------------------
+    // streak: consecutive days (ending today or yesterday) with any tracked time.
+    function streakCalc(trackMap, now) {
+      now = now || new Date();
+      var days = {};
+      for (var k in trackMap) { if (trackMap[k] > 0) days[k.split('|')[0]] = 1; }
+      var streak = 0;
+      var d = new Date(now.getTime());
+      if (!days[dayKey(d)]) d = new Date(d.getTime() - 86400000);   // allow "yesterday" anchor
+      while (days[dayKey(d)]) { streak++; d = new Date(d.getTime() - 86400000); }
+      return streak;
+    }
+    // statsBuild: one reflective summary over everything the pack collects.
+    function statsBuild(opts) {
+      opts = opts || {};
+      var track = opts.track || {}, ratings = opts.ratings || [], scrapbook = opts.scrapbook || [], now = opts.now || new Date();
+      var agg = trackAggregate(track, now);
+      var savesByGen = {};
+      scrapbook.forEach(function (e) { if (e && e.gen) savesByGen[e.gen] = (savesByGen[e.gen] || 0) + 1; });
+      var topSaves = Object.keys(savesByGen).map(function (g) { return { gen: g, saves: savesByGen[g] }; })
+        .sort(function (a, b) { return b.saves - a.saves; }).slice(0, 5);
+      var up = 0, down = 0;
+      ratings.forEach(function (r) { if (r && r.vote > 0) up++; else if (r) down++; });
+      return {
+        streakDays: streakCalc(track, now),
+        todaySeconds: agg.todaySeconds, weekSeconds: agg.weekSeconds,
+        topByTime: agg.topWeek, topBySaves: topSaves,
+        totalSaves: scrapbook.length, ratingsUp: up, ratingsDown: down
+      };
+    }
+
+    // ---- presence / tab snapshot --------------------------------------------------
+    // presenceReduce: replies from live tabs -> deduped [{url,title,slug}], own tab
+    // first when included, then alphabetical by slug for a stable snapshot.
+    function presenceReduce(replies, ownUrl) {
+      var seen = {}, out = [];
+      (replies || []).forEach(function (r) {
+        if (!r || !r.url || seen[r.url]) return;
+        seen[r.url] = 1;
+        out.push({ url: r.url, title: r.title || r.slug || r.url, slug: r.slug || '' });
+      });
+      out.sort(function (a, b) {
+        if (ownUrl) { if (a.url === ownUrl) return -1; if (b.url === ownUrl) return 1; }
+        return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+      });
+      return out;
+    }
+
+    // ---- named capped lists (sessions, snapshots) ------------------------------------
+    function namedAdd(list, entry, cap) {
+      var next = [Object.assign({ id: 'n-' + (entry.t || 0) + '-' + Math.floor(Math.random() * 1e4) }, entry)].concat(list || []);
+      return next.length > (cap || 20) ? next.slice(0, cap || 20) : next;
+    }
+
+    // ---- ambient theme ------------------------------------------------------------
+    // Picks a comfort theme from local time + season; 'off' means restore the
+    // user's own theme. Winter evenings warm earlier; summer later. Hemisphere
+    // flips the season ('north' default).
+    function ambientTheme(date, hemisphere) {
+      date = date || new Date();
+      var m = date.getMonth();          // 0..11
+      var h = date.getHours();
+      var winter = (m <= 1 || m === 11);            // Dec-Feb
+      var summer = (m >= 5 && m <= 7);              // Jun-Aug
+      if (hemisphere === 'south') { var t = winter; winter = summer; summer = t; }
+      var eveningStart = winter ? 17 : summer ? 21 : 19;
+      if (h >= 23 || h < 6) return 'dark';
+      if (h >= eveningStart) return 'warm';
+      return 'off';
+    }
+
+    // ---- spaced repetition -----------------------------------------------------------
+    // srs = { due (ms), interval (days), reps }. 'good' advances along the ladder;
+    // 'again' resets to the first step. Ladder: 1, 3, 7, 21, 60 days.
+    var SRS_STEPS = [1, 3, 7, 21, 60];
+    function srsGrade(srs, grade, now) {
+      now = now || Date.now();
+      var reps = (srs && srs.reps) || 0;
+      if (grade === 'again') reps = 0; else reps = Math.min(reps + 1, SRS_STEPS.length);
+      var interval = SRS_STEPS[Math.max(0, reps - 1)] || SRS_STEPS[0];
+      if (grade === 'again') interval = SRS_STEPS[0];
+      return { due: now + interval * 86400000, interval: interval, reps: reps };
+    }
+    function srsDue(entries, now) {
+      now = now || Date.now();
+      return (entries || []).filter(function (e) { return e && e.srs && e.srs.due <= now; })
+        .sort(function (a, b) { return a.srs.due - b.srs.due; });
+    }
+
+    // ---- legacy export -------------------------------------------------------------
+    // Build a single self-contained, human-readable HTML archive of saved work,
+    // openable by anyone with a browser and no extension. esc() must neutralise
+    // all five HTML-significant chars so arbitrary saved text can't break out.
+    function legacyEsc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    function legacyBuild(data, now) {
+      now = now || new Date();
+      var sb = data.scrapbook || [], stories = data.stories || [], caps = data.capsules || [];
+      var parts = [];
+      parts.push('<!doctype html><html><head><meta charset="utf-8">');
+      parts.push('<meta name="viewport" content="width=device-width,initial-scale=1">');
+      parts.push('<title>My Perchance archive</title><style>');
+      parts.push('body{font:16px/1.6 Georgia,serif;max-width:760px;margin:0 auto;padding:28px 18px;color:#222;background:#faf8f4}');
+      parts.push('h1{font-size:26px}h2{font-size:20px;margin-top:34px;border-bottom:1px solid #ddd;padding-bottom:4px}');
+      parts.push('h3{font-size:16px;margin-bottom:2px}.meta{color:#888;font-size:12px;margin:0 0 8px}');
+      parts.push('.entry{margin:0 0 22px}.body{white-space:pre-wrap}blockquote{border-left:3px solid #ccc;margin:6px 0;padding:2px 0 2px 12px;color:#444}');
+      parts.push('footer{margin-top:40px;border-top:1px solid #ddd;padding-top:10px;color:#999;font-size:12px}</style></head><body>');
+      parts.push('<h1>My Perchance archive</h1>');
+      parts.push('<p class="meta">' + legacyEsc(now.toLocaleString()) + ' \u00b7 ' + sb.length + ' saved item' + (sb.length === 1 ? '' : 's') + ', ' + stories.length + ' chat stor' + (stories.length === 1 ? 'y' : 'ies') + '</p>');
+      if (sb.length) {
+        parts.push('<h2>Saved results</h2>');
+        sb.forEach(function (e) {
+          parts.push('<div class="entry"><h3>' + legacyEsc(e.title || '(untitled)') + '</h3>');
+          parts.push('<p class="meta">' + legacyEsc(e.gen || '') + (e.t ? ' \u00b7 ' + legacyEsc(new Date(e.t).toLocaleDateString()) : '') + (e.tags && e.tags.length ? ' \u00b7 ' + legacyEsc(e.tags.join(', ')) : '') + '</p>');
+          parts.push('<div class="body">' + legacyEsc(e.text || '') + '</div>');
+          if (e.note) parts.push('<blockquote>' + legacyEsc(e.note) + '</blockquote>');
+          parts.push('</div>');
+        });
+      }
+      if (stories.length) {
+        parts.push('<h2>Chat stories</h2>');
+        stories.forEach(function (s) {
+          parts.push('<div class="entry"><h3>' + legacyEsc(s.title || '(untitled)') + '</h3>');
+          (s.messages || []).forEach(function (m) {
+            parts.push('<p class="meta">' + legacyEsc(m.who || '') + '</p><div class="body">' + legacyEsc(m.text || '') + '</div>');
+          });
+          parts.push('</div>');
+        });
+      }
+      if (caps.length) {
+        parts.push('<h2>Time capsules</h2>');
+        caps.forEach(function (c) {
+          parts.push('<div class="entry"><p class="meta">sealed ' + legacyEsc(new Date(c.created).toLocaleDateString()) + (c.delivered ? ' \u00b7 opened ' + legacyEsc(new Date(c.delivered).toLocaleDateString()) : ' \u00b7 not yet opened') + '</p>');
+          parts.push('<div class="body">' + legacyEsc(c.msg || '') + '</div></div>');
+        });
+      }
+      parts.push('<footer>Made with Perchance. This file is self-contained \u2014 it needs no app or extension to read.</footer>');
+      parts.push('</body></html>');
+      return parts.join('\n');
+    }
+
+    // ---- recommendation bundles --------------------------------------------------------
+    // A bundle: { meta:{type,t}, slug, note, sample }. buildRec makes one; parseRec
+    // validates an incoming file and returns {ok, bundle|error}.
+    function buildRec(slug, note, sample, now) {
+      return { meta: { type: 'weld-generator-rec-v1', t: now || Date.now() }, slug: String(slug || '').trim(), note: String(note || '').trim(), sample: String(sample || '').slice(0, 2000) };
+    }
+    function parseRec(obj) {
+      if (!obj || typeof obj !== 'object') return { ok: false, error: 'Not a recommendation file.' };
+      if (!obj.meta || obj.meta.type !== 'weld-generator-rec-v1') return { ok: false, error: 'Not a Weld recommendation (wrong type).' };
+      if (!obj.slug) return { ok: false, error: 'Recommendation has no generator.' };
+      return { ok: true, bundle: { slug: String(obj.slug), note: String(obj.note || ''), sample: String(obj.sample || ''), t: obj.meta.t || 0 } };
+    }
+
+    return {
+      clipPush: clipPush, CLIP_CAP: CLIP_CAP,
+      legacyBuild: legacyBuild, legacyEsc: legacyEsc, buildRec: buildRec, parseRec: parseRec,
+      ambientTheme: ambientTheme, srsGrade: srsGrade, srsDue: srsDue, SRS_STEPS: SRS_STEPS,
+      statsBuild: statsBuild, streakCalc: streakCalc, presenceReduce: presenceReduce, namedAdd: namedAdd,
+      ruleApply: ruleApply, stateMerge: stateMerge, searchAll: searchAll,
+      capsulesDue: capsulesDue, capsuleDeliver: capsuleDeliver,
+      dayKey: dayKey, trackAdd: trackAdd, trackAggregate: trackAggregate, trackToCsv: trackToCsv, trackPrune: trackPrune,
+      ratePush: ratePush, rateTally: rateTally
+    };
+  }
+
+  if (moduleRef && moduleRef.exports) { moduleRef.exports = createOfflineCore; return; }
+  globalRoot.WeldOfflineCore = createOfflineCore;
+
+  /* ======================= browser side (top frame only) =================== */
+  if (typeof window === 'undefined' || window.top !== window) return;
+
+  var core = createOfflineCore();
+  var NS = 'weldCompanion';
+  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    attrs = attrs || {};
+    for (var k in attrs) {
+      if (k === 'text') n.textContent = attrs[k];
+      else if (k === 'class') n.className = attrs[k];
+      else if (k === 'style' && typeof attrs[k] === 'object') Object.assign(n.style, attrs[k]);
+      else if (/^on/.test(k)) n.addEventListener(k.slice(2), attrs[k]);
+      else n.setAttribute(k, attrs[k]);
+    }
+    (kids || []).forEach(function (c) { if (c) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function toast(msg, ms) {
+    var t = document.querySelector('.weld-off-toast'); if (t) t.remove();
+    t = el('div', { class: 'weld-off-toast', text: msg, style: {
+      position: 'fixed', bottom: '22px', left: '50%', transform: 'translateX(-50%)', zIndex: '99999999',
+      background: 'var(--wc-surface-2,#1a1f28)', color: 'var(--wc-ink,#e8e4dc)',
+      border: '1px solid var(--wc-line,rgba(255,255,255,.12))', borderRadius: '9px',
+      padding: '8px 14px', font: '12.5px system-ui', boxShadow: '0 10px 30px -10px rgba(0,0,0,.6)'
+    } });
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, ms || 2600);
+  }
+  function currentSlug() {
+    var m = location.hostname === 'perchance.org' ? location.pathname.match(/^\/([^/#?]+)/) : null;
+    return m ? m[1] : null;
+  }
+  function fmtMins(secs) {
+    var m = Math.round(secs / 60);
+    if (m < 60) return m + 'm';
+    return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+  function download(name, text, mime) {
+    var a = el('a', { href: URL.createObjectURL(new Blob([text], { type: mime || 'text/plain' })), download: name });
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { a.remove(); URL.revokeObjectURL(a.href); }, 1500);
+  }
+
+  /* ---- clipboard history --------------------------------------------------- */
+  function recordCopy(text, slug) {
+    var list = gget('clipRing', []) || [];
+    var next = core.clipPush(list, text, slug || currentSlug() || 'unknown', Date.now());
+    if (next !== list) gset('clipRing', next);
+  }
+  // top-frame copies (drawer, Library, anywhere on the host page)
+  document.addEventListener('copy', function () {
+    try { recordCopy(String(document.getSelection() || ''), currentSlug()); } catch (e) {}
+  });
+
+  function renderClipboardSection(bd, setCount) {
+    var list = gget('clipRing', []) || [];
+    setCount(list.length ? String(list.length) : '');
+    if (!list.length) {
+      bd.appendChild(el('div', { class: 'wlib-note', text: 'Nothing copied yet. Anything you copy on a Perchance page \u2014 including inside a generator \u2014 is kept here for this device, newest first (last ' + core.CLIP_CAP + ').' }));
+      return;
+    }
+    var wrap = el('div');
+    list.slice(0, 20).forEach(function (c) {
+      var row = el('div', { class: 'wlib-row' });
+      row.appendChild(el('div', { class: 'main' }, [
+        el('div', { class: 'meta', text: c.gen + ' \u00b7 ' + new Date(c.t).toLocaleString() }),
+        el('div', { class: 'body', text: c.text })
+      ]));
+      row.appendChild(el('div', { class: 'wlib-acts' }, [
+        el('button', { class: 'wlib-mini', text: 'Copy', onclick: function () { try { navigator.clipboard.writeText(c.text).then(function () { toast('Copied'); }); } catch (e) {} } }),
+        el('button', { class: 'wlib-mini', text: '\u2913 Scrapbook', title: 'Save this clip as a Scrapbook entry', onclick: function () {
+          var sb = gget('scrapbook', []) || [];
+          sb.unshift({ id: 'sb-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), gen: c.gen, title: c.text.slice(0, 64).replace(/\s+/g, ' '), text: c.text, tags: ['clip'], note: '', t: Date.now() });
+          if (sb.length > 500) sb = sb.slice(0, 500);
+          gset('scrapbook', sb); toast('\u2713 Saved to Scrapbook');
+        } })
+      ]));
+      wrap.appendChild(row);
+    });
+    if (list.length > 20) wrap.appendChild(el('div', { class: 'wlib-note', text: '\u2026 ' + (list.length - 20) + ' older clips kept.' }));
+    bd.appendChild(wrap);
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '8px' } }, [
+      el('button', { class: 'wlib-mini', text: 'Clear history', onclick: function () {
+        if (window.confirm('Clear the clipboard history? (Scrapbook entries are not affected.)')) { gset('clipRing', []); bd.innerHTML = ''; renderClipboardSection(bd, setCount); }
+      } }),
+      el('span', { class: 'wlib-note', text: 'Stored only in this browser. Cleared entries are gone.' })
+    ]));
+  }
+
+  /* ---- time capsule --------------------------------------------------------- */
+  function renderCapsuleCard(bd, setCount) {
+    var list = gget('capsules', []) || [];
+    var pendingN = list.filter(function (c) { return c && !c.delivered; }).length;
+    setCount(pendingN ? (pendingN + ' waiting') : '');
+    var msgIn = el('textarea', { class: 'wlib-field', placeholder: 'A note to your future self\u2026', style: { minHeight: '54px', resize: 'vertical', width: '100%', boxSizing: 'border-box' } });
+    var dateIn = el('input', { type: 'date', class: 'wlib-field', style: { flex: '0 0 150px' } });
+    var tomorrow = new Date(Date.now() + 86400000);
+    dateIn.value = tomorrow.toISOString().slice(0, 10);
+    dateIn.min = tomorrow.toISOString().slice(0, 10);
+    bd.appendChild(msgIn);
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
+      dateIn,
+      el('button', { class: 'wlib-mini', text: '\u23F3 Seal capsule', onclick: function () {
+        var msg = msgIn.value.trim();
+        if (!msg) { toast('Write something first'); return; }
+        var due = new Date(dateIn.value + 'T00:00:00').getTime();
+        if (!(due > Date.now())) { toast('Pick a future date'); return; }
+        list = gget('capsules', []) || [];
+        list.push({ id: 'tc-' + Date.now(), msg: msg, due: due, created: Date.now(), delivered: null });
+        gset('capsules', list);
+        msgIn.value = '';
+        toast('\u2713 Sealed \u2014 it will appear after ' + new Date(due).toLocaleDateString());
+        setCount(list.filter(function (c) { return !c.delivered; }).length + ' waiting');
+      } })
+    ]));
+    bd.appendChild(el('div', { class: 'wlib-note', text: 'The message surfaces the first time you open Perchance on or after that date. Delivered capsules stay readable below until you delete them.' }));
+    var delivered = list.filter(function (c) { return c && c.delivered; }).slice(-5).reverse();
+    if (delivered.length) {
+      var dWrap = el('div', { style: { marginTop: '8px' } });
+      delivered.forEach(function (c) {
+        var row = el('div', { class: 'wlib-row' });
+        row.appendChild(el('div', { class: 'main' }, [
+          el('div', { class: 'meta', text: 'sealed ' + new Date(c.created).toLocaleDateString() + ' \u00b7 opened ' + new Date(c.delivered).toLocaleDateString() }),
+          el('div', { class: 'body', text: c.msg })
+        ]));
+        row.appendChild(el('div', { class: 'wlib-acts' }, [
+          el('button', { class: 'wlib-mini', text: '\u00d7', onclick: function () {
+            gset('capsules', (gget('capsules', []) || []).filter(function (x) { return x.id !== c.id; }));
+            row.remove();
+          } })
+        ]));
+        dWrap.appendChild(row);
+      });
+      bd.appendChild(dWrap);
+    }
+  }
+
+  function checkCapsules() {
+    var list = gget('capsules', []) || [];
+    var due = core.capsulesDue(list, Date.now());
+    if (!due.length) return;
+    gset('capsules', core.capsuleDeliver(list, due.map(function (c) { return c.id; }), Date.now()));
+    var overlay = el('div', { style: { position: 'fixed', inset: '0', zIndex: '99999998', background: 'rgba(0,0,0,.55)', display: 'grid', placeItems: 'center', padding: '18px' } });
+    var pane = el('div', { style: { background: 'var(--wc-surface-2,#1a1f28)', color: 'var(--wc-ink,#e8e4dc)', border: '1px solid var(--wc-line,rgba(255,255,255,.12))', borderRadius: '13px', maxWidth: '480px', width: '100%', padding: '18px 20px', font: '14px/1.55 system-ui' } });
+    pane.appendChild(el('div', { text: '\u23F3 A message from your past self', style: { fontWeight: '700', marginBottom: '10px' } }));
+    due.forEach(function (c) {
+      pane.appendChild(el('div', { text: c.msg, style: { whiteSpace: 'pre-wrap', marginBottom: '8px' } }));
+      pane.appendChild(el('div', { text: 'sealed ' + new Date(c.created).toLocaleDateString(), style: { fontSize: '11px', opacity: '.55', marginBottom: '12px' } }));
+    });
+    var close = el('button', { class: 'wlib-mini', text: 'Close', style: { padding: '7px 16px' }, onclick: function () { overlay.remove(); } });
+    pane.appendChild(close);
+    overlay.appendChild(pane);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
+
+  /* ---- annotation badge ------------------------------------------------------ */
+  function showNoteBadge() {
+    var slug = currentSlug();
+    if (!slug) return;
+    var notes = gget('genNotes', {}) || {};
+    if (!notes[slug]) return;
+    if (document.querySelector('.weld-note-badge')) return;
+    var badge = el('div', { class: 'weld-note-badge', title: 'Your note on this generator \u2014 click to read or edit', text: '\uD83D\uDDD2', style: {
+      position: 'fixed', bottom: '18px', left: '14px', zIndex: '9999990',
+      width: '34px', height: '34px', borderRadius: '10px', display: 'grid', placeItems: 'center',
+      background: 'var(--wc-surface-2,#1a1f28)', border: '1px solid var(--wc-line,rgba(255,255,255,.18))',
+      cursor: 'pointer', font: '15px system-ui', boxShadow: '0 6px 18px -6px rgba(0,0,0,.5)', userSelect: 'none'
+    } });
+    badge.addEventListener('click', function () {
+      var cur = (gget('genNotes', {}) || {})[slug] || '';
+      var n = window.prompt('Your note on ' + slug + ':', cur);
+      if (n == null) return;
+      var map = gget('genNotes', {}) || {};
+      if (n.trim()) map[slug] = n; else { delete map[slug]; badge.remove(); }
+      gset('genNotes', map);
+    });
+    document.body.appendChild(badge);
+  }
+
+  /* ---- quality log ------------------------------------------------------------ */
+  function rate(vote) {
+    var slug = currentSlug() || 'unknown';
+    function store(snippet) {
+      gset('ratings', core.ratePush(gget('ratings', []) || [], slug, vote, snippet, Date.now()));
+      toast(vote > 0 ? '\uD83D\uDC4D Noted' : '\uD83D\uDC4E Noted');
+    }
+    // best-effort snippet of the current output; never block the rating on it
+    try {
+      var lib = window.weldLibrary;
+      var h = window.weldHooks || {};
+      var t = (typeof h.outputText === 'function') ? h.outputText() : '';
+      if (t) { store(t); return; }
+      if (lib) { /* live-frame path is async inside library; skip for speed */ }
+    } catch (e) {}
+    store('');
+  }
+
+  function renderRatingsCard(bd, setCount) {
+    var tally = core.rateTally(gget('ratings', []) || []);
+    setCount(tally.length ? (tally.length + ' rated') : '');
+    if (!tally.length) {
+      bd.appendChild(el('div', { class: 'wlib-note', text: 'No ratings yet. Use \uD83D\uDC4D / \uD83D\uDC4E in the header to log whether a roll was good \u2014 over time this builds your private quality record per generator.' }));
+      return;
+    }
+    tally.slice(0, 15).forEach(function (g) {
+      var row = el('div', { class: 'wlib-row' });
+      row.appendChild(el('div', { class: 'main' }, [
+        el('div', { class: 'title', text: g.gen }),
+        el('div', { class: 'meta', text: '\uD83D\uDC4D ' + g.up + ' \u00b7 \uD83D\uDC4E ' + g.down + ' \u00b7 last ' + new Date(g.last).toLocaleDateString() })
+      ]));
+      row.appendChild(el('div', { class: 'wlib-acts' }, [
+        el('button', { class: 'wlib-mini', text: 'Open', onclick: function () { window.open('https://perchance.org/' + g.gen, '_blank'); } })
+      ]));
+      bd.appendChild(row);
+    });
+  }
+
+  /* ---- time tracker ------------------------------------------------------------ */
+  var HEARTBEAT = 30; // seconds
+  setInterval(function () {
+    try {
+      if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
+      var slug = currentSlug(); if (!slug) return;
+      gset('timeTrack', core.trackAdd(gget('timeTrack', {}) || {}, slug, HEARTBEAT));
+    } catch (e) {}
+  }, HEARTBEAT * 1000);
+  // prune old entries once per boot
+  setTimeout(function () { try { gset('timeTrack', core.trackPrune(gget('timeTrack', {}) || {}, 90)); } catch (e) {} }, 8000);
+
+  function renderTimeCard(bd, setCount) {
+    var agg = core.trackAggregate(gget('timeTrack', {}) || {}, new Date());
+    setCount(agg.todaySeconds ? fmtMins(agg.todaySeconds) + ' today' : '');
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'Today: ' + fmtMins(agg.todaySeconds) + ' \u00b7 Last 7 days: ' + fmtMins(agg.weekSeconds) + '. Counted only while a generator tab is visible and focused, in this browser only.' }));
+    if (agg.topWeek.length) {
+      agg.topWeek.forEach(function (g) {
+        bd.appendChild(el('div', { class: 'wlib-row' }, [
+          el('div', { class: 'main' }, [el('div', { class: 'title', text: g.gen })]),
+          el('div', { class: 'wlib-acts' }, [el('span', { class: 'wlib-note', text: fmtMins(g.seconds) })])
+        ]));
+      });
+    }
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '8px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u2913 Export CSV', onclick: function () {
+        download('weld-time-log.' + new Date().toISOString().slice(0, 10) + '.csv', core.trackToCsv(gget('timeTrack', {}) || {}), 'text/csv');
+      } }),
+      el('button', { class: 'wlib-mini', text: 'Reset log', onclick: function () {
+        if (window.confirm('Delete the entire time log?')) { gset('timeTrack', {}); bd.innerHTML = ''; renderTimeCard(bd, setCount); }
+      } })
+    ]));
+  }
+
+  /* ---- output rules ------------------------------------------------------------ */
+  // Rules are stored per generator under outRules[slug]; '_default' applies to
+  // every generator (default rules run first, then the generator's own).
+  function applyRules(slug, text) {
+    var all = gget('outRules', {}) || {};
+    var chain = (all._default || []).concat(all[slug] || []);
+    return chain.length ? core.ruleApply(chain, text) : text;
+  }
+
+  function renderRulesCard(bd, setCount) {
+    var slug = currentSlug();
+    var all = gget('outRules', {}) || {};
+    var scope = slug || '_default';
+    var rules = all[scope] || [];
+    setCount(rules.length ? String(rules.length) : '');
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: (slug
+      ? 'Rules for ' + slug + ' \u2014 applied when its output is saved or quick-saved (the live page is never modified). Rules saved under \u201call generators\u201d run first.'
+      : 'No generator open \u2014 editing the \u201call generators\u201d rules, which run before any per-generator rules.') }));
+    var listWrap = el('div');
+    function paintRules() {
+      listWrap.innerHTML = '';
+      rules.forEach(function (r, i) {
+        var label = r.type === 'replace' ? ((r.regex ? 'regex ' : 'replace ') + JSON.stringify(r.find) + ' \u2192 ' + JSON.stringify(r.with || ''))
+                  : r.type === 'prefix' ? 'prefix ' + JSON.stringify(r.text || '')
+                  : r.type === 'suffix' ? 'suffix ' + JSON.stringify(r.text || '')
+                  : r.type;
+        var row = el('div', { class: 'wlib-row' });
+        row.appendChild(el('div', { class: 'main' }, [el('div', { class: 'body', text: (i + 1) + '. ' + label + (r.off ? '  (off)' : '') })]));
+        row.appendChild(el('div', { class: 'wlib-acts' }, [
+          el('button', { class: 'wlib-mini', text: r.off ? 'On' : 'Off', onclick: function () { r.off = !r.off; save(); paintRules(); } }),
+          el('button', { class: 'wlib-mini', text: '\u2191', onclick: function () { if (i > 0) { rules.splice(i - 1, 0, rules.splice(i, 1)[0]); save(); paintRules(); } } }),
+          el('button', { class: 'wlib-mini', text: '\u00d7', onclick: function () { rules.splice(i, 1); save(); paintRules(); setCount(rules.length ? String(rules.length) : ''); } })
+        ]));
+        listWrap.appendChild(row);
+      });
+      if (!rules.length) listWrap.appendChild(el('div', { class: 'wlib-note', text: 'No rules yet.' }));
+    }
+    function save() { all = gget('outRules', {}) || {}; all[scope] = rules; gset('outRules', all); }
+    bd.appendChild(listWrap);
+
+    var typeSel = el('select', { class: 'wlib-field', style: { flex: '0 0 90px' } },
+      ['replace', 'prefix', 'suffix', 'trim', 'collapse'].map(function (t) { return el('option', { value: t, text: t }); }));
+    var findIn = el('input', { class: 'wlib-field', placeholder: 'find\u2026', style: { flex: '1' } });
+    var withIn = el('input', { class: 'wlib-field', placeholder: 'replace with\u2026', style: { flex: '1' } });
+    var rxChk = el('input', { type: 'checkbox', title: 'Treat \u201cfind\u201d as a regular expression' });
+    typeSel.addEventListener('change', function () {
+      var t = typeSel.value;
+      findIn.style.display = (t === 'replace' || t === 'prefix' || t === 'suffix') ? '' : 'none';
+      withIn.style.display = (t === 'replace') ? '' : 'none';
+      rxChk.parentNode.style.display = (t === 'replace') ? '' : 'none';
+      findIn.placeholder = (t === 'prefix' || t === 'suffix') ? 'text\u2026' : 'find\u2026';
+    });
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '8px', flexWrap: 'wrap' } }, [
+      typeSel, findIn, withIn,
+      el('label', { class: 'wlib-note', style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, [rxChk, 'regex']),
+      el('button', { class: 'wlib-mini', text: '+ Add', onclick: function () {
+        var t = typeSel.value, r = { type: t };
+        if (t === 'replace') { if (!findIn.value) { toast('\u201cfind\u201d is required'); return; } r.find = findIn.value; r.with = withIn.value; if (rxChk.checked) { r.regex = true; try { new RegExp(r.find); } catch (e) { toast('Invalid regex'); return; } } }
+        else if (t === 'prefix' || t === 'suffix') { r.text = findIn.value; }
+        rules.push(r); save(); paintRules(); setCount(String(rules.length));
+        findIn.value = ''; withIn.value = '';
+      } })
+    ]));
+    if (slug) bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '4px' } }, [
+      el('button', { class: 'wlib-mini', text: 'Edit \u201call generators\u201d rules', onclick: function () {
+        var n = (all._default || []).length;
+        var txt = window.prompt('Rules that run for every generator, as JSON (advanced \u2014 ' + n + ' currently):', JSON.stringify(all._default || []));
+        if (txt == null) return;
+        try { var parsed = JSON.parse(txt); if (!Array.isArray(parsed)) throw new Error('not a list'); all._default = parsed; gset('outRules', all); toast('\u2713 Saved'); }
+        catch (e) { toast('Not valid JSON: ' + e.message); }
+      } })
+    ]));
+    paintRules();
+  }
+
+  /* ---- quick-save hotkey (Ctrl/Cmd+Shift+S) -------------------------------------- */
+  function quickSaveSelection(text, slug) {
+    var t = String(text || '').trim();
+    if (!t) return false;
+    var sb = gget('scrapbook', []) || [];
+    sb.unshift({ id: 'sb-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), gen: slug || currentSlug() || 'unknown', title: t.slice(0, 64).replace(/\s+/g, ' '), text: t, tags: ['quicksave'], note: '', t: Date.now() });
+    if (sb.length > 500) sb = sb.slice(0, 500);
+    gset('scrapbook', sb);
+    toast('\u2713 Quick-saved to Scrapbook');
+    return true;
+  }
+  document.addEventListener('keydown', function (e) {
+    if (!(e.key === 'S' || e.key === 's') || !e.shiftKey || !(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    var sel = String(document.getSelection() || '').trim();
+    if (sel.length >= 3) { quickSaveSelection(sel, currentSlug()); return; }
+    // no top-frame selection: save the generator's current output instead
+    var lib = window.weldLibrary;
+    if (lib && typeof lib.saveCurrentOutput === 'function') lib.saveCurrentOutput();
+    else toast('Nothing selected');
+  });
+
+  /* ---- full state export / import -------------------------------------------------- */
+  function stateKeys() {
+    var keys = [];
+    try {
+      if (typeof GM_listValues === 'function') {
+        GM_listValues().forEach(function (k) { if (k.indexOf(NS + ':') === 0) keys.push(k.slice(NS.length + 1)); });
+        return keys;
+      }
+    } catch (e) {}
+    return ['scrapbook', 'clipRing', 'capsules', 'timeTrack', 'ratings', 'genNotes', 'outRules', 'recent', 'favs'];
+  }
+  function exportState() {
+    var data = {};
+    stateKeys().forEach(function (k) { var v = gget(k, undefined); if (v !== undefined) data[k] = v; });
+    var env = { meta: { type: 'weld-companion-state-v1', t: Date.now(), keys: Object.keys(data).length }, data: data };
+    download('weld-companion-state.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(env, null, 1), 'application/json');
+    toast('\u2713 Exported ' + env.meta.keys + ' keys');
+  }
+  function importState(file, mode, done) {
+    file.text().then(function (txt) {
+      var env;
+      try { env = JSON.parse(txt); } catch (e) { toast('Not a JSON file'); return; }
+      if (!env || !env.meta || env.meta.type !== 'weld-companion-state-v1' || !env.data) { toast('Not a Weld Companion state file'); return; }
+      var current = {};
+      stateKeys().forEach(function (k) { var v = gget(k, undefined); if (v !== undefined) current[k] = v; });
+      var merged = core.stateMerge(current, env.data, mode);
+      Object.keys(merged).forEach(function (k) { gset(k, merged[k]); });
+      toast('\u2713 Imported ' + Object.keys(env.data).length + ' keys (' + mode + ') \u2014 reopen the drawer to see everything');
+      if (done) done();
+    });
+  }
+  function renderPortabilityCard(bd) {
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'Everything the Companion remembers \u2014 Scrapbook, clips, capsules, ratings, time log, notes, rules \u2014 in one portable file. Import on another browser to carry it over. \u201cMerge\u201d unions lists and sums time; \u201creplace\u201d makes the file win wholesale per key.' }));
+    var fileIn = el('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } });
+    var modeSel = el('select', { class: 'wlib-field', style: { flex: '0 0 110px' } }, [
+      el('option', { value: 'merge', text: 'merge' }), el('option', { value: 'replace', text: 'replace' })
+    ]);
+    fileIn.addEventListener('change', function () { if (fileIn.files && fileIn.files[0]) importState(fileIn.files[0], modeSel.value); fileIn.value = ''; });
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [
+      el('button', { class: 'wlib-mini', text: '\u2913 Export everything', onclick: exportState }),
+      modeSel,
+      el('button', { class: 'wlib-mini', text: '\u2912 Import\u2026', onclick: function () { fileIn.click(); } }),
+      fileIn
+    ]));
+  }
+
+  /* ---- cross-everything search -------------------------------------------------------- */
+  function renderSearchSection(bd) {
+    var input = el('input', { class: 'wlib-field', placeholder: 'Search everything you\u2019ve kept \u2014 rolls, clips, notes, ratings, generators\u2026', style: { width: '100%', boxSizing: 'border-box' } });
+    var out = el('div', { style: { marginTop: '8px' } });
+    var KINDS = { scrapbook: '\uD83D\uDCCC', clip: '\uD83D\uDCCB', note: '\uD83D\uDDD2', rating: '\uD83D\uDC4D', generator: '\u2B50' };
+    input.addEventListener('input', function () {
+      out.innerHTML = '';
+      var hits = core.searchAll(input.value, {
+        scrapbook: gget('scrapbook', []) || [],
+        clips: gget('clipRing', []) || [],
+        ratings: gget('ratings', []) || [],
+        notes: gget('genNotes', {}) || {},
+        recents: gget('recent', []) || []
+      });
+      if (!hits.length) { if (input.value.trim().length >= 2) out.appendChild(el('div', { class: 'wlib-note', text: 'No matches.' })); return; }
+      hits.slice(0, 15).forEach(function (h) {
+        var row = el('div', { class: 'wlib-row' });
+        row.appendChild(el('div', { class: 'main' }, [
+          el('div', { class: 'title', text: (KINDS[h.kind] || '') + ' ' + h.title }),
+          el('div', { class: 'meta', text: h.kind + ' \u00b7 ' + h.gen + (h.t ? ' \u00b7 ' + new Date(h.t).toLocaleDateString() : '') })
+        ]));
+        row.appendChild(el('div', { class: 'wlib-acts' }, [
+          h.snippet ? el('button', { class: 'wlib-mini', text: 'Copy', onclick: function () { try { navigator.clipboard.writeText((h.ref && h.ref.text) || h.snippet); toast('Copied'); } catch (e) {} } }) : null,
+          el('button', { class: 'wlib-mini', text: 'Open', onclick: function () { window.open('https://perchance.org/' + h.gen, '_blank'); } })
+        ]));
+        out.appendChild(row);
+      });
+      if (hits.length > 15) out.appendChild(el('div', { class: 'wlib-note', text: '\u2026 ' + (hits.length - 15) + ' more matches.' }));
+    });
+    bd.appendChild(input); bd.appendChild(out);
+  }
+
+  /* ---- my Perchance (usage stats) ------------------------------------------------ */
+  function renderStatsCard(bd, setCount) {
+    var stats = core.statsBuild({
+      track: gget('timeTrack', {}) || {},
+      ratings: gget('ratings', []) || [],
+      scrapbook: gget('scrapbook', []) || [],
+      now: new Date()
+    });
+    setCount(stats.streakDays ? (stats.streakDays + '-day streak') : '');
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text:
+      'Today ' + fmtMins(stats.todaySeconds) + ' \u00b7 last 7 days ' + fmtMins(stats.weekSeconds) +
+      (stats.streakDays > 1 ? ' \u00b7 ' + stats.streakDays + ' days in a row' : '') +
+      ' \u00b7 ' + stats.totalSaves + ' saved \u00b7 \uD83D\uDC4D ' + stats.ratingsUp + ' / \uD83D\uDC4E ' + stats.ratingsDown +
+      '. All local, never uploaded.' }));
+    function block(title, rows, fmt) {
+      if (!rows.length) return;
+      bd.appendChild(el('div', { class: 'wlib-note', style: { marginTop: '6px', fontWeight: '600' }, text: title }));
+      rows.forEach(function (r) {
+        bd.appendChild(el('div', { class: 'wlib-row' }, [
+          el('div', { class: 'main' }, [el('div', { class: 'title', text: r.gen })]),
+          el('div', { class: 'wlib-acts' }, [el('span', { class: 'wlib-note', text: fmt(r) })])
+        ]));
+      });
+    }
+    block('Most time (7 days)', stats.topByTime, function (r) { return fmtMins(r.seconds); });
+    block('Most saved from', stats.topBySaves, function (r) { return r.saves + ' saves'; });
+  }
+
+  /* ---- session replay -------------------------------------------------------------- */
+  // Captures the host's undo-reroll ring (window.weldHooks.histList, exposed by a
+  // host patch) as a named, read-only session. HTML snapshots are reduced to text.
+  function htmlToText(html) {
+    try { var d = document.createElement('div'); d.innerHTML = html; return (d.textContent || '').trim(); }
+    catch (e) { return ''; }
+  }
+  function saveSession() {
+    var h = window.weldHooks || {};
+    if (typeof h.histList !== 'function') { toast('Roll history not available on this page'); return; }
+    var rolls = (h.histList() || []).map(htmlToText).filter(function (t) { return t.length >= 2; });
+    if (!rolls.length) { toast('No rolls in this session yet'); return; }
+    var name = window.prompt('Name this session (' + rolls.length + ' rolls):',
+      (currentSlug() || 'session') + ' \u2014 ' + new Date().toLocaleDateString());
+    if (name == null) return;
+    gset('sessions', core.namedAdd(gget('sessions', []) || [],
+      { name: name || 'session', gen: currentSlug() || 'unknown', rolls: rolls, t: Date.now() }, 20));
+    toast('\u2713 Session saved (' + rolls.length + ' rolls)');
+  }
+  function renderSessionsCard(bd, setCount) {
+    var list = gget('sessions', []) || [];
+    setCount(list.length ? String(list.length) : '');
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginBottom: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u23FA Save this session', title: 'Capture the current page\u2019s roll history (the same ring the \u25C0 \u25B6 history bar walks) as a named session', onclick: function () { saveSession(); bd.innerHTML = ''; renderSessionsCard(bd, setCount); } }),
+      el('span', { class: 'wlib-note', text: 'Works where the result-history bar works \u2014 generators that render output on the page itself.' })
+    ]));
+    if (!list.length) { bd.appendChild(el('div', { class: 'wlib-note', text: 'No saved sessions yet.' })); return; }
+    list.forEach(function (s) {
+      var row = el('div', { class: 'wlib-row' });
+      row.appendChild(el('div', { class: 'main' }, [
+        el('div', { class: 'title', text: s.name }),
+        el('div', { class: 'meta', text: s.gen + ' \u00b7 ' + s.rolls.length + ' rolls \u00b7 ' + new Date(s.t).toLocaleString() })
+      ]));
+      row.appendChild(el('div', { class: 'wlib-acts' }, [
+        el('button', { class: 'wlib-mini', text: 'Replay', onclick: function () { openSessionReader(s); } }),
+        el('button', { class: 'wlib-mini', text: '\u2913 .md', onclick: function () {
+          var md = '# ' + s.name + '\n\n_' + s.gen + ' \u00b7 ' + new Date(s.t).toLocaleString() + '_\n\n' +
+            s.rolls.map(function (r, i) { return '## Roll ' + (i + 1) + '\n\n' + r; }).join('\n\n');
+          download(s.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.md', md, 'text/markdown');
+        } }),
+        el('button', { class: 'wlib-mini', text: '\u00d7', onclick: function () {
+          gset('sessions', (gget('sessions', []) || []).filter(function (x) { return x.id !== s.id; }));
+          row.remove(); var n = (gget('sessions', []) || []).length; setCount(n ? String(n) : '');
+        } })
+      ]));
+      bd.appendChild(row);
+    });
+  }
+  function openSessionReader(s) {
+    var overlay = el('div', { style: { position: 'fixed', inset: '0', zIndex: '99999998', background: 'rgba(0,0,0,.55)', display: 'grid', placeItems: 'center', padding: '18px' } });
+    var pane = el('div', { style: { background: 'var(--wc-surface-2,#1a1f28)', color: 'var(--wc-ink,#e8e4dc)', border: '1px solid var(--wc-line,rgba(255,255,255,.12))', borderRadius: '13px', maxWidth: '640px', width: '100%', maxHeight: '80vh', overflow: 'auto', padding: '16px 18px', font: '13.5px/1.55 system-ui' } });
+    pane.appendChild(el('div', { text: s.name + ' \u2014 ' + s.rolls.length + ' rolls', style: { fontWeight: '700', marginBottom: '10px' } }));
+    s.rolls.forEach(function (r, i) {
+      var item = el('div', { style: { borderTop: '1px solid var(--wc-line,rgba(255,255,255,.1))', padding: '8px 0' } });
+      item.appendChild(el('div', { text: 'Roll ' + (i + 1), style: { fontSize: '11px', opacity: '.55', marginBottom: '3px' } }));
+      item.appendChild(el('div', { text: r, style: { whiteSpace: 'pre-wrap' } }));
+      item.appendChild(el('button', { class: 'wlib-mini', text: 'Copy', style: { marginTop: '4px' }, onclick: function () { try { navigator.clipboard.writeText(r); toast('Copied'); } catch (e) {} } }));
+      pane.appendChild(item);
+    });
+    var close = el('button', { class: 'wlib-mini', text: 'Close', style: { marginTop: '10px', padding: '7px 16px' }, onclick: function () { overlay.remove(); } });
+    pane.appendChild(close);
+    overlay.appendChild(pane);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
+
+  /* ---- tab snapshot / restore ---------------------------------------------------------- */
+  // Presence over a dedicated BroadcastChannel: every Companion top frame answers
+  // 'who' with its url/title. Snapshot = the set of live Perchance tabs right now.
+  var presenceBC = null;
+  function presence() {
+    if (presenceBC || typeof BroadcastChannel === 'undefined') return presenceBC;
+    try {
+      presenceBC = new BroadcastChannel('weld-presence');
+      presenceBC.onmessage = function (ev) {
+        var d = ev.data || {};
+        if (d.type === 'who') {
+          try { presenceBC.postMessage({ type: 'iam', nonce: d.nonce, url: location.href, title: document.title, slug: currentSlug() || '' }); } catch (e) {}
+        }
+      };
+    } catch (e) { presenceBC = null; }
+    return presenceBC;
+  }
+  presence();
+  function collectTabs(done) {
+    var bc = presence();
+    var replies = [{ url: location.href, title: document.title, slug: currentSlug() || '' }];   // self
+    if (!bc) { done(core.presenceReduce(replies, location.href)); return; }
+    var nonce = 'p' + Math.random().toString(36).slice(2);
+    function onMsg(ev) {
+      var d = ev.data || {};
+      if (d.type === 'iam' && d.nonce === nonce) replies.push(d);
+    }
+    bc.addEventListener('message', onMsg);
+    try { bc.postMessage({ type: 'who', nonce: nonce }); } catch (e) {}
+    setTimeout(function () {
+      bc.removeEventListener('message', onMsg);
+      done(core.presenceReduce(replies, location.href));
+    }, 450);
+  }
+  function renderSnapshotCard(bd, setCount) {
+    var list = gget('tabSnaps', []) || [];
+    setCount(list.length ? String(list.length) : '');
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginBottom: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: '\uD83D\uDCF8 Snapshot open tabs', onclick: function () {
+        collectTabs(function (tabs) {
+          var name = window.prompt('Name this set of ' + tabs.length + ' tab' + (tabs.length === 1 ? '' : 's') + ':', 'Session ' + new Date().toLocaleDateString());
+          if (name == null) return;
+          gset('tabSnaps', core.namedAdd(gget('tabSnaps', []) || [], { name: name || 'tabs', tabs: tabs, t: Date.now() }, 15));
+          toast('\u2713 Saved ' + tabs.length + ' tab' + (tabs.length === 1 ? '' : 's'));
+          bd.innerHTML = ''; renderSnapshotCard(bd, setCount);
+        });
+      } }),
+      el('span', { class: 'wlib-note', text: 'Captures every Perchance tab that has the Companion running, right now.' })
+    ]));
+    if (!list.length) { bd.appendChild(el('div', { class: 'wlib-note', text: 'No snapshots yet. Open your working set of generators, then snapshot them to restore the whole session later.' })); return; }
+    list.forEach(function (s) {
+      var row = el('div', { class: 'wlib-row' });
+      row.appendChild(el('div', { class: 'main' }, [
+        el('div', { class: 'title', text: s.name }),
+        el('div', { class: 'meta', text: s.tabs.length + ' tabs \u00b7 ' + s.tabs.map(function (t) { return t.slug || '?'; }).join(', ').slice(0, 70) + ' \u00b7 ' + new Date(s.t).toLocaleDateString() })
+      ]));
+      row.appendChild(el('div', { class: 'wlib-acts' }, [
+        el('button', { class: 'wlib-mini', text: 'Restore', title: 'Opens each tab. Your browser may ask to allow pop-ups for perchance.org the first time.', onclick: function () {
+          var i = 0;
+          (function next() {
+            if (i >= s.tabs.length) { toast('\u2713 Opened ' + s.tabs.length + ' tabs'); return; }
+            var w = window.open(s.tabs[i].url, '_blank');
+            i++;
+            if (!w && i === 1) { toast('Pop-ups blocked \u2014 allow pop-ups for perchance.org and try again', 4200); return; }
+            setTimeout(next, 180);
+          })();
+        } }),
+        el('button', { class: 'wlib-mini', text: '\u00d7', onclick: function () {
+          gset('tabSnaps', (gget('tabSnaps', []) || []).filter(function (x) { return x.id !== s.id; }));
+          row.remove(); var n = (gget('tabSnaps', []) || []).length; setCount(n ? String(n) : '');
+        } })
+      ]));
+      bd.appendChild(row);
+    });
+  }
+
+  /* ---- review queue (spaced repetition over the Scrapbook) ----------------------- */
+  function renderReviewCard(bd, setCount) {
+    var sb = gget('scrapbook', []) || [];
+    var due = core.srsDue(sb, Date.now());
+    var enrolled = sb.filter(function (e) { return e && e.srs; }).length;
+    setCount(due.length ? (due.length + ' due') : (enrolled ? String(enrolled) : ''));
+
+    if (due.length) {
+      bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px', fontWeight: '600' }, text: due.length + ' item' + (due.length === 1 ? '' : 's') + ' due for review' }));
+      due.slice(0, 5).forEach(function (e) {
+        var item = el('div', { class: 'wlib-row' });
+        item.appendChild(el('div', { class: 'main' }, [
+          el('div', { class: 'meta', text: e.gen + ' \u00b7 seen ' + ((e.srs.reps || 0) + 1) + 'x' }),
+          el('div', { class: 'body', text: e.text })
+        ]));
+        function grade(g) {
+          var list = gget('scrapbook', []) || [];
+          var hit = list.find(function (x) { return x.id === e.id; });
+          if (hit) { hit.srs = core.srsGrade(hit.srs, g, Date.now()); gset('scrapbook', list); }
+          item.remove();
+          var left = core.srsDue(gget('scrapbook', []) || [], Date.now()).length;
+          setCount(left ? (left + ' due') : (enrolled ? String(enrolled) : ''));
+          if (g === 'good' && hit) toast('Next review in ' + hit.srs.interval + ' day' + (hit.srs.interval === 1 ? '' : 's'));
+        }
+        item.appendChild(el('div', { class: 'wlib-acts' }, [
+          el('button', { class: 'wlib-mini', text: '\u2713 Got it', onclick: function () { grade('good'); } }),
+          el('button', { class: 'wlib-mini', text: '\u21BB Again', onclick: function () { grade('again'); } })
+        ]));
+        bd.appendChild(item);
+      });
+      if (due.length > 5) bd.appendChild(el('div', { class: 'wlib-note', text: '\u2026 ' + (due.length - 5) + ' more after these.' }));
+    } else {
+      bd.appendChild(el('div', { class: 'wlib-note', text: enrolled
+        ? 'Nothing due. ' + enrolled + ' item' + (enrolled === 1 ? '' : 's') + ' scheduled \u2014 they\u2019ll surface here when their day comes.'
+        : 'Turn Scrapbook entries into review items \u2014 vocabulary, names, prompts you want to internalise. \u201cGot it\u201d stretches the next review out (1 \u2192 3 \u2192 7 \u2192 21 \u2192 60 days); \u201cAgain\u201d starts over.' }));
+    }
+
+    // enrollment: recent un-enrolled scrapbook entries
+    var candidates = sb.filter(function (e) { return e && !e.srs; }).slice(0, 5);
+    if (candidates.length) {
+      bd.appendChild(el('div', { class: 'wlib-note', style: { marginTop: '8px', fontWeight: '600' }, text: 'Add to review' }));
+      candidates.forEach(function (e) {
+        var row = el('div', { class: 'wlib-row' });
+        row.appendChild(el('div', { class: 'main' }, [el('div', { class: 'body', text: (e.title || e.text || '').slice(0, 80) })]));
+        row.appendChild(el('div', { class: 'wlib-acts' }, [
+          el('button', { class: 'wlib-mini', text: '+ \uD83D\uDD01', title: 'Schedule this entry for spaced review', onclick: function () {
+            var list = gget('scrapbook', []) || [];
+            var hit = list.find(function (x) { return x.id === e.id; });
+            if (hit) { hit.srs = { due: Date.now(), interval: 0, reps: 0 }; gset('scrapbook', list); }
+            row.remove(); toast('\u2713 In the review queue \u2014 due now');
+          } })
+        ]));
+        bd.appendChild(row);
+      });
+    }
+  }
+
+  /* ---- my boundaries (consent memory) ------------------------------------------------ */
+  function renderBoundariesCard(bd, setCount) {
+    var b = gget('boundaries', '') || '';
+    setCount(b ? 'set' : '');
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'Topics you don\u2019t want, styles that distress you, lines not to cross \u2014 written once, kept here. Copy it into any new AI chat\u2019s first message or a character\u2019s reminder field. Stored only in this browser; the Companion can\u2019t inject it into chats automatically, so this stays a deliberate, visible step.' }));
+    var ta = el('textarea', { class: 'wlib-field', placeholder: 'e.g. No graphic violence. Don\u2019t describe injuries in detail. Keep romance fade-to-black\u2026', style: { minHeight: '64px', resize: 'vertical', width: '100%', boxSizing: 'border-box' } });
+    ta.value = b;
+    bd.appendChild(ta);
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: 'Save', onclick: function () { gset('boundaries', ta.value.trim()); setCount(ta.value.trim() ? 'set' : ''); toast('\u2713 Saved'); } }),
+      el('button', { class: 'wlib-mini', text: 'Copy for a chat', title: 'Copies your boundaries prefixed so they read as an instruction', onclick: function () {
+        var v = (gget('boundaries', '') || ta.value || '').trim();
+        if (!v) { toast('Nothing saved yet'); return; }
+        try { navigator.clipboard.writeText('My boundaries for this conversation \u2014 please respect them throughout:\n' + v).then(function () { toast('\u2713 Copied \u2014 paste it as your first message'); }); } catch (e) {}
+      } })
+    ]));
+  }
+
+  /* ---- legacy export (self-contained HTML archive) ----------------------------------- */
+  function renderLegacyCard(bd) {
+    var sb = gget('scrapbook', []) || [];
+    var caps = (gget('capsules', []) || []);
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'A single web page holding your saved results and time capsules, readable by anyone with a browser \u2014 no app, no extension, no Perchance. Made for keeping, printing, or passing on. (Chat stories live in AICC\u2019s own database; export those from the Chat stories card.)' }));
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [
+      el('button', { class: 'wlib-mini', text: '\u2913 Build archive (' + sb.length + ' item' + (sb.length === 1 ? '' : 's') + ')', onclick: function () {
+        var html = core.legacyBuild({ scrapbook: gget('scrapbook', []) || [], capsules: gget('capsules', []) || [] }, new Date());
+        download('my-perchance-archive.' + new Date().toISOString().slice(0, 10) + '.html', html, 'text/html');
+        toast('\u2713 Archive saved');
+      } })
+    ]));
+  }
+
+  /* ---- recommendation bundles -------------------------------------------------------- */
+  function renderRecCard(bd) {
+    var slug = currentSlug();
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'Recommend a generator to a friend: this makes a small file with the generator, your note, and an optional sample. They open it in their Companion to add it to their favorites. Travels like a character file \u2014 no server, no account.' }));
+    var noteIn = el('input', { class: 'wlib-field', placeholder: slug ? ('Why you like ' + slug + '\u2026') : 'Open a generator first to recommend it', style: { width: '100%', boxSizing: 'border-box' } });
+    var sampleIn = el('textarea', { class: 'wlib-field', placeholder: 'Optional: a sample output to show it off\u2026', style: { minHeight: '46px', resize: 'vertical', width: '100%', boxSizing: 'border-box', marginTop: '6px' } });
+    bd.appendChild(noteIn); bd.appendChild(sampleIn);
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u2913 Make recommendation', onclick: function () {
+        if (!slug) { toast('Open a generator to recommend it'); return; }
+        var b = core.buildRec(slug, noteIn.value, sampleIn.value, Date.now());
+        download('recommend-' + slug + '.json', JSON.stringify(b, null, 1), 'application/json');
+        toast('\u2713 Saved \u2014 send this file to a friend');
+      } })
+    ]));
+    // import side
+    var fileIn = el('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } });
+    fileIn.addEventListener('change', function () {
+      if (!fileIn.files || !fileIn.files[0]) return;
+      fileIn.files[0].text().then(function (txt) {
+        var obj; try { obj = JSON.parse(txt); } catch (e) { toast('Not a JSON file'); return; }
+        var res = core.parseRec(obj);
+        if (!res.ok) { toast(res.error); return; }
+        var b = res.bundle;
+        var ov = el('div', { style: { position: 'fixed', inset: '0', zIndex: '99999998', background: 'rgba(0,0,0,.55)', display: 'grid', placeItems: 'center', padding: '18px' } });
+        var pane = el('div', { style: { background: 'var(--wc-surface-2,#1a1f28)', color: 'var(--wc-ink,#e8e4dc)', border: '1px solid var(--wc-line,rgba(255,255,255,.12))', borderRadius: '13px', maxWidth: '480px', width: '100%', padding: '18px 20px', font: '14px/1.55 system-ui' } });
+        pane.appendChild(el('div', { text: '\u2b50 A recommendation: ' + b.slug, style: { fontWeight: '700', marginBottom: '8px' } }));
+        if (b.note) pane.appendChild(el('div', { text: b.note, style: { marginBottom: '8px' } }));
+        if (b.sample) pane.appendChild(el('div', { text: b.sample, style: { whiteSpace: 'pre-wrap', fontSize: '12.5px', opacity: '.8', borderLeft: '3px solid var(--wc-line,#444)', paddingLeft: '10px', marginBottom: '10px' } }));
+        pane.appendChild(el('div', { class: 'wlib-bar' }, [
+          el('button', { class: 'wlib-mini', text: 'Open it', onclick: function () { window.open('https://perchance.org/' + b.slug, '_blank'); } }),
+          el('button', { class: 'wlib-mini', text: '\u2605 Add to favorites', onclick: function () {
+            try {
+              var favs = gget('favs', []) || [];
+              if (favs.indexOf(b.slug) === -1) { favs.push(b.slug); gset('favs', favs); toast('\u2605 Added to favorites'); }
+              else toast('Already a favorite');
+            } catch (e) { toast('Could not add'); }
+            ov.remove();
+          } }),
+          el('button', { class: 'wlib-mini', text: 'Close', onclick: function () { ov.remove(); } })
+        ]));
+        ov.appendChild(pane);
+        ov.addEventListener('click', function (e) { if (e.target === ov) ov.remove(); });
+        document.body.appendChild(ov);
+      });
+      fileIn.value = '';
+    });
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '4px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u2912 Open a recommendation\u2026', onclick: function () { fileIn.click(); } }), fileIn
+    ]));
+  }
+
+  /* ---- boot ----------------------------------------------------------------- */
+  setTimeout(checkCapsules, 2000);
+  setTimeout(showNoteBadge, 3000);
+
+  window.weldOffline = {
+    core: core,
+    recordCopy: recordCopy,
+    rate: rate,
+    applyRules: applyRules,
+    quickSaveSelection: quickSaveSelection,
+    renderRulesCard: renderRulesCard,
+    renderPortabilityCard: renderPortabilityCard,
+    renderSearchSection: renderSearchSection,
+    renderStatsCard: renderStatsCard,
+    renderSessionsCard: renderSessionsCard,
+    renderSnapshotCard: renderSnapshotCard,
+    renderReviewCard: renderReviewCard,
+    renderBoundariesCard: renderBoundariesCard,
+    renderLegacyCard: renderLegacyCard,
+    renderRecCard: renderRecCard,
+    renderClipboardSection: renderClipboardSection,
+    renderCapsuleCard: renderCapsuleCard,
+    renderRatingsCard: renderRatingsCard,
+    renderTimeCard: renderTimeCard
+  };
+})(typeof window !== 'undefined' ? window : globalThis, typeof module !== 'undefined' ? module : null);
+
+/* ----- [10] ONLINE PACK v1 ----- */
+/* Weld Online Pack — the first batch of online roadmap items. Everything here
+ * uses GM_xmlhttpRequest (the Companion's CORS-free fetch) and degrades to a
+ * clear "couldn't check" rather than guessing when the network fails.
+ *
+ *   🔗 Lore link health   — pings every Lore Library URL (throttled to once a
+ *                           day each) and classifies: alive, returned-a-page
+ *                           (removed/quarantined upload — the exact failure
+ *                           mode of the saved-page saga), or dead.
+ *   👀 Generator watch    — hashes the page source of starred generators and
+ *                           flags when one changes. Honest caveat: generators
+ *                           with dynamic shell HTML can false-positive; "mark
+ *                           seen" re-baselines.
+ *   🚦 Is Perchance slow? — times a fetch of the platform root and classifies,
+ *                           so "is it them or me" has an answer.
+ *
+ * createOnlineCore() is pure and Node-testable; the browser IIFE wires GM
+ * storage, the network, and the Library cards, exposing window.weldOnline.
+ */
+(function (globalRoot, moduleRef) {
+  'use strict';
+
+  function createOnlineCore() {
+
+    // ---- link health classification ---------------------------------------------
+    // status: HTTP status (0 = network error). bodyHead: first ~300 chars.
+    // 'ok'   — the file is there (2xx and not an HTML page)
+    // 'page' — server answered with a web page instead of the file: on
+    //          user.uploads.dev this means removed/quarantined
+    // 'dead' — 4xx/5xx/network error
+    function linkClassify(status, bodyHead) {
+      var head = String(bodyHead || '').slice(0, 300).trim().toLowerCase();
+      var isHtml = head.indexOf('<!doctype') === 0 || head.indexOf('<html') === 0 ||
+                   (head.indexOf('<head') !== -1 && head.indexOf('<title') !== -1);
+      if (status >= 200 && status < 300) return isHtml ? 'page' : 'ok';
+      if (status === 0) return 'dead';
+      if (isHtml && (status === 403 || status === 404 || status === 410)) return 'page';
+      return 'dead';
+    }
+
+    // ---- scan scheduling -------------------------------------------------------------
+    // Which catalog entries are due a check: never-checked first, then stalest;
+    // each URL at most once per maxAgeMs (default 24h). Cap per scan run.
+    function scanDue(entries, lastMap, now, maxAgeMs, cap) {
+      now = now || Date.now(); maxAgeMs = maxAgeMs || 86400000; cap = cap || 10;
+      lastMap = lastMap || {};
+      return (entries || [])
+        .filter(function (e) { return e && e.url; })
+        .filter(function (e) {
+          var rec = lastMap[e.url];
+          return !rec || (now - (rec.t || 0)) >= maxAgeMs;
+        })
+        .sort(function (a, b) {
+          var ta = (lastMap[a.url] || {}).t || 0, tb = (lastMap[b.url] || {}).t || 0;
+          return ta - tb;
+        })
+        .slice(0, cap);
+    }
+
+    // health summary for a catalog given the lastMap
+    function healthSummary(entries, lastMap) {
+      var s = { ok: 0, page: 0, dead: 0, unchecked: 0 };
+      (entries || []).forEach(function (e) {
+        if (!e || !e.url) return;
+        var rec = (lastMap || {})[e.url];
+        if (!rec || !rec.status) s.unchecked++;
+        else if (s[rec.status] !== undefined) s[rec.status]++;
+        else s.unchecked++;
+      });
+      return s;
+    }
+
+    // ---- content digest (generator watch) ------------------------------------------
+    // FNV-1a 32-bit over the string — fast, deterministic, good enough to
+    // detect "did this page's source change since last look".
+    function digest(str) {
+      var h = 0x811c9dc5;
+      str = String(str || '');
+      for (var i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+      }
+      return ('0000000' + h.toString(16)).slice(-8);
+    }
+
+    // watchUpdate: previous record + fresh hash -> next record (+changed flag).
+    // First sighting baselines silently (changed: false).
+    function watchUpdate(prev, freshHash, now) {
+      now = now || Date.now();
+      if (!prev || !prev.hash) return { rec: { hash: freshHash, t: now, changedAt: 0 }, changed: false };
+      if (prev.hash === freshHash) return { rec: { hash: freshHash, t: now, changedAt: prev.changedAt || 0 }, changed: false };
+      return { rec: { hash: freshHash, t: now, changedAt: now, prevHash: prev.hash }, changed: true };
+    }
+
+    // ---- speed classification ----------------------------------------------------------
+    function speedClassify(ms) {
+      if (ms == null || ms < 0) return 'down';
+      if (ms < 600) return 'fast';
+      if (ms < 2000) return 'ok';
+      return 'slow';
+    }
+
+    return {
+      linkClassify: linkClassify, scanDue: scanDue, healthSummary: healthSummary,
+      digest: digest, watchUpdate: watchUpdate, speedClassify: speedClassify
+    };
+  }
+
+  if (moduleRef && moduleRef.exports) { moduleRef.exports = createOnlineCore; return; }
+  globalRoot.WeldOnlineCore = createOnlineCore;
+
+  /* ======================= browser side (top frame only) =================== */
+  if (typeof window === 'undefined' || window.top !== window) return;
+
+  var core = createOnlineCore();
+  var NS = 'weldCompanion';
+  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    attrs = attrs || {};
+    for (var k in attrs) {
+      if (k === 'text') n.textContent = attrs[k];
+      else if (k === 'class') n.className = attrs[k];
+      else if (k === 'style' && typeof attrs[k] === 'object') Object.assign(n.style, attrs[k]);
+      else if (/^on/.test(k)) n.addEventListener(k.slice(2), attrs[k]);
+      else n.setAttribute(k, attrs[k]);
+    }
+    (kids || []).forEach(function (c) { if (c) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function toast(msg, ms) {
+    var t = document.querySelector('.weld-on-toast'); if (t) t.remove();
+    t = el('div', { class: 'weld-on-toast', text: msg, style: {
+      position: 'fixed', bottom: '22px', left: '50%', transform: 'translateX(-50%)', zIndex: '99999999',
+      background: 'var(--wc-surface-2,#1a1f28)', color: 'var(--wc-ink,#e8e4dc)',
+      border: '1px solid var(--wc-line,rgba(255,255,255,.12))', borderRadius: '9px',
+      padding: '8px 14px', font: '12.5px system-ui', boxShadow: '0 10px 30px -10px rgba(0,0,0,.6)'
+    } });
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, ms || 2600);
+  }
+
+  // Minimal promise wrapper over GM_xmlhttpRequest. Resolves {status, head, ms};
+  // never rejects — network failure resolves {status: 0}.
+  function gmGet(url, timeoutMs) {
+    return new Promise(function (resolve) {
+      var t0 = Date.now(), done = false;
+      function finish(status, body) {
+        if (done) return; done = true;
+        resolve({ status: status, head: String(body || '').slice(0, 300), ms: Date.now() - t0 });
+      }
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: url, timeout: timeoutMs || 12000,
+          onload: function (r) { finish(r.status, r.responseText); },
+          onerror: function () { finish(0, ''); },
+          ontimeout: function () { finish(0, ''); }
+        });
+      } catch (e) { finish(0, ''); }
+    });
+  }
+
+  /* ---- lore link health ---------------------------------------------------------- */
+  function loreEntries() {
+    try { if (window.weldAICC && window.weldAICC.lore && typeof window.weldAICC.lore.all === 'function') return window.weldAICC.lore.all(); } catch (e) {}
+    return gget('aiccLore', []) || [];
+  }
+  var scanRunning = false;
+  function scanLore(onProgress, force) {
+    if (scanRunning) return Promise.resolve(null);
+    scanRunning = true;
+    var lastMap = gget('loreHealth', {}) || {};
+    var due = core.scanDue(loreEntries(), force ? {} : lastMap, Date.now(), 86400000, 10);
+    var i = 0;
+    function step() {
+      if (i >= due.length) { scanRunning = false; return Promise.resolve(gget('loreHealth', {}) || {}); }
+      var e = due[i++];
+      if (onProgress) onProgress(i, due.length, e);
+      return gmGet(e.url).then(function (res) {
+        var m = gget('loreHealth', {}) || {};
+        m[e.url] = { status: core.linkClassify(res.status, res.head), http: res.status, t: Date.now() };
+        gset('loreHealth', m);
+        return new Promise(function (r) { setTimeout(r, 400); }).then(step);   // be polite
+      });
+    }
+    return step();
+  }
+  function renderLoreHealthCard(bd, setCount) {
+    var entries = loreEntries();
+    var lastMap = gget('loreHealth', {}) || {};
+    var s = core.healthSummary(entries, lastMap);
+    var broken = s.page + s.dead;
+    setCount(broken ? (broken + ' broken') : (entries.length ? String(entries.length) : ''));
+    if (!entries.length) {
+      bd.appendChild(el('div', { class: 'wlib-note', text: 'No lore URLs saved yet. When the Lore Library has entries, this card checks each one (at most once a day) and flags uploads that were removed or quarantined \u2014 before they silently break a character.' }));
+      return;
+    }
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text:
+      s.ok + ' alive \u00b7 ' + s.page + ' returned a page (removed/quarantined) \u00b7 ' + s.dead + ' dead \u00b7 ' + s.unchecked + ' unchecked.' }));
+    // problem rows first
+    entries.forEach(function (e) {
+      var rec = lastMap[e.url];
+      if (!rec || rec.status === 'ok') return;
+      var row = el('div', { class: 'wlib-row' });
+      row.appendChild(el('div', { class: 'main' }, [
+        el('div', { class: 'title', text: (rec.status === 'page' ? '\u26A0 ' : '\u2715 ') + (e.name || e.url) }),
+        el('div', { class: 'meta', text: (rec.status === 'page' ? 'server returned a page \u2014 likely removed or quarantined' : 'unreachable (HTTP ' + (rec.http || 'error') + ')') + ' \u00b7 checked ' + new Date(rec.t).toLocaleDateString() })
+      ]));
+      row.appendChild(el('div', { class: 'wlib-acts' }, [
+        el('button', { class: 'wlib-mini', text: 'Open', onclick: function () { window.open(e.url, '_blank'); } }),
+        rec.status === 'page' ? el('button', { class: 'wlib-mini', text: 'Quarantine list', onclick: function () { window.open('https://perchance.org/quarantined-files', '_blank'); } }) : null
+      ]));
+      bd.appendChild(row);
+    });
+    var prog = el('span', { class: 'wlib-note', text: '' });
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u27F3 Check now', onclick: function (ev) {
+        ev.target.disabled = true;
+        scanLore(function (i, n) { prog.textContent = 'checking ' + i + '/' + n + '\u2026'; }, true).then(function () {
+          prog.textContent = ''; ev.target.disabled = false;
+          bd.innerHTML = ''; renderLoreHealthCard(bd, setCount);
+        });
+      } }),
+      prog,
+      el('span', { class: 'wlib-note', text: 'Checks run at most daily per link, 10 per pass, politely spaced.' })
+    ]));
+  }
+
+  /* ---- generator watch -------------------------------------------------------------- */
+  function favSlugs() {
+    var favs = gget('favs', []) || [];
+    return favs.map(function (f) { return typeof f === 'string' ? f : (f && f.name); }).filter(Boolean).slice(0, 30);
+  }
+  var watchRunning = false;
+  function checkWatched(onProgress) {
+    if (watchRunning) return Promise.resolve(null);
+    watchRunning = true;
+    var slugs = favSlugs();
+    var i = 0, changed = [];
+    function step() {
+      if (i >= slugs.length) { watchRunning = false; return Promise.resolve(changed); }
+      var slug = slugs[i++];
+      if (onProgress) onProgress(i, slugs.length, slug);
+      return gmGet('https://perchance.org/' + slug, 15000).then(function (res) {
+        if (res.status >= 200 && res.status < 300) {
+          // hash the full body — fetch again without the head-truncation
+          return gmGetFull('https://perchance.org/' + slug).then(function (body) {
+            var map = gget('genWatch', {}) || {};
+            var up = core.watchUpdate(map[slug], core.digest(body), Date.now());
+            map[slug] = up.rec; gset('genWatch', map);
+            if (up.changed) changed.push(slug);
+            return new Promise(function (r) { setTimeout(r, 500); }).then(step);
+          });
+        }
+        return new Promise(function (r) { setTimeout(r, 500); }).then(step);
+      });
+    }
+    return step();
+  }
+  function gmGetFull(url) {
+    return new Promise(function (resolve) {
+      try {
+        GM_xmlhttpRequest({ method: 'GET', url: url, timeout: 15000,
+          onload: function (r) { resolve(String(r.responseText || '')); },
+          onerror: function () { resolve(''); }, ontimeout: function () { resolve(''); } });
+      } catch (e) { resolve(''); }
+    });
+  }
+  function renderWatchCard(bd, setCount) {
+    var slugs = favSlugs();
+    var map = gget('genWatch', {}) || {};
+    var changed = slugs.filter(function (s) { var r = map[s]; return r && r.changedAt && (!r.seenAt || r.seenAt < r.changedAt); });
+    setCount(changed.length ? (changed.length + ' updated') : (slugs.length ? String(slugs.length) : ''));
+    if (!slugs.length) {
+      bd.appendChild(el('div', { class: 'wlib-note', text: 'Star some generators first \u2014 this card watches your favorites\u2019 page source and tells you when one changes.' }));
+      return;
+    }
+    bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'Watching ' + slugs.length + ' favorite' + (slugs.length === 1 ? '' : 's') + '. A change in a generator\u2019s page source flags it here. Some generators have dynamic pages and can flag without a real edit \u2014 \u201cmark seen\u201d re-baselines.' }));
+    changed.forEach(function (slug) {
+      var r = map[slug];
+      var row = el('div', { class: 'wlib-row' });
+      row.appendChild(el('div', { class: 'main' }, [
+        el('div', { class: 'title', text: '\u2728 ' + slug }),
+        el('div', { class: 'meta', text: 'changed ' + new Date(r.changedAt).toLocaleString() })
+      ]));
+      row.appendChild(el('div', { class: 'wlib-acts' }, [
+        el('button', { class: 'wlib-mini', text: 'Open', onclick: function () { window.open('https://perchance.org/' + slug, '_blank'); } }),
+        el('button', { class: 'wlib-mini', text: 'Mark seen', onclick: function () {
+          var m = gget('genWatch', {}) || {}; if (m[slug]) { m[slug].seenAt = Date.now(); gset('genWatch', m); }
+          row.remove();
+          var left = favSlugs().filter(function (s) { var x = (gget('genWatch', {}) || {})[s]; return x && x.changedAt && (!x.seenAt || x.seenAt < x.changedAt); }).length;
+          setCount(left ? (left + ' updated') : String(favSlugs().length));
+        } })
+      ]));
+      bd.appendChild(row);
+    });
+    var prog = el('span', { class: 'wlib-note', text: '' });
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: '\u27F3 Check favorites', onclick: function (ev) {
+        ev.target.disabled = true;
+        checkWatched(function (i, n, s) { prog.textContent = 'checking ' + s + ' (' + i + '/' + n + ')\u2026'; }).then(function (changedNow) {
+          prog.textContent = ''; ev.target.disabled = false;
+          if (changedNow && changedNow.length) toast('\u2728 ' + changedNow.length + ' generator' + (changedNow.length === 1 ? '' : 's') + ' changed');
+          else if (changedNow) toast('No changes since last check');
+          bd.innerHTML = ''; renderWatchCard(bd, setCount);
+        });
+      } }),
+      prog
+    ]));
+  }
+
+  /* ---- platform speed -------------------------------------------------------------- */
+  function renderSpeedCard(bd, setCount) {
+    setCount('');
+    var line = el('div', { class: 'wlib-note', text: 'Wondering if Perchance is slow, or if it\u2019s you? One click answers it.' });
+    bd.appendChild(line);
+    bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
+      el('button', { class: 'wlib-mini', text: '\uD83D\uDEA6 Test now', onclick: function (ev) {
+        ev.target.disabled = true; line.textContent = 'Timing a fetch of perchance.org\u2026';
+        gmGet('https://perchance.org/', 10000).then(function (res) {
+          ev.target.disabled = false;
+          var cls = res.status >= 200 && res.status < 400 ? core.speedClassify(res.ms) : 'down';
+          var msg = { fast: '\u2705 Fast (' + res.ms + ' ms) \u2014 the platform is fine; if a generator is slow, it\u2019s that generator.',
+                      ok: '\uD83D\uDFE1 Normal (' + res.ms + ' ms).',
+                      slow: '\uD83D\uDFE0 Slow (' + res.ms + ' ms) \u2014 the platform itself is sluggish right now.',
+                      down: '\uD83D\uDD34 Unreachable \u2014 perchance.org didn\u2019t answer. Check your connection; if other sites work, the platform may be down.' }[cls];
+          line.textContent = msg;
+          setCount(cls === 'fast' || cls === 'ok' ? '' : cls);
+        });
+      } })
+    ]));
+  }
+
+  window.weldOnline = {
+    core: core,
+    scanLore: scanLore,
+    checkWatched: checkWatched,
+    renderLoreHealthCard: renderLoreHealthCard,
+    renderWatchCard: renderWatchCard,
+    renderSpeedCard: renderSpeedCard
+  };
+})(typeof window !== 'undefined' ? window : globalThis, typeof module !== 'undefined' ? module : null);
 
