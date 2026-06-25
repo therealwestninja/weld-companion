@@ -7,7 +7,7 @@
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.45.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.47.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)

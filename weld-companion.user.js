@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.45.0
+// @homepageURL  https://github.com/therealwestninja/weld
+// @supportURL   https://github.com/therealwestninja/weld/issues
+// @version      1.47.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -38,17 +40,19 @@
 
   Modules:
     A. storage + tiny utils
+    G. GitHub updater             (sits between A and B in source order)
     B. favorites & recently-used  (+ a "/" command palette launcher)
     C. theme / reading comfort    (per-generator, remembered)
     D. result tools               (copy / save / pin / compare)
     E. result history             (undo-reroll: back/forward through outputs)
     F. resizable inputs           (drag handle + fullscreen on textareas)
-    G. generator management       (folder sort/filter + CRUD shortcuts)
     H. AI provider layer          (edit the Helper, or use your own GPT)
 */
 
 (function () {
   'use strict';
+
+  var WC_VERSION = '1.47.0';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -61,7 +65,7 @@
     catch (e) { return dflt; }
   }
   function gset(key, val) {
-    try { GM_setValue(NS + ':' + key, JSON.stringify(val)); return true; } catch (e) { return false; }
+    try { GM_setValue(NS + ':' + key, JSON.stringify(val)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; }
   }
   function gdel(key) { try { GM_deleteValue(NS + ':' + key); } catch (e) {} }
 
@@ -971,7 +975,7 @@
   }
 
   // expose a tiny namespace for debugging / other scripts
-  window.weldCompanion = { gget: gget, gset: gset, version: '1.0.0' };
+  window.weldCompanion = { gget: gget, gset: gset, version: WC_VERSION };
 
   // ---- adopt Perchance's own theme ------------------------------------------
   // Our chrome should belong to the page, not impose a foreign palette. We read
@@ -1199,6 +1203,7 @@
   // there's no Perchance bar (minimal-mode / bare pages) do we inject our own
   // slim bar and push the page down. Clicking a tab opens a drawer beneath it.
   var WC_TAB = null; // null = drawer closed
+  var wcKeysBound = false;
   function perchanceBar() {
     var b = document.getElementById('menuBarEl');
     // only use it if it's actually visible (it's hidden in minimal mode)
@@ -1222,7 +1227,7 @@
     var editBtn = host.querySelector('.edit-generator-button, .menu-item.edit, [class*="edit-generator"]');
     if (editBtn && editBtn.parentNode === host) host.insertBefore(item, editBtn);
     else host.appendChild(item); // fallback: no Edit button found (e.g. not the owner)
-    document.addEventListener('keydown', winKeys);
+    if (!wcKeysBound) { wcKeysBound = true; document.addEventListener('keydown', winKeys); }
   }
   function tabDefs() {
     return [
@@ -1810,6 +1815,10 @@
     var blob = new Blob([text], { type: 'text/plain' });
     var a = el('a', { href: URL.createObjectURL(blob), download: name }); document.body.appendChild(a); a.click(); a.remove();
   }
+  // Pinned results are arbitrary generator HTML rendered into the privileged top
+  // frame. Strip active content before insertion: drop script/style/iframe/etc,
+  // remove on* event-handler attributes, and neutralise javascript: URLs.
+  function wcSanitizeHtml(html){ try { var d=document.createElement('div'); d.innerHTML=String(html||''); d.querySelectorAll('script,style,iframe,object,embed,link,meta').forEach(function(n){n.remove();}); d.querySelectorAll('*').forEach(function(el){ for(var i=el.attributes.length-1;i>=0;i--){ var a=el.attributes[i].name, v=el.attributes[i].value||''; if(/^on/i.test(a)||(/^(href|src|xlink:href)$/i.test(a)&&/^\s*javascript:/i.test(v))) el.removeAttribute(a); } }); return d.innerHTML; } catch(e){ return ''; } }
   function pinResult(html) {
     var pins = gget('pins:' + genName(), []);
     pins.unshift({ html: html, t: Date.now() }); if (pins.length > 12) pins = pins.slice(0, 12);
@@ -1830,7 +1839,7 @@
       ]);
       // the pinned result is arbitrary generator HTML; sandbox it visually so it
       // can never blow out the card (clip, clamp height, neutralise stray margins)
-      var body = el('div', { class: 'wc-pin-body', html: p.html });
+      var body = el('div', { class: 'wc-pin-body', html: wcSanitizeHtml(p.html) });
       tray.appendChild(el('div', { class: 'wc-pin' }, [head, body]));
     });
     document.body.appendChild(tray);
@@ -1896,7 +1905,6 @@
         } });
       if (ta.parentNode && getComputedStyle(ta.parentNode).position === 'static') ta.parentNode.style.position = 'relative';
       try {
-        var r = ta.getBoundingClientRect(), pr = ta.parentNode.getBoundingClientRect();
         expand.style.right = '4px'; expand.style.top = '4px';
         ta.parentNode.appendChild(expand);
       } catch (e) {}
@@ -2029,7 +2037,7 @@
     try {
       GM_xmlhttpRequest({
         method: 'POST', url: st.url(model, key), headers: p.headers(key), data: bodyStr,
-        timeout: 120000, anonymous: true,
+        timeout: 120000,
         onprogress: function (res) { try { pump(res.responseText); } catch (e) {} },
         onload: function (res) { try { pump(res.responseText); } catch (e) {} finish(null); },
         onerror: function () { finish('Network error contacting ' + p.label); },
@@ -2090,7 +2098,7 @@
   function applyHelperInstruction() {
     var cfg = aiConfig(); if (!cfg.instruction) return;
     var box = $('#aiHelperInstructions') || $('[id*="aiHelperInstruction" i]') || $('#aiHelperInputEl');
-    if (box && 'value' in box && !box.dataset.wcSet) { box.dataset.wcSet = '1'; if (!box.value) box.value = cfg.instruction; }
+    if (box && 'value' in box && !box.dataset.wcSet) { box.dataset.wcSet = '1'; box.value = cfg.instruction; }
   }
   // If the user picked their own provider, intercept the Helper submit and route
   // it to their model, writing the result into the model editor. Best-effort:
@@ -2563,6 +2571,7 @@
     // top frame only. Compare on the SAME (real) window object -- in a userscript
     // sandbox, `window` (wrapper) !== `window.self` (real) can be falsely true.
     try { if (SB_WIN.top !== SB_WIN.self) return; } catch (e) {}
+    if (window.__weldInited) return; window.__weldInited = true;   // idempotency: never wire listeners/observers twice
     try {
       mountSkybridgeAnchor();
       recordVisit();
@@ -3122,6 +3131,7 @@
           };
           request.onsuccess = function () { try { request.result.close(); } catch (e) {} resolve(); };
           request.onerror = function () { reject(request.error || new Error('store creation failed')); };
+          request.onblocked = function () { reject(new Error('blocked: another connection is open (close the generator tab)')); };
         });
       }).then(function () {
         return (mode === 'replace') ? clearStore(name, storeDump.name) : true;
@@ -3166,7 +3176,7 @@
 
 /* ----- [2] DATA MANAGER v2.5 ----- */
 /* ============================================================================
- * Weld Companion — Data Manager v2.4  (federated IndexedDB / Dexie browser)
+ * Weld Companion — Data Manager v2.5  (federated IndexedDB / Dexie browser)
  * ----------------------------------------------------------------------------
  * Browse, edit, back up, export and import the IndexedDB databases stored by
  * every Perchance generator you've visited — full CRUD, organized by visited
@@ -3182,6 +3192,18 @@
 (function () {
   'use strict';
   var CH = 'weldDataMgr/2';
+  // Only honor data-channel messages from perchance.org frames (the skybridge channel
+  // already does this; the data channel must too, or a hostile cross-frame sender could
+  // register itself as the data agent and intercept IndexedDB/AICC traffic).
+  function dmOriginOk(o) {
+    if (typeof o !== 'string' || o === 'null') return false;
+    if (o === location.origin) return true;
+    var h = o, p = h.indexOf('://'); if (p !== -1) h = h.slice(p + 3);
+    var s = h.indexOf('/'); if (s !== -1) h = h.slice(0, s);
+    var c = h.indexOf(':'); if (c !== -1) h = h.slice(0, c);
+    h = h.toLowerCase();
+    return h === 'perchance.org' || (h.length > 13 && h.slice(-14) === '.perchance.org');
+  }
 
   /* ===================================================================== */
   /* ROLE: AGENT — hex-sandbox frames only. Broker and other service       */
@@ -3338,6 +3360,7 @@
     window.addEventListener('message', function (ev) {
       var d = ev.data;
       if (!d || d.channel !== CH || d.type !== 'rpc') return;
+      if (!dmOriginOk(ev.origin)) return;   // reject messages from non-perchance frames
       var reply = function (payload) {
         payload.channel = CH; payload.type = 'rpcReply'; payload.nonce = d.nonce;
         try { (ev.source || window.top).postMessage(payload, '*'); } catch (e) {}
@@ -3388,7 +3411,7 @@
   /* ===================================================================== */
   var NS = 'weldCompanion';
   function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
 
   /* ---- small helpers ----------------------------------------------------- */
   function el(tag, attrs, kids) {
@@ -3451,17 +3474,26 @@
   }
   function pickFile() {
     return new Promise(function (resolve) {
+      var settled = false;
+      function done(v) { if (settled) return; settled = true; try { inp.remove(); } catch (e) {} resolve(v); }
       var inp = el('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } });
       inp.addEventListener('change', function () {
         var file = inp.files && inp.files[0];
-        if (!file) { resolve(null); return; }
+        if (!file) { done(null); return; }
         var reader = new FileReader();
-        reader.onload = function () { resolve({ name: file.name, text: String(reader.result) }); };
-        reader.onerror = function () { resolve(null); };
+        reader.onload = function () { done({ name: file.name, text: String(reader.result) }); };
+        reader.onerror = function () { done(null); };
         reader.readAsText(file);
       });
+      // Cancelling the OS dialog fires no 'change' event; the window regains
+      // focus instead. Treat that (after a tick, so a real pick wins) as cancel.
+      function onFocus() {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(function () { if (!inp.files || !inp.files.length) done(null); }, 300);
+      }
+      window.addEventListener('focus', onFocus);
       document.body.appendChild(inp); inp.click();
-      setTimeout(function () { inp.remove(); }, 120000);
+      setTimeout(function () { done(null); }, 120000);
     });
   }
   function stamp() { return new Date().toISOString().replace(/[:.]/g, '-'); }
@@ -3490,6 +3522,7 @@
   window.addEventListener('message', function (ev) {
     var d = ev.data;
     if (!d || d.channel !== CH) return;
+    if (!dmOriginOk(ev.origin)) return;   // reject messages from non-perchance frames (spoofed agent / injected copy events)
     if (d.type === 'copyEvent') {
       try { if (window.weldOffline && typeof window.weldOffline.recordCopy === 'function') window.weldOffline.recordCopy(d.text, d.slug); } catch (e) {}
       return;
@@ -4056,10 +4089,14 @@
           ghost('Back to pages', function () { state.searchHits = null; renderRecords(slug, db, st); })
         ]));
       } else if (lastPage) {
+        var prevBtn = ghost('\u2039 prev', function () { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.pageSize); renderRecords(slug, db, st); } });
+        var nextBtn = ghost('next \u203a', function () { if (!lastPage.done) { state.offset += state.pageSize; renderRecords(slug, db, st); } });
+        if (state.offset === 0) { prevBtn.disabled = true; prevBtn.style.opacity = '.4'; prevBtn.style.cursor = 'default'; }
+        if (lastPage.done) { nextBtn.disabled = true; nextBtn.style.opacity = '.4'; nextBtn.style.cursor = 'default'; }
         refs.mainBody.appendChild(el('div', { class: 'wdm-pager' }, [
-          ghost('\u2039 prev', function () { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.pageSize); renderRecords(slug, db, st); } }),
+          prevBtn,
           el('span', { text: 'rows ' + (state.offset + 1) + '\u2013' + (state.offset + lastPage.rows.length) + ' of ' + st.count }),
-          ghost('next \u203a', function () { if (!lastPage.done) { state.offset += state.pageSize; renderRecords(slug, db, st); } })
+          nextBtn
         ]));
       }
     }
@@ -4248,7 +4285,8 @@
         if (!storeDump) { toast('That dump has no store named \u201c' + st.name + '\u201d.'); return; }
       } else { toast('File is not an idbml store/export'); return; }
       storeDump.name = st.name;   // import INTO this store regardless of source name
-      var mode = confirmYes('Import ' + (storeDump.records || []).length + ' record(s) into \u201c' + st.name + '\u201d?\n\nOK = REPLACE store contents\nCancel = MERGE on top') ? 'replace' : 'merge';
+      var wantsReplace = !confirmYes('Import ' + (storeDump.records || []).length + ' record(s) into \u201c' + st.name + '\u201d?\n\nOK = MERGE (combine with existing)\nCancel = REPLACE (overwrite)');
+      var mode = (wantsReplace && confirmYes('REPLACE wipes the existing store contents and cannot be undone. Are you sure?')) ? 'replace' : 'merge';
       toast('Importing (' + mode + ')\u2026');
       rpc(slug, 'importStore', { db: db, storeDump: storeDump, mode: mode }, 180000).then(function () { toast('Imported'); refreshCount(slug, db, st); })
         .catch(fail('Import failed'));
@@ -4269,7 +4307,8 @@
       if (!r.ok) { toast('Not valid JSON'); return; }
       var dump = r.value;
       if (!dump || !dump.databases) { toast('File is not an idbml export'); return; }
-      var mode = confirmYes('Import ' + dump.databases.length + ' database(s) into \u201c' + slug + '\u201d?\n\nOK = REPLACE matching databases\nCancel = MERGE into existing') ? 'replace' : 'merge';
+      var wantsReplace = !confirmYes('Import ' + dump.databases.length + ' database(s) into \u201c' + slug + '\u201d?\n\nOK = MERGE into existing\nCancel = REPLACE matching databases');
+      var mode = (wantsReplace && confirmYes('REPLACE wipes the matching databases and cannot be undone. Are you sure?')) ? 'replace' : 'merge';
       toast('Importing (' + mode + ')\u2026');
       rpc(slug, 'import', { dump: dump, mode: mode }, 240000).then(function (res) { toast('Imported ' + res.length + ' database(s)'); selectGenerator(slug); })
         .catch(fail('Import failed'));
@@ -4515,7 +4554,7 @@
 
   var NS = 'weldCompanion';
   function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
 
   // ---- Sentry: cooperative presence over BroadcastChannel -----------------
   // Cooperative because unmodified AICC doesn't broadcast its own presence. So
@@ -4706,9 +4745,11 @@
   //   normalizeCharacter(c)  — applies AICC's upgradeCharacterFromOldVersion
   //                            field defaults (aicc_2.txt:3058) + mints a uuid.
   //   normalizeMessage(m)    — ensures variants:[null] (AICC's message upgrade).
-  //   reconcile(tables)      — AICC's corruptItemReplacer logic: placeholder
-  //                            broken characters, recover thread.characterId
-  //                            from messages, drop orphan messages/lore.
+  //
+  // The cross-table reconciliation (AICC's corruptItemReplacer logic: placeholder
+  // broken characters, recover thread.characterId from messages, drop orphan
+  // messages/lore) is inlined directly into planRepair below — there is no
+  // separate reconcile() function.
   //
   // planRepair(tables) returns a structured plan { actions, fixed, dropped,
   // quarantined, tables } WITHOUT mutating its input, so the UI can show
@@ -5099,6 +5140,7 @@
         return;
       }
       // AICC closed: write through.
+      if (!confirm('Attach this lore URL to the character now? Make sure AI Character Chat is CLOSED in all other tabs first — writing while it is open can corrupt the database.')) return;
       var updated = JSON.parse(JSON.stringify(character));
       updated.loreBookUrls = updated.loreBookUrls || [];
       if (updated.loreBookUrls.indexOf(loreEntry.url) === -1) updated.loreBookUrls.push(loreEntry.url);
@@ -5307,7 +5349,7 @@
     function applyRepair(plan, original) {
       pack.sentry.canWriteToAICC(ctx.slug, [ctx.slug]).then(function (gate) {
         if (!gate.ok) { ctx.toast(gate.reason + ' Use "Export repaired copy" and import it after closing AICC.'); return; }
-        if (!ctx.confirmYes('Apply repair in place?\n\nA full backup is downloaded first. Then characters/threads/messages/lore are rewritten from the repaired plan. Continue?')) return;
+        if (!ctx.confirmYes('Apply repair in place?\n\nA full backup is downloaded first. Then characters/threads/messages/lore are rewritten from the repaired plan. Continue?\n\nMake sure AI Character Chat is CLOSED in all other tabs first — writing while it is open can corrupt the database.')) return;
         ctx.spinner(report, 'Backing up, then applying repair\u2026');
         // 1. full backup via exportDb
         ctx.rpc(ctx.slug, 'exportDb', { db: ctx.db }, 180000).then(function (backup) {
@@ -5544,6 +5586,7 @@
 
     var msg = 'Import ' + clean.length + ' character' + (clean.length === 1 ? '' : 's') + ' into AICC?';
     if (bad.length) msg += '\n\n' + bad.length + ' row' + (bad.length === 1 ? '' : 's') + ' could not be parsed and will be skipped.';
+    msg += '\n\nMake sure AI Character Chat is CLOSED in all other tabs first — writing while it is open can corrupt the database.';
     if (!window.confirm(msg)) return;
 
     window.weldAICCPack.sentry.canWriteToAICC(slug, [slug]).then(function (gate) {
@@ -5562,41 +5605,71 @@
     var eng = window.IDBManEngine ? window.IDBManEngine({}) : null;
     if (!eng) { _toast('IDB engine not loaded.'); return; }
 
-    var chain = Promise.resolve();
-    var written = 0;
-    sanitizedList.forEach(function (r) {
-      chain = chain.then(function () {
-        var c = r.character;
-        // De-dupe by uuid: if a character with this uuid already exists, replace it.
-        if (c.uuid && window.weldAICC.isUuid(c.uuid)) {
-          return rpc(slug, 'page', { db: 'chatbot-ui-v1', store: 'characters', offset: 0, limit: 500 })
-            .then(function (page) {
-              var rows = (page.rows || []).map(decodeRow);
-              var existing = rows.find(function (row) { return row.uuid === c.uuid; });
-              if (existing) {
-                // Update: merge into existing record, keep its id
-                var merged = Object.assign({}, existing, c, { id: existing.id });
-                return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: merged }).then(function () { written++; });
-              } else {
-                // Insert: strip id so Dexie assigns one
-                var fresh = Object.assign({}, c);
-                delete fresh.id;
-                fresh.creationTime = fresh.creationTime || Date.now();
-                fresh.lastMessageTime = fresh.lastMessageTime || Date.now();
-                return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: fresh }).then(function () { written++; });
-              }
-            });
-        } else {
-          var fresh = Object.assign({}, c);
-          delete fresh.id;
-          fresh.creationTime = fresh.creationTime || Date.now();
-          fresh.lastMessageTime = fresh.lastMessageTime || Date.now();
-          return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: fresh }).then(function () { written++; });
-        }
-      });
-    });
+    // Build a uuid -> existing row index by paging through ALL characters first,
+    // mirroring loadAllCharacters. The old code only scanned the first 500 rows,
+    // so on large DBs a duplicate uuid past page 1 would be inserted as a second
+    // row instead of replacing the existing one. Fail-soft: if paging throws,
+    // index stays null and we fall back to the original single-page lookup.
+    function buildUuidIndex() {
+      var index = {}; var offset = 0;
+      function next() {
+        return rpc(slug, 'page', { db: 'chatbot-ui-v1', store: 'characters', offset: offset, limit: 500 }).then(function (p) {
+          (p.rows || []).map(decodeRow).forEach(function (row) {
+            if (row && row.uuid && index[row.uuid] === undefined) index[row.uuid] = row;
+          });
+          offset += (p.rows || []).length;
+          if (p.done) return index;
+          return next();
+        });
+      }
+      return next();
+    }
 
-    chain.then(function () {
+    // Replace semantics (AICC's rule): same uuid -> update existing row in place,
+    // keeping its id. creationTime/folderPath are pinned from the existing row so
+    // the import payload cannot clobber them.
+    function applyOne(c, existing) {
+      if (existing) {
+        var merged = Object.assign({}, existing, c, {
+          id: existing.id,
+          creationTime: existing.creationTime,
+          folderPath: existing.folderPath
+        });
+        return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: merged }).then(function () { written++; });
+      } else {
+        var fresh = Object.assign({}, c);
+        delete fresh.id;
+        fresh.creationTime = fresh.creationTime || Date.now();
+        fresh.lastMessageTime = fresh.lastMessageTime || Date.now();
+        return rpc(slug, 'putEnc', { db: 'chatbot-ui-v1', store: 'characters', valueEnc: fresh }).then(function () { written++; });
+      }
+    }
+
+    var written = 0;
+    buildUuidIndex().catch(function () { return null; }).then(function (uuidIndex) {
+      var chain = Promise.resolve();
+      sanitizedList.forEach(function (r) {
+        chain = chain.then(function () {
+          var c = r.character;
+          // De-dupe by uuid: if a character with this uuid already exists, replace it.
+          if (c.uuid && window.weldAICC.isUuid(c.uuid)) {
+            if (uuidIndex) {
+              return applyOne(c, uuidIndex[c.uuid]);
+            }
+            // Fallback: paging failed, use the original single-page lookup.
+            return rpc(slug, 'page', { db: 'chatbot-ui-v1', store: 'characters', offset: 0, limit: 500 })
+              .then(function (page) {
+                var rows = (page.rows || []).map(decodeRow);
+                var existing = rows.find(function (row) { return row.uuid === c.uuid; });
+                return applyOne(c, existing);
+              });
+          } else {
+            return applyOne(c, null);
+          }
+        });
+      });
+      return chain;
+    }).then(function () {
       _toast(written + ' character' + (written === 1 ? '' : 's') + ' imported.');
       if (onDone) onDone();
     }).catch(function (err) {
@@ -6002,7 +6075,7 @@
 
   var NS = 'weldCompanion';
   function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
 
   function el(tag, attrs, kids) {
     var node = document.createElement(tag);
@@ -6922,7 +6995,7 @@
 
     // ---- named capped lists (sessions, snapshots) ------------------------------------
     function namedAdd(list, entry, cap) {
-      var next = [Object.assign({ id: 'n-' + (entry.t || 0) + '-' + Math.floor(Math.random() * 1e4) }, entry)].concat(list || []);
+      var next = [Object.assign({ id: 'n-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8) }, entry)].concat(list || []);
       return next.length > (cap || 20) ? next.slice(0, cap || 20) : next;
     }
 
@@ -7050,7 +7123,7 @@
   var core = createOfflineCore();
   var NS = 'weldCompanion';
   function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
 
   function el(tag, attrs, kids) {
     var n = document.createElement(tag);
@@ -7156,7 +7229,7 @@
         var due = new Date(dateIn.value + 'T00:00:00').getTime();
         if (!(due > Date.now())) { toast('Pick a future date'); return; }
         list = gget('capsules', []) || [];
-        list.push({ id: 'tc-' + Date.now(), msg: msg, due: due, created: Date.now(), delivered: null });
+        list.push({ id: 'tc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), msg: msg, due: due, created: Date.now(), delivered: null });
         gset('capsules', list);
         msgIn.value = '';
         toast('\u2713 Sealed \u2014 it will appear after ' + new Date(due).toLocaleDateString());
@@ -7241,7 +7314,6 @@
       var h = window.weldHooks || {};
       var t = (typeof h.outputText === 'function') ? h.outputText() : '';
       if (t) { store(t); return; }
-      if (lib) { /* live-frame path is async inside library; skip for speed */ }
     } catch (e) {}
     store('');
   }
@@ -7406,7 +7478,7 @@
         return keys;
       }
     } catch (e) {}
-    return ['scrapbook', 'clipRing', 'capsules', 'timeTrack', 'ratings', 'genNotes', 'outRules', 'recent', 'favs'];
+    return ['scrapbook', 'clipRing', 'capsules', 'timeTrack', 'ratings', 'genNotes', 'outRules', 'recent', 'favorites'];
   }
   function exportState() {
     var data = {};
@@ -7767,8 +7839,8 @@
           el('button', { class: 'wlib-mini', text: 'Open it', onclick: function () { window.open('https://perchance.org/' + b.slug, '_blank'); } }),
           el('button', { class: 'wlib-mini', text: '\u2605 Add to favorites', onclick: function () {
             try {
-              var favs = gget('favs', []) || [];
-              if (favs.indexOf(b.slug) === -1) { favs.push(b.slug); gset('favs', favs); toast('\u2605 Added to favorites'); }
+              var favs = gget('favorites', []) || [];
+              if (favs.indexOf(b.slug) === -1) { favs.push(b.slug); gset('favorites', favs); toast('\u2605 Added to favorites'); }
               else toast('Already a favorite');
             } catch (e) { toast('Could not add'); }
             ov.remove();
@@ -7930,7 +8002,7 @@
   var core = createOnlineCore();
   var NS = 'weldCompanion';
   function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); } catch (e) {} }
+  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
 
   function el(tag, attrs, kids) {
     var n = document.createElement(tag);
@@ -8045,7 +8117,7 @@
 
   /* ---- generator watch -------------------------------------------------------------- */
   function favSlugs() {
-    var favs = gget('favs', []) || [];
+    var favs = gget('favorites', []) || [];
     return favs.map(function (f) { return typeof f === 'string' ? f : (f && f.name); }).filter(Boolean).slice(0, 30);
   }
   var watchRunning = false;
@@ -8058,16 +8130,13 @@
       if (i >= slugs.length) { watchRunning = false; return Promise.resolve(changed); }
       var slug = slugs[i++];
       if (onProgress) onProgress(i, slugs.length, slug);
-      return gmGet('https://perchance.org/' + slug, 15000).then(function (res) {
-        if (res.status >= 200 && res.status < 300) {
-          // hash the full body — fetch again without the head-truncation
-          return gmGetFull('https://perchance.org/' + slug).then(function (body) {
-            var map = gget('genWatch', {}) || {};
-            var up = core.watchUpdate(map[slug], core.digest(body), Date.now());
-            map[slug] = up.rec; gset('genWatch', map);
-            if (up.changed) changed.push(slug);
-            return new Promise(function (r) { setTimeout(r, 500); }).then(step);
-          });
+      // single full fetch — hash the body it returns (empty body = fetch failed, skip update)
+      return gmGetFull('https://perchance.org/' + slug).then(function (body) {
+        if (body) {
+          var map = gget('genWatch', {}) || {};
+          var up = core.watchUpdate(map[slug], core.digest(body), Date.now());
+          map[slug] = up.rec; gset('genWatch', map);
+          if (up.changed) changed.push(slug);
         }
         return new Promise(function (r) { setTimeout(r, 500); }).then(step);
       });
