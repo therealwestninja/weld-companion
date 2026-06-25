@@ -7,7 +7,7 @@
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.47.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.49.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -44,7 +44,7 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
 
 1. Install a userscript manager:
    - **[Tampermonkey](https://www.tampermonkey.net/)** — Chrome, Edge, Safari, Opera
-   - **[Violentmonkey](https://violentmonkey.github.io/)** / **[Greasemonkey](https://www.greasespot.net/)** — Firefox
+   - **[Violentmonkey](https://violentmonkey.github.io/)** — Firefox
 2. Open **[`weld-companion.user.js`](weld-companion.user.js)** and confirm the install when your manager prompts.
 3. Browse Perchance. A single **⚡ Weld** item is added to Perchance's own menu bar, just left of the **edit** button. Click it (or press `/`) to open the drawer.
 
@@ -345,6 +345,9 @@ Two consent-free **meta-requests** help a plugin introspect the link without cat
 | `f` | Favorite / unfavorite the current generator |
 | `c` | Copy the current output |
 | `[` `]` | Previous / next result (undo-reroll) |
+| `Ctrl/Cmd+Alt+P` | Pull from GitHub (on an `#edit` page) |
+| `Ctrl/Cmd+Alt+S` | Save / trigger Perchance save (on an `#edit` page) |
+| `Ctrl/Cmd+Shift+S` | Quick-save selection or output to the Scrapbook |
 | `Shift+D` | Open the Data Manager |
 | `?` | Show the shortcut cheat-sheet |
 | `Esc` | Close the drawer |
@@ -371,10 +374,11 @@ Two consent-free **meta-requests** help a plugin introspect the link without cat
   @connect perchance.org                        # generator metadata
   @connect raw.githubusercontent.com            # GitHub Pull (your repo's public source files)
   @connect api.github.com                       # GitHub Push (Contents API, with your token)
+  @connect editor-copilot.perchance.org         # Perchance's editor AI-assist endpoint, only when you invoke it
   @connect *                                    # consent-gated web fetch for Weld agents, and custom model endpoints you configure
   ```
 
-  Out of the box, calls go only to the AI provider you choose, `perchance.org`, and your own GitHub files. The `*` and DuckDuckGo hosts are reached only through per-generator, consent-gated web-fetch / web-search capabilities or a model endpoint you configure — never silently. Every network call uses the privileged `GM_xmlhttpRequest`, so the Companion keeps working even if Perchance enforces its Content Security Policy.
+  Out of the box, calls go only to the AI provider you choose, `perchance.org` (including its editor AI-assist endpoint, only when you invoke it), and your own GitHub files. The `*` and DuckDuckGo hosts are reached only through per-generator, consent-gated web-fetch / web-search capabilities or a model endpoint you configure — never silently. Every network call uses the privileged `GM_xmlhttpRequest`, so the Companion keeps working even if Perchance enforces its Content Security Policy.
 
 - **`@grant unsafeWindow`** lets the Companion read the editor's globals and drive Perchance's own modals and the Skybridge handshake on the real page window. It isn't used to alter page content beyond that.
 - **It can't break Perchance.** Every feature is feature-detected against Perchance's internals and silently no-ops if something is absent or renamed. The whole script is wrapped so it never throws into the host page.
@@ -382,7 +386,7 @@ Two consent-free **meta-requests** help a plugin introspect the link without cat
 
 ## Compatibility & caveats
 
-- Tested with **Tampermonkey** and **Violentmonkey**; Greasemonkey should work (uses only standard `GM_*` APIs). Runs on `perchance.org` and `*.perchance.org`. All UI lives in the top frame; only the Data Manager agent runs inside generator sandbox frames (and exits immediately on non-sandbox subdomains).
+- Tested with **Tampermonkey** and **Violentmonkey**. **Greasemonkey 4+ is not supported** — the Companion uses the classic synchronous `GM_*` API, which Greasemonkey replaced with an async `GM.*` API; under Greasemonkey it loads but nothing persists (storage, settings, and backups silently fail). Runs on `perchance.org` and `*.perchance.org`. All UI lives in the top frame; only the Data Manager agent runs inside generator sandbox frames (and exits immediately on non-sandbox subdomains).
 - **Lives inside Perchance's own bar.** The ⚡ Weld item is inserted left of the **edit** button and height-locked so it never distorts the bar. If a page has no Perchance bar (e.g. *minimal* mode), nothing is injected — the `/` shortcut still opens the drawer, and the item is added if the bar appears later.
 - **Themes use a `backdrop-filter` overlay**, so they work on any generator without touching its DOM. "Dark" is an inversion (the standard dark-mode trick), so it renders photos in negative — the non-invert themes (Dim / Warm / Sepia / Gray) are safer on image-heavy generators.
 - **GitHub Push is two commits, not one atomic commit**, and has no pre-push diff. If GitHub changed since your last Pull, Push wins. (Atomic multi-file commits and a sync-status/diff view are on the roadmap.)

@@ -3,7 +3,9 @@
 // @namespace    https://github.com/therealwestninja/weld
 // @homepageURL  https://github.com/therealwestninja/weld
 // @supportURL   https://github.com/therealwestninja/weld/issues
-// @version      1.47.0
+// @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
+// @updateURL    https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
+// @version      1.49.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -52,7 +54,7 @@
 (function () {
   'use strict';
 
-  var WC_VERSION = '1.47.0';
+  var WC_VERSION = '1.49.0';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -101,7 +103,7 @@
   };
   function ghCfg() { var c = gget('github', {}) || {}; var o = {}; for (var k in GH_DEFAULTS) o[k] = (c[k] != null && c[k] !== '') ? c[k] : GH_DEFAULTS[k]; return o; }
   function ghRawUrl(cfg, tpl, name) {
-    var path = String(tpl).replace(/\{name\}/g, name);
+    var path = String(tpl).replace(/\{name\}/g, function () { return name; });   // function replacer: a slug with $ must not be read as a $-pattern
     return 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/refs/heads/' + cfg.branch + '/' + path + '?_=' + Date.now();
   }
   // Parse a GitHub file URL into { owner, repo, branch, path }. Accepts raw URLs
@@ -701,7 +703,7 @@
         toast('Fetch failed (' + (got.dsl.err ? 'DSL ' + got.dsl.err : '') + (got.html.err ? ' HTML ' + got.html.err : '') + ') -- use "Map THIS generator" to re-point');
         return;
       }
-      var dslP = R.cfg.dslPath.replace(/\{name\}/g, name), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, name);
+      var dslP = R.cfg.dslPath.replace(/\{name\}/g, function () { return name; }), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, function () { return name; });
       var dirty = false;
       try { var dv = dslView(), hv = htmlView(); dirty = (dv && viewText(dv) !== window.lastModelTextSaved) || (hv && viewText(hv) !== window.lastOutputTemplateSaved); } catch (e) {}
       var msg = (dirty ? '\u26A0 You have UNSAVED edits that this will overwrite.\n\n' : '') + 'Update "' + name + '" from GitHub?' + (R.overridden ? '  [custom mapping]' : '') + '\n\n'
@@ -968,14 +970,14 @@
 
   function isEditMode() { return /[?&]edit/.test(location.search) || !!dslView(); }
   function toast(msg, ms) {
-    var t = el('div', { class: 'wc-root wc-toast', text: msg });
+    var t = el('div', { class: 'wc-root wc-toast', role: 'status', 'aria-live': 'polite', text: msg });
     document.body.appendChild(t);
     requestAnimationFrame(function () { t.classList.add('wc-toast-in'); });
     setTimeout(function () { t.classList.remove('wc-toast-in'); setTimeout(function () { t.remove(); }, 300); }, ms || 2200);
   }
 
   // expose a tiny namespace for debugging / other scripts
-  window.weldCompanion = { gget: gget, gset: gset, version: WC_VERSION };
+  window.weldCompanion = { gget: gget, gset: gset, gdel: gdel, version: WC_VERSION };   // canonical storage helpers; appended modules delegate here (one source of truth)
 
   // ---- adopt Perchance's own theme ------------------------------------------
   // Our chrome should belong to the page, not impose a foreign palette. We read
@@ -1217,8 +1219,8 @@
     // Add EXACTLY ONE native-style item, like any other Perchance menu item. We
     // never inject a competing bar or displace Perchance's own UI. Everything
     // else (tabs, tools) lives in our own drawer.
-    var item = el('div', { class: 'menu-item wc-weld-item', title: 'Weld Companion  ( / )',
-      onclick: function () { toggleDrawer(); } }, [
+    var item = el('div', { class: 'menu-item wc-weld-item', title: 'Weld Companion  ( / )', role: 'button', tabindex: '0', 'aria-label': 'Weld Companion',
+      onclick: function () { toggleDrawer(); }, onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDrawer(); } } }, [
       el('span', { class: 'menu-item-icon', text: '\u26A1' }),
       el('span', { class: 'menu-item-label', text: 'Weld' })
     ]);
@@ -1266,7 +1268,7 @@
         el('div', { class: 'wc-titlebar' }, [
           el('span', { class: 'wc-brand' }, [ el('span', { class: 'wc-dot' }), el('span', { text: 'Weld Companion' }) ]),
           el('span', { class: 'wc-tools', id: 'wc-tools' }),
-          el('button', { class: 'wc-close', title: 'Close (Esc)', text: '\u2715', onclick: closeDrawer })
+          el('button', { class: 'wc-close', title: 'Close (Esc)', 'aria-label': 'Close', text: '\u2715', onclick: closeDrawer })
         ]),
         tabsStrip,
         el('div', { class: 'wc-body', id: 'wc-body' })
@@ -2134,7 +2136,7 @@
     else if (e.key === 'c' || e.key === 'C') { var o = outputNode(); if (o) copyText(nodeToText(o)); }
     else if (e.key === '[') { if (histPos > 0) restore(histPos - 1); }
     else if (e.key === ']') { if (histPos < histStack.length - 1) restore(histPos + 1); }
-    else if (e.key === '?') { toast('/ open \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history \u00b7 Ctrl/Cmd+Alt+P pull \u00b7 Ctrl/Cmd+Alt+S save', 4800); }
+    else if (e.key === '?') { toast('/ open \u00b7 f favorite \u00b7 c copy \u00b7 [ ] history \u00b7 Shift+D data \u00b7 Ctrl/Cmd+Alt+P pull \u00b7 Ctrl/Cmd+Alt+S save \u00b7 Esc close', 5200); }
   }
 
   // ============================================================ SKYBRIDGE ANCHOR
@@ -3410,8 +3412,8 @@
   /* ROLE: COORDINATOR + UI — top frame only.                              */
   /* ===================================================================== */
   var NS = 'weldCompanion';
-  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
+  function gget(k, d) { return window.weldCompanion.gget(k, d); }   // delegates to the canonical helper (module A)
+  function gset(k, v) { return window.weldCompanion.gset(k, v); }   // delegates to the canonical helper (module A)
 
   /* ---- small helpers ----------------------------------------------------- */
   function el(tag, attrs, kids) {
@@ -4553,8 +4555,8 @@
   if (window.top !== window) return;
 
   var NS = 'weldCompanion';
-  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
+  function gget(k, d) { return window.weldCompanion.gget(k, d); }   // delegates to the canonical helper (module A)
+  function gset(k, v) { return window.weldCompanion.gset(k, v); }   // delegates to the canonical helper (module A)
 
   // ---- Sentry: cooperative presence over BroadcastChannel -----------------
   // Cooperative because unmodified AICC doesn't broadcast its own presence. So
@@ -4873,7 +4875,7 @@
       tables: { characters: keptChars, threads: keptThreads, messages: keptMessages, lore: keptLore }
     };
   }
-  function clone(x) { try { return JSON.parse(JSON.stringify(x)); } catch (e) { return null; } }
+  function clone(x) { try { return (typeof structuredClone === 'function') ? structuredClone(x) : JSON.parse(JSON.stringify(x)); } catch (e) { try { return JSON.parse(JSON.stringify(x)); } catch (e2) { return null; } } }   // structuredClone preserves Date/Map/Set/ArrayBuffer/BigInt (JSON would drop them, silently dropping/mangling rows the repair promises to preserve)
 
   // Validate-and-normalize a character bundle on IMPORT, so corruption never
   // gets written back in. Returns { ok, character, changed } or { ok:false }.
@@ -5463,7 +5465,7 @@
   if (window.top !== window) return;
 
   var NS = 'weldCompanion';
-  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
+  function gget(k, d) { return window.weldCompanion.gget(k, d); }   // delegates to the canonical helper (module A)
 
   // Minimal el() that mirrors the Companion's own helper — used only for the
   // card body since the outer renderTools() already has the full el() in scope.
@@ -6074,8 +6076,8 @@
   if (window.top !== window) return;
 
   var NS = 'weldCompanion';
-  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
+  function gget(k, d) { return window.weldCompanion.gget(k, d); }   // delegates to the canonical helper (module A)
+  function gset(k, v) { return window.weldCompanion.gset(k, v); }   // delegates to the canonical helper (module A)
 
   function el(tag, attrs, kids) {
     var node = document.createElement(tag);
@@ -7122,8 +7124,8 @@
 
   var core = createOfflineCore();
   var NS = 'weldCompanion';
-  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
+  function gget(k, d) { return window.weldCompanion.gget(k, d); }   // delegates to the canonical helper (module A)
+  function gset(k, v) { return window.weldCompanion.gset(k, v); }   // delegates to the canonical helper (module A)
 
   function el(tag, attrs, kids) {
     var n = document.createElement(tag);
@@ -8001,8 +8003,8 @@
 
   var core = createOnlineCore();
   var NS = 'weldCompanion';
-  function gget(k, d) { try { var v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); } catch (e) { return d; } }
-  function gset(k, v) { try { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; } }
+  function gget(k, d) { return window.weldCompanion.gget(k, d); }   // delegates to the canonical helper (module A)
+  function gset(k, v) { return window.weldCompanion.gset(k, v); }   // delegates to the canonical helper (module A)
 
   function el(tag, attrs, kids) {
     var n = document.createElement(tag);
