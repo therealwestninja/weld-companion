@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld
-// @version      1.44.0
+// @version      1.45.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -2139,6 +2139,8 @@
   var SB = 'weld.skybridge';
   var SB_PROTO_MIN = 1, SB_PROTO_MAX = 1;
   var SB_CAPS = ['storage', 'ai', 'fetch', 'search', 'model', 'bus'];  // what this companion offers
+  var SB_AGENT = 'weld-companion';   // identity reported in here/describe so a plugin knows which anchor answered
+  var SB_VERSION = '1.1.0';          // anchor protocol-impl version (distinct from the userscript @version)
 
   // The userscript manager runs us in a sandbox where `window` is a wrapper:
   // a 'message' listener placed on it may NOT receive the page's real
@@ -2149,7 +2151,7 @@
   var SB_WIN = (function () {
     try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; } catch (e) { return window; }
   })();
-  var SB_BUILD = 'sb-anchor/2026-06-06.7';   // bump on every change; printed at mount so a stale userscript is obvious
+  var SB_BUILD = 'sb-anchor/2026-06-25.1';   // bump on every change; printed at mount so a stale userscript is obvious
   // verbose-logging toggle: ?sbdebug in the URL, or window.WELD_SKYBRIDGE_DEBUG = true
   var SB_DEBUG = false;
   try {
@@ -2405,6 +2407,12 @@
   // its one-shot 'hello' -- so we cannot rely on being greeted. We announce
   // instead, and repeat for frames that load later. The plugin treats our
   // 'here' as a connect whether or not it ever heard us greet back.
+  // ONE source of truth for the handshake greeting -- used by both the broadcast announce
+  // and the direct reply to a hello, so they can never drift. (The companion advertises its
+  // full capability list openly; consent still gates every actual use.)
+  function sbHere() {
+    return { channel: SB, type: 'here', agent: SB_AGENT, version: SB_VERSION, protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS };
+  }
   function sbAnnounce(win) {
     var root = win || SB_WIN, list;
     try { list = root.frames; } catch (e) { return; }   // cross-origin parent walk guard
@@ -2413,7 +2421,7 @@
       if (n !== sbLastFrameCount) { sbLastFrameCount = n; sbRec('tx', 'announce', '', n + ' child frame(s)'); sbDebug('skybridge announce: ' + n + ' child frame(s) visible'); }
     }
     if (!list || !list.length) return;
-    var msg = { channel: SB, type: 'here', version: '1.0.0', protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS };
+    var msg = sbHere();
     for (var i = 0; i < list.length; i++) {
       var f = null; try { f = list[i]; } catch (e) {}
       if (!f) continue;
@@ -2480,16 +2488,18 @@
         sbRec('tx', 'here', ev.origin, 'reply to hello');
         sbDebug('skybridge: hello from', ev.origin, '\u2192 replying here');
         // negotiate: respond with our range + capabilities; the plugin picks the common max
-        source.postMessage({
-          channel: SB, type: 'here', version: '1.0.0',
-          protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS
-        }, ev.origin && ev.origin !== 'null' ? ev.origin : '*');
+        source.postMessage(sbHere(), ev.origin && ev.origin !== 'null' ? ev.origin : '*');
         return;
       }
 
       if (d.type === 'request') {
         var cap = String(d.cap || '');
         var nonce = d.nonce;
+        // meta-requests: no consent, no capability data -- safe to answer always. `describe`
+        // lets a plugin query the manifest on demand (not just catch the here); `ping` is a
+        // liveness / round-trip probe.
+        if (cap === 'ping') { sbReply(source, ev.origin, nonce, { ok: true, agent: SB_AGENT, version: SB_VERSION, build: SB_BUILD, ts: Date.now() }); return; }
+        if (cap === 'describe') { sbReply(source, ev.origin, nonce, { ok: true, agent: SB_AGENT, version: SB_VERSION, build: SB_BUILD, protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS.slice() }); return; }
         if (SB_CAPS.indexOf(cap) === -1) { sbReply(source, ev.origin, nonce, { ok: false, reason: 'unsupported' }); return; }
         var gen = genName() || 'unknown';
         sbConsent(gen, cap).then(function (allowed) {
@@ -2529,6 +2539,8 @@
   function sbDiagnostics() {
     var n = -1; try { n = (SB_WIN.frames && SB_WIN.frames.length) || 0; } catch (e) {}
     return {
+      agent: SB_AGENT,
+      version: SB_VERSION,
       build: SB_BUILD,
       debug: SB_DEBUG,
       boundToUnsafeWindow: (SB_WIN !== window),

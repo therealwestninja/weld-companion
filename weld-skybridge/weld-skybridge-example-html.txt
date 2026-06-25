@@ -48,7 +48,7 @@ input{background:var(--bg);color:var(--ink);border:1px solid var(--border);borde
   </div>
 
   <div class="hdr">
-    <div class="hdr-row"><h1>weld.skybridge &mdash; live bridge test</h1><span class="ver">v1.0.0</span></div>
+    <div class="hdr-row"><h1>weld.skybridge &mdash; live bridge test</h1><span class="ver">v1.2.1</span></div>
     <p class="lead">Runs real probes against the bridge in <em>this</em> page and reports pass/fail per step. With the Weld Companion userscript installed you should see the companion-linked path; without it, the graceful-fallback path. Both are valid &mdash; the test tells you which one you're on.</p>
   </div>
 
@@ -98,7 +98,6 @@ input{background:var(--bg);color:var(--ink);border:1px solid var(--border);borde
   } catch (e) { try { if (window.console) console.log('\[skybridge\] could not trigger root.weldSkybridge():', e && e.message); } catch (e2) {} }
   var sb = (window.weld && window.weld.skybridge) || null;
   function $(id){ return document.getElementById(id); }
-  function esc(s){ return String(s); }
 
   // ---- diagnostics panel ------------------------------------------------
   function diagSnapshot(){
@@ -110,7 +109,7 @@ input{background:var(--bg);color:var(--ink);border:1px solid var(--border);borde
     if (beacon && beacon.build) {
       return { error: 'deployment beacon found (build ' + beacon.build + ') but window.weld.skybridge was not built \u2014 the plugin threw AFTER setting the beacon. Open the generator console for the error.' };
     }
-    return { error: 'window.weld.skybridge and the beacon are both absent \u2014 the plugin $output never ran. An imported plugin is NOT auto-invoked; this page calls root.weldSkybridge() to trigger it. Check that {import:weld-skybridge-plugin} is in the generator and that root.weldSkybridge is a function.' };
+    return { error: 'window.weld.skybridge and the beacon are both absent \u2014 the plugin $output never ran. An imported plugin is NOT auto-invoked; this page calls root.weldSkybridge() to trigger it. Check that \{import:weld-skybridge-plugin\} is in the generator and that root.weldSkybridge is a function.' };
   }
   function fmtTrace(tr){
     if (!tr || !tr.length) return '   (no handshake events yet)';
@@ -241,9 +240,12 @@ input{background:var(--bg);color:var(--ink);border:1px solid var(--border);borde
 
   def('storage backend resolves', function(){
     var be = sb.storage.backend();
-    var ok = be === 'companion' || be === 'persist' || be === 'memory';
+    var ok = be === 'companion' || be === 'kv' || be === 'persist' || be === 'memory';
     if (!ok) return Promise.resolve(F('unknown backend: ' + be));
-    return Promise.resolve(P('routing to "' + be + '"' + (be === 'companion' ? ' (cross-generator)' : ' (this browser only)')));
+    var scope = be === 'companion' ? ' (cross-generator)'
+              : be === 'kv'        ? ' (cross-device)'
+                                   : ' (this browser only)';
+    return Promise.resolve(P('routing to "' + be + '"' + scope));
   });
 
   def('storage round-trip', function(){
@@ -326,7 +328,7 @@ input{background:var(--bg);color:var(--ink);border:1px solid var(--border);borde
 
   if (!sb) {
     paintConn();
-    $('tests').innerHTML = '<li class="test"><span class="badge fail">fail</span><div class="body"><div class="name">plugin present</div><div class="detail">window.weld.skybridge is missing \u2014 import {import:weld-skybridge-plugin} in this generator.</div></div></li>';
+    $('tests').innerHTML = '<li class="test"><span class="badge fail">fail</span><div class="body"><div class="name">plugin present</div><div class="detail">window.weld.skybridge is missing \u2014 import \{import:weld-skybridge-plugin\} in this generator.</div></div></li>';
   } else {
     runAll();
     $('rerun').onclick = runAll;

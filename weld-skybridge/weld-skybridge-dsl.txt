@@ -53,17 +53,21 @@ $output() =>
   // won't need to.
   // -----------------------------------------------------------------
 
+  // ---- identity: declared ONCE, referenced everywhere (the beacon, the public
+  //      surface, diagnostics) so a stamp can never drift between them ----
+  var VERSION = '1.4.1';               // this plugin's own semver (the wire contract is `protocol`, below)
+  var BUILD = 'sb-plugin/2026-06-25.2';  // bump on every change; printed at load so a stale deploy is obvious
+
   // ---- protocol the sandbox end speaks (advertise a range) ----
   var PROTO_MIN = 1;
   var PROTO_MAX = 1;
   var MSG = 'weld.skybridge';          // envelope tag, both directions
   var HELLO_TIMEOUT = 4000;            // ms to wait for the anchor to answer
   var REQUEST_TIMEOUT = 30000;         // ms before a pending request gives up
-  var BUILD = 'sb-plugin/2026-06-06.3';  // bump on every change; printed at load so a stale deploy is obvious
   var LOADED_AT = Date.now();
   // Early, dependency-free deployment beacon: even if a later line throws, this
   // proves WHICH build actually loaded (read it from the example or console).
-  try { window.__weldSkybridge = { build: BUILD, version: '1.4.0', at: Date.now() }; } catch (e) {}
+  try { window.__weldSkybridge = { build: BUILD, version: VERSION, at: Date.now() }; } catch (e) {}
   // verbose console logging toggle: add ?sbdebug to the URL, or set
   // window.WELD_SKYBRIDGE_DEBUG = true before load, or call .debug(true) at runtime.
   var DEBUG = false;
@@ -162,16 +166,42 @@ $output() =>
       var lo = Math.max(PROTO_MIN, (d.protoMin | 0) || 0);
       var hi = Math.min(PROTO_MAX, (d.protoMax | 0) || 0);
       if (hi < lo) { rec('drop', 'here', ev.origin, 'no-common-protocol'); sbDebug('here from ' + ev.origin + ' but no common protocol (' + d.protoMin + '..' + d.protoMax + ' vs ' + PROTO_MIN + '..' + PROTO_MAX + ')'); return; }
-      if (connected) return;           // already linked; ignore duplicates
-      proto = hi;
-      anchorVersion = (typeof d.version === 'string') ? d.version : null;
-      caps = {};
+
+      // collect the advertised capabilities (an array of strings)
+      var inCaps = {}, nIn = 0;
       if (d.capabilities && typeof d.capabilities === 'object' && d.capabilities.length != null) {
         for (var i = 0; i < d.capabilities.length; i++) {
           var c = Reflect.get(d.capabilities, i);
-          if (typeof c === 'string') Reflect.set(caps, c, true);
+          if (typeof c === 'string' && !Reflect.get(inCaps, c)) { Reflect.set(inCaps, c, true); nIn++; }
         }
       }
+
+      // An anchor announces its PRESENCE with a broadcast `here` that carries NO
+      // capabilities (it won't leak them to a '*' broadcast); the real list arrives
+      // only in the reply to OUR hello. So a capability-less here means "an anchor is
+      // here" -- (re)handshake to fetch the real one, and never LATCH onto it, or its
+      // empty caps would stick. Closes a race where a broadcast probe beats the direct
+      // hello reply by a millisecond (seen live against the Rook anchor: connected but
+      // capabilities:[]).
+      if (nIn === 0) { if (!connected) connect(); return; }
+
+      if (connected) {
+        // already linked: act only if this reply brings capabilities we didn't have
+        // (e.g. we linked on a leaner/earlier here). Otherwise ignore the duplicate.
+        if (nIn > Object.keys(caps).length) {
+          caps = inCaps; proto = hi;
+          if (typeof d.version === 'string') anchorVersion = d.version;
+          rec('ok', 'upgraded', ev.origin, 'caps ' + Object.keys(caps).join(','));
+          sbLog('capabilities upgraded (protocol ' + proto + ', caps: ' + Object.keys(caps).join(',') + ')');
+          fireConnect();
+        }
+        return;
+      }
+
+      // first link, with real capabilities
+      proto = hi;
+      anchorVersion = (typeof d.version === 'string') ? d.version : null;
+      caps = inCaps;
       connected = true;
       if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
       rec('ok', 'connected', ev.origin, 'proto ' + proto);
@@ -411,7 +441,7 @@ $output() =>
     bus: { publish: busPublish, subscribe: busSubscribe },
     // protocol range this sandbox end speaks
     protocolRange: { min: PROTO_MIN, max: PROTO_MAX },
-    version: '1.4.0',
+    version: VERSION,
     build: BUILD,
     // verbose-logging toggle. on()/off; returns the new state.
     debug: function (on) {
@@ -422,7 +452,7 @@ $output() =>
     // a live snapshot for troubleshooting (state + recent handshake events)
     diagnostics: function () {
       return {
-        build: BUILD, version: '1.4.0', debug: DEBUG, loadedAt: LOADED_AT,
+        build: BUILD, version: VERSION, debug: DEBUG, loadedAt: LOADED_AT,
         connected: connected, protocol: proto, anchorVersion: anchorVersion,
         framed: (function () { try { return window.top !== window.self; } catch (e) { return null; } })(),
         origin: location.origin,

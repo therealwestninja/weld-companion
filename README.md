@@ -7,7 +7,7 @@
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.44.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.45.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -325,7 +325,9 @@ Weld Companion is the **anchor end** of `weld.skybridge`. A generator that impor
 - **Web search** — a keyless DuckDuckGo Instant-Answer lookup (title / url / snippet) for lightweight grounding.
 - **Model info** — the name and approximate context size of the model you configured (never the key, no network call).
 
-Under the hood it's a two-way `postMessage` handshake between the Companion (top frame) and the plugin (the generator's `*.perchance.org` child iframe), with a negotiated protocol, per-message nonce, and origin checks. Consent is **per-capability and per-generator**, asked once and remembered. Both ends log the handshake to the console (`[WeldCompanion]` / `[skybridge]`) so a misconnection is diagnosable rather than silent.
+Under the hood it's a two-way `postMessage` handshake between the Companion (top frame) and the plugin (the generator's `*.perchance.org` child iframe), with a negotiated protocol, per-message nonce, and origin checks. The Companion identifies itself in the handshake (`agent: "weld-companion"`) so a plugin knows which anchor answered. Consent is **per-capability and per-generator**, asked once and remembered. Both ends log the handshake to the console (`[WeldCompanion]` / `[skybridge]`) so a misconnection is diagnosable rather than silent.
+
+Two consent-free **meta-requests** help a plugin introspect the link without catching the one-shot handshake: `request('describe')` returns the live manifest (agent, version, build, protocol range, capabilities), and `request('ping')` is a liveness / round-trip probe. For deeper troubleshooting, run **`weldCompanion.skybridgeDiagnostics()`** in the top-frame console — it returns the anchor's agent/version/build, bound-window state, visible child-frame count, advertised capabilities, remembered per-generator permissions, and a ring buffer of recent handshake events.
 
 > [!IMPORTANT]
 > **A generator must *trigger* the plugin.** Importing `{import:weld-skybridge-plugin}` only *defines* its `$output`; call it once early in your panel JS so it initializes `window.weld.skybridge`:

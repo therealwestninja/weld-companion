@@ -1,37 +1,7 @@
 $meta
   title = weld.skybridge examples
-  description = Interactive demo of weld.skybridge -- the bridge to Weld Companion. Shows the connection handshake (and negotiated protocol), cross-generator persistent storage with graceful fallback, and routing a prompt to the user's own AI model. Runs fine with no companion installed: storage falls back to weld.persist/memory and AI reports unavailable.
+  description = Interactive demo of weld.skybridge -- the bridge to Weld Companion. Shows the connection handshake (and negotiated protocol), cross-generator persistent storage with graceful fallback, and routing a prompt to the user's own AI model. Runs fine with no companion installed: storage falls back to weld.kv (cross-device), weld.persist, or memory, and AI reports unavailable.
   tags = weld, skybridge, bridge, companion, example, plugin
 
 weldSkybridge = {import:weld-skybridge-plugin}
-
-$output() =>
-  'use strict';
-  // The plugin self-installs on import; grab the handle.
-  var sb = window.weld.skybridge;
-
-  // Expose tiny helpers the page calls. Everything resolves a value or a
-  // result object -- never throws -- so the page can branch on data.
-  window.__sbDemo = {
-    status: function () {
-      return {
-        connected: sb.connected,
-        protocol: sb.protocol,
-        anchorVersion: sb.anchorVersion,
-        hasStorage: sb.has('storage'),
-        hasAI: sb.has('ai'),
-        backend: sb.storage.backend()
-      };
-    },
-    save: function (slot, text) { return sb.storage.set('demo:' + slot, { text: text, at: Date.now() }); },
-    load: function (slot) { return sb.storage.get('demo:' + slot); },
-    listSlots: function () { return sb.storage.list('demo:'); },
-    ai: function (prompt) { return sb.ai(prompt, { system: 'You name fantasy taverns. Reply with just the name.' }); }
-  };
-
-  // Let the page react the moment a companion links (or note it never did).
-  sb.onConnect(function (info) {
-    if (typeof window.__sbOnConnect === 'function') window.__sbOnConnect(info);
-  });
-
-  return 'weld.skybridge demo ready. backend=' + sb.storage.backend() + ', connected=' + sb.connected;
+weldPersist   = {import:weld-persist-plugin}   // -> storageBackend becomes "persist" (IndexedDB, this browser)
