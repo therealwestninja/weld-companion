@@ -4,10 +4,10 @@
 
 **Quality-of-life upgrades for [Perchance](https://perchance.org) — for readers, players, and authors alike.**
 
-Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it *or point at your own GPT*) and AICC character file import/export · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
+Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it, *point at your own GPT, or run a free local model*), AICC character file import/export, and a one-click **self-test** · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.49.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.54.1-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -16,7 +16,7 @@ Favorites · reading comfort · save & pin results · undo-reroll · a full gene
 
 ---
 
-Weld Companion runs **outside** the generator sandbox as a browser userscript, so it works on **any** Perchance generator — not just ones built with the [Weld plugin suite](#relationship-to-weld). Your favorites, history, and settings stay local and account-free. The only network requests it makes are ones **you** initiate to a service **you** choose: an AI provider with your key, or your own GitHub repo with your token.
+Weld Companion runs **outside** the generator sandbox as a browser userscript, so it works on **any** Perchance generator — not just ones built with the [Weld plugin suite](#relationship-to-weld). Your favorites, history, and settings stay local and account-free. Its network requests are either **you**-initiated to a service **you** choose — an AI provider with your key (or a free **local model** with none), your own GitHub repo with your token — or read-only fetches of Perchance's **public metadata API** (a generator's views / last-edited time).
 
 > [!NOTE]
 > This is the first piece of the Weld project that runs *outside* a generator — the companion to the plugin suite.
@@ -52,15 +52,17 @@ No account and no configuration are needed to start. GitHub sync and a custom AI
 
 ## Features
 
-Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled like a native item, so nothing of Perchance's is replaced, displaced, or covered. It opens the **Weld drawer**, which holds a result-tools row in its header (copy / save / pin / undo-reroll) and four tabs:
+Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled like a native item, so nothing of Perchance's is replaced, displaced, or covered. It opens the **Weld drawer**, which holds a result-tools row in its header (copy / save / pin / undo-reroll) and seven tabs:
 
 | Tab | What's in it |
 | :-- | :----------- |
-| ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort, and per-row open/edit. A **This Generator** panel gives the open generator two-way GitHub sync (Pull/Push), rename, delete, and backup. |
+| ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort (incl. **Edited** / **Views**), per-row open/edit, and a **Stats** button that pulls real **view counts + last-edited times** from Perchance's public API. A **This Generator** panel shows the open generator's status and an **About this page** card (public stats — views, last edited, title, imports — for *any* generator, even ones you don't own), plus owner actions. |
 | 📒 **Library** | The reader's home, grouped by task. **📚 Collect**: a permanent **Scrapbook** of saved results (searchable, taggable, exportable), **Chat stories** (read or export any AICC thread as styled HTML, Markdown, or text), **clipboard history**, and your **👍/👎 ratings**. **🛡 Care**: a **backup guardian**, a **time tracker** (per-generator minutes, CSV export), a **time capsule**, **output rules** (post-processing on save), and **Move everything** (full state export/import). Plus **search everything**, **session replay**, and a **spaced-repetition review queue** in Collect; **My Perchance** stats, **tab snapshots**, **My boundaries**, and a **Ctrl/Cmd+Shift+S** quick-save hotkey; a **keepsake HTML archive** and **recommendation bundles** to share generators; **lore link health** (catches removed/quarantined uploads before they break a character), **generator watch** (update notifications for favorites), and a one-click **platform speed check**; night light gains an **ambient mode** that follows hour and season. A sticky header keeps save / read-aloud / rate / random-favorite in reach. |
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
+| ⇅ **GitHub** | Two-way GitHub sync for the open generator — **⬇ Pull** (repo → editor, undoable) and **⬆ Push** (editor → repo via the Contents API), with per-generator file mappings and global repo defaults. |
 | 👁 **Comfort** | Eye-comfort theme filters, font size, line height, max width, a dyslexia-friendly font, focus mode — and an option to apply the same sizing to the **code editor**. |
-| 🛠 **Tools** | Tool cards. **AI Helper**: a custom instruction, or route the helper to your own OpenAI / Anthropic / Google model with your key. **Character Files**: import and export AI Character Chat character `.json` files, or fetch one straight from a GitHub raw URL. |
+| ✂ **Snippets** | Ready-to-paste Perchance code snippets — `aiTextPlugin`, `kv-plugin`, and other boilerplate — dropped at your cursor into the matching DSL or HTML pane on an `#edit` page. |
+| 🛠 **Tools** | Tool cards. **AI Helper**: a custom instruction, or route the helper to your own **OpenAI / Anthropic / Google** model *or a free, private **local model** (Ollama / OpenAI-compatible)*. **Character Files**: import/export AICC character `.json`, or fetch from a GitHub raw URL. **🧪 Diagnostics**: a one-click **self-test** of the companion's capabilities (anchor, storage, fetch + Perchance API, your AI provider) with a copyable report. |
 
 ### Quality-of-life
 
@@ -76,8 +78,9 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 The **★ Generators** tab is both your launcher and a real manager.
 
 - **Your whole directory.** Hit **Load all** and the Companion loads *every generator on your account*, grouped by **your own Perchance folders** (e.g. `projects`, `legacy-plugins`). It does this by driving Perchance's own account directory — so your login is handled entirely by Perchance and **your session token is never read or sent by this script**. The list is cached locally and shows instantly next time; the button re-pulls and shows the count.
-- **Search & sort.** Filter by name or folder as you type; sort by **Recent**, **A→Z**, **Favorites**, or **Folders** (folder-grouped, with headers). Keyboard nav: ↑/↓ + Enter.
+- **Search & sort.** Filter by name or folder as you type; sort by **Recent**, **Edited**, **Views**, **A→Z**, **Favorites**, or **Folders** (folder-grouped, with headers). Keyboard nav: ↑/↓ + Enter.
 - **Per-row actions:** ★ favorite, **open**, **edit**, ✕ remove from your visited list.
+- **Generator stats *(Perchance public API)*.** A **Stats** button pulls real **view counts** and **last-edited times** for the listed generators (shown inline, and enabling the **Edited** / **Views** sorts). The **This Generator → About this page** card shows full public stats — views, last edited, title, description, and imported plugins — for *any* generator you're viewing, **even one you don't own**, with **Open**, **View source**, and **Fork** links.
 - **CRUD that drives Perchance's *own* functions** (so the Companion never reimplements — or holds credentials for — destructive actions):
   - **＋ New** / **Fork this** — open the editor on a fresh or copied generator.
   - **Save** — triggers Perchance's editor save (a synthetic `Ctrl/Cmd+S`). It's **captcha-aware**: if Perchance gates the save behind a Cloudflare Turnstile, you're told to complete it rather than shown a misleading "saved."
@@ -88,7 +91,7 @@ The **★ Generators** tab is both your launcher and a real manager.
 
 ### Sync with GitHub — Pull & Push
 
-If your generators' source lives in a GitHub repo — one folder per generator, e.g. `<name>/<name>-top-panel.txt` (DSL) and `<name>/<name>-html-panel.html` (HTML) — the Companion gives you **two-way sync** from the **This Generator** panel. By default it's a compact row (slug · **⬇ Pull** · **⬆ Push** · **⚙**); the gear reveals the rest.
+If your generators' source lives in a GitHub repo — one folder per generator, e.g. `<name>/<name>-top-panel.txt` (DSL) and `<name>/<name>-html-panel.html` (HTML) — the Companion gives you **two-way sync** from the **⇅ GitHub** tab (also reachable via the **⇅ GitHub** button in the *This Generator* panel). It has a per-generator card (**⬇ Pull** / **⬆ Push** + file mapping) and global repo defaults.
 
 **⬇ Pull (GitHub → editor).** Fetches the two files from `raw.githubusercontent.com` (public, no auth or cookies) and fills the editor's two CodeMirror panes via the editor's own transaction pipeline — so the change is undoable with `Ctrl+Z`. You then review and click **Save**. Optionally it downloads a local backup of the current source first.
 
@@ -99,7 +102,7 @@ Push writes to your account, so it needs a token:
 > [!IMPORTANT]
 > **Push requires a GitHub Personal Access Token.** Use a **fine-grained token scoped to that one repo, with Contents: read & write**, and a short expiry. Paste it into **⚙ → GitHub push (token)**. It's stored locally in the script's storage, sent **only** to `api.github.com` in the `Authorization` header, and is **never logged or written into commit messages**. Clear it any time with the same panel.
 
-Both sides share one mapping. Under the gear:
+Both sides share one mapping. The **⇅ GitHub** tab has two sections:
 
 - **Files for this generator** — the DSL and HTML paths, plus optional per-generator `owner` / `repo` / `branch` overrides. Paste a full `raw.githubusercontent.com` or `github.com` file URL and it auto-fills owner/repo/branch and reduces the field to the bare path. Use this to re-point a generator whose Perchance slug doesn't match its file names (e.g. a random slug like `/fr5y67…`).
 - **Repo defaults (all generators)** — your `owner`, `repo`, `branch`, and path templates (`{name}` expands to the slug). Set once; every generator follows.
@@ -218,15 +221,20 @@ The **🛠 Tools** tab holds self-contained tool cards.
 Perchance's built-in AI Helper writes generator code from a prompt. This card adds the two things it's missing:
 
 1. **Edit the instruction.** Override the helper's system prompt with your own.
-2. **Use your own model.** Route the helper through your own account on any of the three most popular APIs:
+2. **Use your own model — cloud or local.** Route the helper (and, via Skybridge, any generator's `ai` capability) through a model **you** control:
 
-   | Provider | Default model | Key format |
-   | :------- | :------------ | :--------- |
-   | **OpenAI** (GPT) | `gpt-4o` | `sk-…` |
-   | **Anthropic** (Claude) | `claude-sonnet-4-20250514` | `sk-ant-…` |
-   | **Google** (Gemini) | `gemini-1.5-pro` | `AIza…` |
+   | Provider | Default model | Notes |
+   | :------- | :------------ | :---- |
+   | **OpenAI** (GPT) | `gpt-4o` | key `sk-…` |
+   | **Anthropic** (Claude) | `claude-sonnet-4-20250514` | key `sk-ant-…` |
+   | **Google** (Gemini) | `gemini-1.5-pro` | key `AIza…` |
+   | **Local — Ollama** | `llama3.1` | **no key**; endpoint `http://localhost:11434` |
+   | **Local — OpenAI-compatible** | `local-model` | LM Studio / llama.cpp; endpoint `http://localhost:1234`; key optional |
 
-   Pick a provider, paste your key, optionally set a model, and hit **Test** to verify it. The helper's request then goes to your model — **streaming token-by-token** — and the result is written straight into the code editor. Prefer the default? Leave it on **Perchance built-in** and just use a custom instruction.
+   Pick a provider, set the model (and, for local, the **endpoint**), and hit **Test**. Cloud replies **stream token-by-token**; the result is written straight into the code editor. The **local** providers run on your own machine — free and private — reaching `localhost` through the privileged `GM_xmlhttpRequest` (the in-sandbox bridge cannot). When a call fails, the error is **classified into a plain-language cause + fix** (e.g. a `403` from Ollama tells you to run it with `OLLAMA_ORIGINS=*`). Prefer the default? Leave it on **Perchance built-in** with just a custom instruction.
+
+> [!NOTE]
+> For a local model the userscript reaches `localhost` directly. Ollama must be started with **`OLLAMA_ORIGINS=*`** (or your browser origin) so it accepts the browser-origin request — the AI Helper's **Test** and the **🧪 Diagnostics** self-test both report this precisely when it's missing.
 
 > [!IMPORTANT]
 > Your API key is stored **only** in this browser and sent **only** to the provider you select. See [Privacy & safety](#privacy--safety).
@@ -238,6 +246,17 @@ Surfaces AI Character Chat character files without opening the Data Manager. Wor
 - **Import characters** — load a `.json` file: a single-character bundle saved by this manager, an AICC share-link envelope (`{ addCharacter: … }`), a raw character object, or a multi-character export. Every character is validated and normalized (the same sanitizer the repair tools use) before anything is written, so a corrupt file can't poison the database. If an AICC tab is open, direct writes are blocked by the sentry and you get per-character **share links** instead — open each in AICC and its own import flow handles the merge. If AICC is closed, characters are written directly, de-duplicated by `uuid` exactly the way AICC's import does (same `uuid` replaces, no `uuid` inserts fresh).
 - **Export characters** — downloads every character in the current generator as one `.json` file (`format: "aicc-characters"`), each stripped with AICC's own share rules. Private — nothing is uploaded.
 - **Pull character from GitHub** — paste a `raw.githubusercontent.com` URL to a character `.json` and it's fetched (via `GM_xmlhttpRequest`, so CSP can't block it) and run through the same import flow.
+
+#### 🧪 Diagnostics — self-test
+
+One click exercises the Companion end-to-end and reports each result **green / amber / red** with a cause + fix:
+
+- **Skybridge anchor** — mounted, and which capabilities it offers.
+- **Storage** — a real read/write round-trip through the userscript-manager store.
+- **Fetch + Perchance API** — a live `getGeneratorStats` request (confirms `GM_xmlhttpRequest` egress).
+- **AI** — pings your configured provider (local Ollama or cloud) and shows the reply, or the classified failure with its fix. *(Skipped when set to the Perchance built-in broker, which is only callable from inside a generator.)*
+
+A **Copy report** button puts the results plus the anchor's full diagnostic state (agent / version / build, capabilities, advertised protocol features, child-frame count, and a ring buffer of recent handshakes) on your clipboard — one paste for a bug report.
 
 ### Data Manager — browse, edit & back up every generator's IndexedDB
 
@@ -319,7 +338,7 @@ Both options are gated by the **cooperative sentry**: if an AICC tab is open on 
 Weld Companion is the **anchor end** of `weld.skybridge`. A generator that imports the **`weld-skybridge-plugin`** can — *with your per-generator consent* — ask the Companion for things it cannot do from inside the sandbox:
 
 - **Cross-generator storage** — namespaced, persistent key/value held on the generator's behalf. With no Companion installed, the plugin falls back to its own storage and honestly reports `has('storage') === false`.
-- **Your own AI model** — run a completion through the model **you** configured. Your key **never crosses the bridge**; only the prompt goes up and the text streams back.
+- **Your own AI model — cloud or local** — run a completion through the model **you** configured (OpenAI / Anthropic / Google, or a free local **Ollama / OpenAI-compatible** model). Your key **never crosses the bridge**; only the prompt goes up and the text streams back. A generator's `ai` capability can therefore be powered by your **local** model — free and private, no key anywhere.
 - **A cross-tab message bus** — `bus.publish` / `bus.subscribe` on named channels, relayed across different generators and tabs over a `BroadcastChannel` on the shared `perchance.org` origin. This is the transport **`weld.swarm`** rides on for multi-agent orchestration.
 - **Web fetch** — fetch a URL on the generator's behalf (cookie-free, `http`/`https` only, never local or private-network addresses, size-capped).
 - **Web search** — a keyless DuckDuckGo Instant-Answer lookup (title / url / snippet) for lightweight grounding.
@@ -327,7 +346,7 @@ Weld Companion is the **anchor end** of `weld.skybridge`. A generator that impor
 
 Under the hood it's a two-way `postMessage` handshake between the Companion (top frame) and the plugin (the generator's `*.perchance.org` child iframe), with a negotiated protocol, per-message nonce, and origin checks. The Companion identifies itself in the handshake (`agent: "weld-companion"`) so a plugin knows which anchor answered. Consent is **per-capability and per-generator**, asked once and remembered. Both ends log the handshake to the console (`[WeldCompanion]` / `[skybridge]`) so a misconnection is diagnosable rather than silent.
 
-Two consent-free **meta-requests** help a plugin introspect the link without catching the one-shot handshake: `request('describe')` returns the live manifest (agent, version, build, protocol range, capabilities), and `request('ping')` is a liveness / round-trip probe. For deeper troubleshooting, run **`weldCompanion.skybridgeDiagnostics()`** in the top-frame console — it returns the anchor's agent/version/build, bound-window state, visible child-frame count, advertised capabilities, remembered per-generator permissions, and a ring buffer of recent handshake events.
+Two consent-free **meta-requests** help a plugin introspect the link without catching the one-shot handshake: `request('describe')` returns the live manifest (agent, version, build, protocol range, capabilities, and an advertised **`features`** list so a client can feature-detect the extras), and `request('ping')` is a liveness / round-trip probe. Capability errors carry a stable, branchable **`code`** (`denied` / `unsupported` / `error`) alongside the human-readable `reason`. For deeper troubleshooting, run **`weldCompanion.skybridgeDiagnostics()`** in the top-frame console — it returns the anchor's agent/version/build, bound-window state, visible child-frame count, advertised capabilities **and features**, remembered per-generator permissions, and a ring buffer of recent handshake events (the same state the **🧪 Diagnostics** self-test copies).
 
 > [!IMPORTANT]
 > **A generator must *trigger* the plugin.** Importing `{import:weld-skybridge-plugin}` only *defines* its `$output`; call it once early in your panel JS so it initializes `window.weld.skybridge`:
@@ -360,7 +379,7 @@ Two consent-free **meta-requests** help a plugin introspect the link without cat
 - **The Data Manager never phones home.** It reads, edits, and snapshots IndexedDB databases entirely within your browser. Export files are downloaded by you; imports are picked by you. No generator data crosses the network as a result of the Data Manager or AICC pack.
 - **Character data is private by default.** The AICC panels only appear when you've actively opened an AI Character Chat database. Every sharing action — share link, GitHub push, lore upload — requires explicit confirmation before anything leaves your device.
 - **Credentials are scoped to one destination each, and never logged:**
-  - Your **AI key** is sent only to the provider you pick.
+  - Your **AI key** is sent only to the provider you pick — and a **local model** (Ollama / OpenAI-compatible) needs no key at all, reaching only `localhost`.
   - Your **GitHub token** is sent only to `api.github.com`, in the `Authorization` header — never logged, never placed in commit messages or file content. Use a fine-grained, single-repo, Contents-read/write token.
 - **Your Perchance login is never handled by this script.** Directory loading, rename, and delete all drive Perchance's own controls, which carry their own credentials. The Companion reads the results but never reads or transmits your session token.
 - **Pull is read-only and anonymous** — it fetches `raw.githubusercontent.com` files with no auth or cookies, fills the editor locally, and never saves or pushes on its own.
@@ -371,14 +390,16 @@ Two consent-free **meta-requests** help a plugin introspect the link without cat
   @connect api.anthropic.com                    # Anthropic
   @connect generativelanguage.googleapis.com    # Google
   @connect api.duckduckgo.com                   # keyless web search, only when a Weld agent asks (consent-gated)
-  @connect perchance.org                        # generator metadata
+  @connect perchance.org                        # generator metadata + public stats API (views, last-edit, imports)
   @connect raw.githubusercontent.com            # GitHub Pull (your repo's public source files)
   @connect api.github.com                       # GitHub Push (Contents API, with your token)
   @connect editor-copilot.perchance.org         # Perchance's editor AI-assist endpoint, only when you invoke it
+  @connect localhost                            # a local model server YOU run (Ollama / OpenAI-compatible)
+  @connect 127.0.0.1                            # same, by IP
   @connect *                                    # consent-gated web fetch for Weld agents, and custom model endpoints you configure
   ```
 
-  Out of the box, calls go only to the AI provider you choose, `perchance.org` (including its editor AI-assist endpoint, only when you invoke it), and your own GitHub files. The `*` and DuckDuckGo hosts are reached only through per-generator, consent-gated web-fetch / web-search capabilities or a model endpoint you configure — never silently. Every network call uses the privileged `GM_xmlhttpRequest`, so the Companion keeps working even if Perchance enforces its Content Security Policy.
+  Out of the box, calls go only to the AI provider you choose, `perchance.org` (its metadata + public stats API, and the editor AI-assist endpoint only when you invoke it), and your own GitHub files. A **local model** you configure is reached on `localhost`/`127.0.0.1` and never leaves your machine. The `*` and DuckDuckGo hosts are reached only through per-generator, consent-gated web-fetch / web-search capabilities or a model endpoint you configure — never silently. Every network call uses the privileged `GM_xmlhttpRequest`, so the Companion keeps working even if Perchance enforces its Content Security Policy.
 
 - **`@grant unsafeWindow`** lets the Companion read the editor's globals and drive Perchance's own modals and the Skybridge handshake on the real page window. It isn't used to alter page content beyond that.
 - **It can't break Perchance.** Every feature is feature-detected against Perchance's internals and silently no-ops if something is absent or renamed. The whole script is wrapped so it never throws into the host page.

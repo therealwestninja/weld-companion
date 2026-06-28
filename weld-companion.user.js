@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/therealwestninja/weld/issues
 // @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
 // @updateURL    https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
-// @version      1.54.0
+// @version      1.54.1
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -56,7 +56,7 @@
 (function () {
   'use strict';
 
-  var WC_VERSION = '1.54.0';
+  var WC_VERSION = '1.54.1';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -2818,6 +2818,7 @@
       topIsSelf: (function () { try { return SB_WIN.top === SB_WIN.self; } catch (e) { return null; } })(),
       childFrames: n,
       capabilities: SB_CAPS.slice(),
+      features: SB_FEATURES.slice(),
       perms: sbPerms(),
       trace: SB_TRACE.slice()
     };

@@ -14,22 +14,28 @@ No account or setup needed to start; GitHub sync and a custom AI model are optio
 
 ## What it adds
 
-The **⚡ Weld** drawer has a result-tools header (copy / save / pin / undo-reroll) and three tabs.
+The **⚡ Weld** drawer has a result-tools header (copy / save / pin / undo-reroll) and seven tabs — **Generators · Library · Data · GitHub · Comfort · Snippets · Tools**.
 
 **★ Generators**
-- **Load all** — your *entire* account directory, grouped by your real Perchance **folders**, plus favorites and recents. Search, sort (Recent / A→Z / Favorites / Folders), and per-row ★ / open / edit. Cached locally.
-- **This Generator** panel — two-way GitHub sync and owner actions for the open generator (below).
+- **Load all** — your *entire* account directory, grouped by your real Perchance **folders**, plus favorites and recents. Search, sort (Recent / Edited / Views / A→Z / Favorites / Folders), and per-row ★ / open / edit. Cached locally.
+- **Generator stats** — a **Stats** button + an **About this page** card pull real **view counts + last-edited times** (and title / imports) from Perchance's public API, for *any* generator — even ones you don't own.
+- **This Generator** panel — status + owner actions; the **GitHub** tab does two-way sync (below).
 - **CRUD** via Perchance's own functions: New, Fork, **Save** (synthetic `Ctrl/Cmd+S`, captcha-aware), **Rename**, **Delete**.
 
 **👁 Comfort** *(per-generator, remembered)* — theme filters (Off / Dim / Warm / Sepia / Gray / Dark), font size, max width, line height, dyslexia-friendly font, focus mode, and an option to apply the sizing to the **code editor** too.
 
-**🤖 AI Helper** — override the helper's instruction, or route it through your own **OpenAI / Anthropic / Google** model and key (with a Test button and token-by-token streaming). Default stays the built-in Perchance helper.
+**🛠 Tools**
+- **🤖 AI Helper** — override the helper's instruction, or route it through your own model: **OpenAI / Anthropic / Google** (key + token-by-token streaming) *or a free, private **local model** — Ollama / OpenAI-compatible, no key, reaching `localhost`*. Failures are classified into a plain cause + fix. Default stays the built-in Perchance helper.
+- **🧪 Diagnostics** — a one-click **self-test** of the companion's capabilities (anchor, storage, fetch + Perchance API, your AI provider) with a copyable report.
+- **👤 Character Files** — import/export AICC character `.json`, or fetch from a GitHub raw URL.
+
+**✂ Snippets** — ready-to-paste Perchance code snippets (`aiTextPlugin`, `kv-plugin`, …) dropped at your cursor in the editor.
 
 **Viewer extras** — result **Copy / Save / Pin** bar, **undo-reroll** history (`[` / `]`), and resizable input boxes.
 
 ## GitHub sync (author tools)
 
-From the **This Generator** panel (slug · ⬇ Pull · ⬆ Push · ⚙):
+From the **⇅ GitHub** tab (or the **⇅ GitHub** button in the *This Generator* panel):
 
 - **⬇ Pull** — fetch the generator's DSL + HTML from your repo's public `raw.githubusercontent.com` files and fill the editor's two panes (undoable); you review and **Save**. Optional backup-before-pull.
 - **⬆ Push** — commit the editor's contents back to your repo via the GitHub Contents API, behind a confirm dialog. Needs a **fine-grained Personal Access Token** (single repo, Contents read & write), stored locally and sent only to `api.github.com` — never logged. Set it under **⚙ → GitHub push (token)**.
@@ -46,7 +52,7 @@ Set `owner` / `repo` / `branch` and path templates once under the gear (paste a 
 - Your **AI key** goes only to the provider you pick; your **GitHub token** only to `api.github.com`. Neither is ever logged.
 - **Your Perchance login is never handled by this script** — directory loading, rename, and delete drive Perchance's *own* controls, which carry their own credentials.
 - Pull is read-only and anonymous (public raw files, no cookies).
-- **Skybridge** — to Weld generators that import `weld-skybridge-plugin`, the Companion offers consent-gated capabilities (durable storage, your own streaming AI model, a cross-tab message bus, web fetch, web search, and model-info), each asked once per generator and remembered. See [README.md](README.md) for details.
+- **Skybridge** — to Weld generators that import `weld-skybridge-plugin`, the Companion offers consent-gated capabilities (durable storage, your own streaming AI model **— cloud or local**, a cross-tab message bus, web fetch, web search, and model-info), each asked once per generator and remembered. So a generator can run on your **free local model** with no key. See [README.md](README.md) for details.
 - Every feature is feature-detected and fail-soft, so it never breaks the host page; Focus mode hides *your own* clutter and is not an ad blocker.
 
 ---
