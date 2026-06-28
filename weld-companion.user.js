@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/therealwestninja/weld/issues
 // @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
 // @updateURL    https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
-// @version      1.52.3
+// @version      1.54.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -26,6 +26,8 @@
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
 // @connect      editor-copilot.perchance.org
+// @connect      localhost
+// @connect      127.0.0.1
 // @connect      *
 // @run-at       document-idle
 // ==/UserScript==
@@ -54,7 +56,7 @@
 (function () {
   'use strict';
 
-  var WC_VERSION = '1.52.3';
+  var WC_VERSION = '1.54.0';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -1315,6 +1317,72 @@
     if (h && typeof h.renderTab === 'function') { try { h.renderTab(body); return; } catch (e) {} }
     body.appendChild(el('div', { class: 'wc-section-note', text: 'Library module not loaded.' }));
   }
+  // ---- capability self-test (Rook extDiagnose pattern): exercise each capability end-to-end ----
+  function selfTest(cb) {
+    var results = [], pending = 0, fired = false;
+    function mk(id, label, status, detail, fix, ms) { return { id: id, label: label, status: status, detail: detail || '', fix: fix || '', ms: ms || 0 }; }
+    function maybeDone() { if (pending <= 0 && !fired) { fired = true; cb(results); } }
+    // 1. anchor (static state)
+    try { var d = sbDiagnostics(); results.push(mk('anchor', 'Skybridge anchor', (d && d.topIsSelf !== false) ? 'ok' : 'warn', 'v' + (d && d.version) + ' · caps: ' + ((d && d.capabilities) || []).join(', '))); }
+    catch (e) { results.push(mk('anchor', 'Skybridge anchor', 'fail', String(e && e.message || e))); }
+    // 2. storage (GM read/write)
+    try { var k = 'wc_selftest', v = 'v' + Date.now(); gset(k, v); results.push(mk('storage', 'Storage (GM)', gget(k, null) === v ? 'ok' : 'fail', 'read + write')); }
+    catch (e) { results.push(mk('storage', 'Storage (GM)', 'fail', String(e && e.message || e))); }
+    // 3. fetch + Perchance public API (one real GM_xmlhttpRequest)
+    pending++; var t0 = Date.now();
+    try {
+      GM_xmlhttpRequest({ method: 'GET', url: 'https://perchance.org/api/getGeneratorStats?name=ai-character-chat&_=' + Date.now(), timeout: 12000,
+        onload: function (r) { var ok = r.status >= 200 && r.status < 400; results.push(mk('fetch', 'Fetch + Perchance API', ok ? 'ok' : 'warn', 'getGeneratorStats → HTTP ' + r.status, ok ? '' : 'Perchance API may be down', Date.now() - t0)); pending--; maybeDone(); },
+        onerror: function () { results.push(mk('fetch', 'Fetch + Perchance API', 'fail', 'network error', 'Check connection / @connect')); pending--; maybeDone(); },
+        ontimeout: function () { results.push(mk('fetch', 'Fetch + Perchance API', 'warn', 'timed out')); pending--; maybeDone(); } });
+    } catch (e) { results.push(mk('fetch', 'Fetch + Perchance API', 'fail', String(e && e.message || e))); pending--; }
+    // 4. AI capability (the active provider — local or cloud)
+    var cfg = aiConfig();
+    if (!cfg || cfg.provider === 'builtin' || !cfg.provider) {
+      results.push(mk('ai', 'AI capability', 'skip', 'Perchance built-in broker — only callable from inside a generator, not from here'));
+    } else {
+      pending++; var ta = Date.now(), prov = cfg.provider, pl = (PROVIDERS[prov] || {}).label || prov;
+      callOwnAI(cfg, 'You are a helper. Reply with the single word: ok', 'ping', function (err, txt) {
+        if (err) results.push(mk('ai', 'AI — ' + pl, 'fail', String(err).slice(0, 180)));
+        else results.push(mk('ai', 'AI — ' + pl, 'ok', 'replied: "' + String(txt || '').trim().slice(0, 40) + '"', '', Date.now() - ta));
+        pending--; maybeDone();
+      });
+    }
+    maybeDone();   // covers the all-synchronous case
+  }
+  function renderSelfTest(card) {
+    var note = el('div', { class: 'wc-section-note', text: 'Tests the companion end-to-end: anchor, storage, fetch + Perchance API, and your AI provider (incl. a local model). Green = ok, amber = warning, red = failing.' });
+    var list = el('div', { style: { margin: '8px 0' } }), last = null;
+    function dot(s) { var c = s === 'ok' ? '#3fb950' : s === 'warn' ? '#d29922' : s === 'fail' ? '#f85149' : '#888'; return el('span', { style: { display: 'inline-block', width: '9px', height: '9px', borderRadius: '50%', background: c, margin: '5px 7px 0 0', flex: '0 0 auto' } }); }
+    function render(results) {
+      last = results; list.innerHTML = '';
+      var n = { ok: 0, warn: 0, fail: 0, skip: 0 };
+      (results || []).forEach(function (r) {
+        n[r.status] = (n[r.status] || 0) + 1;
+        var row = el('div', { style: { display: 'flex', alignItems: 'flex-start', padding: '5px 0', borderTop: '1px solid var(--wc-line,#333)' } });
+        row.appendChild(dot(r.status));
+        var b = el('div', { style: { flex: '1', minWidth: '0' } });
+        b.appendChild(el('div', { style: { fontWeight: '600', fontSize: '12.5px' }, text: r.label + (r.ms ? '  (' + r.ms + 'ms)' : '') }));
+        if (r.detail) b.appendChild(el('div', { class: 'wc-section-note', text: r.detail }));
+        if (r.fix) b.appendChild(el('div', { style: { color: '#d29922', fontSize: '11.5px', wordBreak: 'break-word' }, text: '→ ' + r.fix }));
+        row.appendChild(b); list.appendChild(row);
+      });
+      list.insertBefore(el('div', { style: { fontWeight: '700', fontSize: '12px', color: n.fail ? '#f85149' : n.warn ? '#d29922' : '#3fb950' }, text: n.ok + ' ok' + (n.warn ? ' · ' + n.warn + ' warn' : '') + (n.fail ? ' · ' + n.fail + ' FAIL' : '') + (n.skip ? ' · ' + n.skip + ' skipped' : '') }), list.firstChild);
+    }
+    var run = el('button', { class: 'wc-btn', text: 'Run self-test', onclick: function () { run.disabled = true; run.textContent = 'Testing…'; list.innerHTML = ''; selfTest(function (results) { run.disabled = false; run.textContent = 'Re-run'; render(results); }); } });
+    var copy = el('button', { class: 'wc-btn wc-mini', text: 'Copy report', onclick: function () {
+      var st = {}; try { st = sbDiagnostics(); } catch (e) {}
+      var report = 'Weld Companion self-test · v' + WC_VERSION + ' · ' + new Date().toISOString() + '\n\n'
+        + (last || []).map(function (r) { return '[' + String(r.status).toUpperCase() + '] ' + r.label + (r.detail ? ' — ' + r.detail : '') + (r.fix ? '  (fix: ' + r.fix + ')' : ''); }).join('\n')
+        + '\n\nstate:\n' + JSON.stringify(st, null, 2);
+      function fallbackCopy() { var ta = el('textarea', { style: { position: 'fixed', left: '-9999px', top: '0' } }); ta.value = report; document.body.appendChild(ta); ta.select(); var ok = false; try { ok = document.execCommand('copy'); } catch (e) {} ta.remove(); toast(ok ? 'Report copied' : 'Copy failed'); }
+      try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(report).then(function () { toast('Report copied'); }, fallbackCopy); else fallbackCopy(); } catch (e) { fallbackCopy(); }
+    } });
+    card.appendChild(note);
+    card.appendChild(el('div', { class: 'wc-row', style: { margin: '8px 0' } }, [run, copy]));
+    card.appendChild(list);
+  }
+
   function renderTools(body) {
     var grid = el('div', { class: 'wc-cols' });
     var aiCard = el('div', { class: 'wc-card wc-col' });
@@ -1327,7 +1395,10 @@
     var t = window.weldAICCTools;
     if (t && typeof t.renderCharacterFilesCard === 'function') { try { t.renderCharacterFilesCard(cfBody); } catch (e2) { cfBody.appendChild(el('div', { class: 'wc-section-note', text: 'Character tools failed to render.' })); } }
     else cfBody.appendChild(el('div', { class: 'wc-section-note', text: 'Character tools module not loaded.' }));
-    grid.appendChild(aiCard); grid.appendChild(cfCard);
+    var dgCard = el('div', { class: 'wc-card wc-col' });
+    dgCard.appendChild(el('label', { class: 'wc-label', text: '🧪 Diagnostics · self-test' }));
+    try { renderSelfTest(dgCard); } catch (e) { dgCard.appendChild(el('div', { class: 'wc-section-note', text: 'Self-test failed to render.' })); }
+    grid.appendChild(aiCard); grid.appendChild(cfCard); grid.appendChild(dgCard);
     body.appendChild(grid);
   }
   try {
@@ -2081,6 +2152,22 @@
       headers: function () { return { 'Content-Type': 'application/json' }; },
       body: function (model, sys, user, json) { var b = { systemInstruction: { parts: [{ text: sys }] }, contents: [{ role: 'user', parts: [{ text: user }] }] }; if (json) b.generationConfig = { responseMimeType: 'application/json' }; return JSON.stringify(b); },
       extract: function (j) { try { return j.candidates[0].content.parts[0].text; } catch (e) { return null; } }
+    },
+    // LOCAL models (from the Rook project): free + private, run on your machine. The userscript's
+    // GM_xmlhttpRequest can reach localhost (the in-sandbox bridge cannot) -> needs @connect localhost.
+    ollama: {
+      label: 'Local \u2014 Ollama', keyHint: 'no key needed', defaultModel: 'llama3.1', noKey: true, defaultEndpoint: 'http://localhost:11434',
+      url: function (model, key, endpoint) { return (endpoint || 'http://localhost:11434').replace(/\/+$/, '') + '/api/chat'; },
+      headers: function () { return { 'Content-Type': 'application/json' }; },
+      body: function (model, sys, user, json) { var b = { model: model, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], stream: false, think: false }; if (json) b.format = 'json'; return JSON.stringify(b); },   // think:false (Qwen3) per Rook
+      extract: function (j) { var t = j && j.message && j.message.content; return (typeof t === 'string') ? t.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^\s+/, '') : t; }   // strip <think> like Rook
+    },
+    localai: {
+      label: 'Local \u2014 OpenAI-compatible (LM Studio, llama.cpp, \u2026)', keyHint: 'optional', defaultModel: 'local-model', noKey: true, defaultEndpoint: 'http://localhost:1234',
+      url: function (model, key, endpoint) { return (endpoint || 'http://localhost:1234').replace(/\/+$/, '') + '/v1/chat/completions'; },
+      headers: function (key) { var h = { 'Content-Type': 'application/json' }; if (key) h['Authorization'] = 'Bearer ' + key; return h; },
+      body: function (model, sys, user, json) { var b = { model: model, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.7 }; if (json) b.response_format = { type: 'json_object' }; return JSON.stringify(b); },
+      extract: function (j) { return j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content; }
     }
   };
   function aiConfig() { return gget('ai', { provider: 'builtin', keys: {}, models: {}, instruction: '' }); }
@@ -2092,20 +2179,38 @@
     else if (provider === 'anthropic') b.max_tokens = n;          // overrides the default 4096
     else if (provider === 'google') { b.generationConfig = b.generationConfig || {}; b.generationConfig.maxOutputTokens = n; }
   }
+  // verbose AI failure classification (ported from Rook): a status/error -> { cause, fix }
+  function classifyAIError(status, body, provider) {
+    var s = status || 0, b = String(body || ''), local = (provider === 'ollama' || provider === 'localai');
+    if (s === 401 || s === 403) {
+      if (provider === 'ollama') return { cause: 'Ollama refused this request (HTTP ' + s + ').', fix: 'Run Ollama with OLLAMA_ORIGINS=* so the browser origin is allowed, then restart it.' };
+      return { cause: 'Authentication failed (HTTP ' + s + ').', fix: local ? 'If your local server needs a key, set it above.' : 'Check the API key for this provider.' };
+    }
+    if (s === 404) return { cause: 'Not found (HTTP 404).', fix: local ? 'Pull/select an installed model (e.g. ollama pull <model>) and check the endpoint.' : 'Check the model name.' };
+    if (s === 429) return { cause: 'Rate limited (HTTP 429).', fix: 'Slow down, or check your plan/quota.' };
+    if (s >= 500) return { cause: 'The model server errored (HTTP ' + s + ').', fix: local ? 'Check the local server logs; the model may have failed to load.' : 'Provider server error — retry shortly.' };
+    if (s === 0) return { cause: local ? 'Could not reach the local model server.' : 'Network error contacting the provider.', fix: local ? 'Start the server (ollama serve / your local server), confirm the endpoint, and reinstall this userscript so it can reach localhost.' : 'Check your connection.' };
+    if (s && (s < 200 || s >= 300)) return { cause: 'Unexpected response (HTTP ' + s + ').', fix: b ? ('Server said: ' + b.slice(0, 120)) : '' };
+    return { cause: 'Request failed.', fix: '' };
+  }
+  function aiErr(status, body, provider) { var c = classifyAIError(status, body, provider); return c.cause + (c.fix ? ' — ' + c.fix : ''); }
   function callOwnAI(cfg, sys, user, cb, json, maxTokens) {
     var p = PROVIDERS[cfg.provider]; if (!p) return cb('Unknown provider', null);
-    var key = (cfg.keys || {})[cfg.provider]; if (!key) return cb('No API key set for ' + p.label, null);
+    var key = (cfg.keys || {})[cfg.provider]; if (!key && !p.noKey) return cb('No API key set for ' + p.label, null);
+    var endpoint = (cfg.endpoints || {})[cfg.provider] || p.defaultEndpoint;
     var model = (cfg.models || {})[cfg.provider] || p.defaultModel;
     var bodyStr = p.body(model, sys, user, json);
     if (maxTokens) { try { var bo = JSON.parse(bodyStr); sbApplyMaxTokens(cfg.provider, bo, maxTokens); bodyStr = JSON.stringify(bo); } catch (e) {} }
     GM_xmlhttpRequest({
-      method: 'POST', url: p.url(model, key), headers: p.headers(key), data: bodyStr,
+      method: 'POST', url: p.url(model, key, endpoint), headers: p.headers(key), data: bodyStr, timeout: 120000,
       onload: function (res) {
+        if (res.status && (res.status < 200 || res.status >= 300)) return cb(aiErr(res.status, res.responseText, cfg.provider), null);
         try { var j = JSON.parse(res.responseText); var txt = p.extract(j, json);
-          if (txt) cb(null, txt); else cb('No text in response: ' + res.responseText.slice(0, 200), null);
+          if (txt != null && txt !== '') cb(null, txt); else cb('No text in response: ' + String(res.responseText).slice(0, 200), null);
         } catch (e) { cb('Parse error: ' + e.message, null); }
       },
-      onerror: function () { cb('Network error contacting ' + p.label, null); }
+      onerror: function (res) { cb(aiErr((res && res.status) || 0, (res && res.responseText) || '', cfg.provider), null); },
+      ontimeout: function () { cb((cfg.provider === 'ollama' || cfg.provider === 'localai') ? 'Timed out — a local model can be slow on its first (cold) call; try again once it is loaded.' : 'Timed out contacting ' + p.label, null); }
     });
   }
 
@@ -2124,12 +2229,17 @@
     google: {
       url: function (m, k) { return 'https://generativelanguage.googleapis.com/v1beta/models/' + m + ':streamGenerateContent?alt=sse&key=' + encodeURIComponent(k); },
       body: function (m, s, u, j) { return PROVIDERS.google.body(m, s, u, j); }
+    },
+    localai: {   // OpenAI-compatible local server streams SSE just like OpenAI
+      url: function (m, k, endpoint) { return (endpoint || 'http://localhost:1234').replace(/\/+$/, '') + '/v1/chat/completions'; },
+      body: function (m, s, u, j) { var b = JSON.parse(PROVIDERS.localai.body(m, s, u, j)); b.stream = true; return JSON.stringify(b); }
     }
+    // (Ollama streams NDJSON, not SSE -> no STREAM entry; it falls back to a single-shot call.)
   };
   // Pure: pull the text delta out of one parsed SSE data object, per provider. Unit-tested.
   function sbStreamDelta(provider, obj) {
     if (!obj) return '';
-    if (provider === 'openai') return (obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content) || '';
+    if (provider === 'openai' || provider === 'localai') return (obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content) || '';
     if (provider === 'anthropic') return (obj.type === 'content_block_delta' && obj.delta && obj.delta.type === 'text_delta') ? (obj.delta.text || '') : '';
     if (provider === 'google') { try { return obj.candidates[0].content.parts[0].text || ''; } catch (e) { return ''; } }
     return '';
@@ -2153,8 +2263,9 @@
   function callOwnAIStream(cfg, sys, user, json, maxTokens, emit, cb) {
     var prov = cfg.provider;
     var p = PROVIDERS[prov]; if (!p) return cb('Unknown provider', null);
-    var key = (cfg.keys || {})[prov]; if (!key) return cb('No API key set for ' + p.label, null);
-    var st = STREAM[prov]; if (!st) return callOwnAI(cfg, sys, user, cb, json, maxTokens);   // no stream cfg -> fall back to single-shot
+    var key = (cfg.keys || {})[prov]; if (!key && !p.noKey) return cb('No API key set for ' + p.label, null);
+    var st = STREAM[prov]; if (!st) return callOwnAI(cfg, sys, user, cb, json, maxTokens);   // no stream cfg (e.g. Ollama NDJSON) -> single-shot
+    var endpoint = (cfg.endpoints || {})[prov] || p.defaultEndpoint;
     var model = (cfg.models || {})[prov] || p.defaultModel;
     var bodyStr = st.body(model, sys, user, json);
     if (maxTokens) { try { var bo = JSON.parse(bodyStr); sbApplyMaxTokens(prov, bo, maxTokens); bodyStr = JSON.stringify(bo); } catch (e) {} }
@@ -2178,12 +2289,12 @@
     }
     try {
       GM_xmlhttpRequest({
-        method: 'POST', url: st.url(model, key), headers: p.headers(key), data: bodyStr,
+        method: 'POST', url: st.url(model, key, endpoint), headers: p.headers(key), data: bodyStr,
         timeout: 120000,
         onprogress: function (res) { try { pump(res.responseText); } catch (e) {} },
-        onload: function (res) { try { pump(res.responseText); } catch (e) {} finish(null); },
-        onerror: function () { finish('Network error contacting ' + p.label); },
-        ontimeout: function () { finish('timeout'); }
+        onload: function (res) { if (res.status && (res.status < 200 || res.status >= 300)) return finish(aiErr(res.status, res.responseText, prov)); try { pump(res.responseText); } catch (e) {} finish(null); },
+        onerror: function (res) { finish(aiErr((res && res.status) || 0, (res && res.responseText) || '', prov)); },
+        ontimeout: function () { finish((prov === 'ollama' || prov === 'localai') ? 'Timed out — a local model can be slow on its first (cold) call.' : 'timeout'); }
       });
     } catch (e) { finish(String((e && e.message) || e)); }
   }
@@ -2206,8 +2317,14 @@
       var model = el('input', { class: 'wc-field', type: 'text', placeholder: p.defaultModel, value: (cfg.models || {})[pk] || '' });
       key.addEventListener('input', function () { cfg.keys = cfg.keys || {}; cfg.keys[pk] = key.value; });
       model.addEventListener('input', function () { cfg.models = cfg.models || {}; cfg.models[pk] = model.value; });
-      keyWrap.appendChild(el('label', { class: 'wc-label', text: p.label + ' \u00b7 API key (local only)' })); keyWrap.appendChild(key);
+      keyWrap.appendChild(el('label', { class: 'wc-label', text: p.label + (p.noKey ? ' \u00b7 API key (optional)' : ' \u00b7 API key (kept in this browser only)') })); keyWrap.appendChild(key);
       modelWrap.appendChild(el('label', { class: 'wc-label', text: 'Model' })); modelWrap.appendChild(model);
+      if (p.defaultEndpoint) {   // local model server: configurable endpoint
+        var ep = el('input', { class: 'wc-field', type: 'text', placeholder: p.defaultEndpoint, value: (cfg.endpoints || {})[pk] || '' });
+        ep.addEventListener('input', function () { cfg.endpoints = cfg.endpoints || {}; cfg.endpoints[pk] = ep.value; });
+        modelWrap.appendChild(el('label', { class: 'wc-label', text: 'Endpoint' })); modelWrap.appendChild(ep);
+        modelWrap.appendChild(el('div', { class: 'wc-section-note', text: 'A local model on your machine \u2014 free + private. For Ollama, run it with OLLAMA_ORIGINS=* so the browser origin is allowed. Generators using this companion\u2019s \u201cai\u201d capability then get your local model instead of a paid cloud key.' }));
+      }
     }
     provider.addEventListener('change', renderProviderFields);
     function save() {
@@ -2289,6 +2406,7 @@
   var SB = 'weld.skybridge';
   var SB_PROTO_MIN = 1, SB_PROTO_MAX = 1;
   var SB_CAPS = ['storage', 'ai', 'fetch', 'search', 'model', 'bus'];  // what this companion offers
+  var SB_FEATURES = ['ping', 'describe', 'codes', 'bus', 'stream'];     // protocol extras a client can feature-detect (Rook v2 parity; additive, no proto bump)
   var SB_AGENT = 'weld-companion';   // identity reported in here/describe so a plugin knows which anchor answered
   var SB_VERSION = '1.1.0';          // anchor protocol-impl version (distinct from the userscript @version)
 
@@ -2561,7 +2679,7 @@
   // and the direct reply to a hello, so they can never drift. (The companion advertises its
   // full capability list openly; consent still gates every actual use.)
   function sbHere() {
-    return { channel: SB, type: 'here', agent: SB_AGENT, version: SB_VERSION, protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS };
+    return { channel: SB, type: 'here', agent: SB_AGENT, version: SB_VERSION, protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, features: SB_FEATURES, capabilities: SB_CAPS };
   }
   function sbAnnounce(win) {
     var root = win || SB_WIN, list;
@@ -2650,12 +2768,12 @@
         // meta-requests: no consent, no capability data -- safe to answer always. `describe`
         // lets a plugin query the manifest on demand (not just catch the here); `ping` is a
         // liveness / round-trip probe.
-        if (cap === 'ping') { sbReply(source, ev.origin, nonce, { ok: true, agent: SB_AGENT, version: SB_VERSION, build: SB_BUILD, ts: Date.now() }); return; }
-        if (cap === 'describe') { sbReply(source, ev.origin, nonce, { ok: true, agent: SB_AGENT, version: SB_VERSION, build: SB_BUILD, protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, capabilities: SB_CAPS.slice() }); return; }
-        if (SB_CAPS.indexOf(cap) === -1) { sbReply(source, ev.origin, nonce, { ok: false, reason: 'unsupported' }); return; }
+        if (cap === 'ping') { sbReply(source, ev.origin, nonce, { ok: true, agent: SB_AGENT, version: SB_VERSION, build: SB_BUILD, features: SB_FEATURES.slice(), ts: Date.now() }); return; }
+        if (cap === 'describe') { sbReply(source, ev.origin, nonce, { ok: true, agent: SB_AGENT, version: SB_VERSION, build: SB_BUILD, protoMin: SB_PROTO_MIN, protoMax: SB_PROTO_MAX, features: SB_FEATURES.slice(), capabilities: SB_CAPS.slice() }); return; }
+        if (SB_CAPS.indexOf(cap) === -1) { sbReply(source, ev.origin, nonce, { ok: false, code: 'unsupported', reason: 'unsupported capability: ' + (cap || '(none)') }); return; }   // structured code (Rook v2): clients branch on `code`, humans read `reason`
         var gen = genName() || 'unknown';
         sbConsent(gen, cap).then(function (allowed) {
-          if (!allowed) { sbReply(source, ev.origin, nonce, { ok: false, reason: 'denied' }); return; }
+          if (!allowed) { sbReply(source, ev.origin, nonce, { ok: false, code: 'denied', reason: 'denied by the user' }); return; }
           var emitChunk = function (chunk) { sbReply(source, ev.origin, nonce, { partial: true, chunk: String(chunk == null ? '' : chunk) }); };
           var work = (cap === 'storage') ? sbServiceStorage(gen, d.payload || {})
                    : (cap === 'ai')      ? sbServiceAI(d.payload || {}, emitChunk)
@@ -2663,8 +2781,8 @@
                    : (cap === 'search')  ? sbServiceSearch(d.payload || {})
                    : (cap === 'model')   ? sbServiceModel()
                    : (cap === 'bus')     ? sbServiceBus(d.payload || {}, source, ev.origin)
-                   : Promise.resolve({ ok: false, reason: 'unsupported' });
-          work.then(function (result) { sbReply(source, ev.origin, nonce, result || { ok: false, reason: 'error' }); });
+                   : Promise.resolve({ ok: false, code: 'unsupported', reason: 'unsupported' });
+          work.then(function (result) { sbReply(source, ev.origin, nonce, result || { ok: false, code: 'error', reason: 'service error' }); });
         });
         return;
       }
