@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/therealwestninja/weld/issues
 // @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
 // @updateURL    https://raw.githubusercontent.com/therealwestninja/weld/main/weld-companion.user.js
-// @version      1.49.0
+// @version      1.52.3
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -54,7 +54,7 @@
 (function () {
   'use strict';
 
-  var WC_VERSION = '1.49.0';
+  var WC_VERSION = '1.52.3';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -1362,6 +1362,136 @@
     gset('favorites', f); return i === -1;
   }
 
+  // ---- generator stats: real last-edit time + view count via Perchance's PUBLIC API ----
+  // getGeneratorStats?name=SLUG returns { lastEditTime, views, publicId, ... }; ?names=A,B,C
+  // batches. Cached under 'genStats' (slug -> { lastEditTime, views, at }); the directory and
+  // the "This Generator" status both read it. Falls back to your last-visited time.
+  function fmtNum(n) { n = +n || 0; if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'; if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k'; return String(n); }
+  // relative-time for the main-IIFE stats code (a separate copy lives in a sub-module that this scope can't see)
+  function timeAgo(t) { var s = Math.round((Date.now() - (+t || 0)) / 1000); if (s < 60) return s + 's ago'; var m = Math.round(s / 60); if (m < 60) return m + 'm ago'; var h = Math.round(m / 60); if (h < 24) return h + 'h ago'; return Math.round(h / 24) + 'd ago'; }
+  function pick(o, keys) { for (var i = 0; i < keys.length; i++) { if (o && o[keys[i]] != null) return o[keys[i]]; } return null; }
+  function unwrap(j) { return (j && typeof j === 'object' && j.data != null && j.status != null) ? j.data : j; }   // the API wraps replies as { status:'success', data:{...} }
+  function normStat(g) {   // -> { name, lastEditTime, views, publicId, author, title, description } or null
+    if (!g || typeof g !== 'object' || Array.isArray(g)) return null;
+    var meta = g.metaData || g.metadata || {};
+    var views = pick(g, ['views', 'numViews', 'viewCount', 'totalViews', 'numberOfViews']);
+    var edit = pick(g, ['lastEditTime', 'lastModified', 'lastEdited', 'editTime', 'modifiedTime', 'lastEditedTime', 'lastEditedAt']);
+    var pid = pick(g, ['publicId', 'id', 'generatorId']);
+    var author = pick(g, ['author', 'username', 'creator', 'authorName', 'ownerName']) || pick(meta, ['author', 'username']);
+    var title = pick(g, ['title']) || pick(meta, ['title']);
+    var desc = pick(g, ['description']) || pick(meta, ['description']);
+    if (views == null && edit == null && pid == null && author == null && title == null) return null;
+    return { name: g.name, lastEditTime: edit, views: views, publicId: pid, author: author, title: title, description: desc };
+  }
+  function statsArray(j) {   // normalize a BATCH response (array, {generators:[]}, or slug->obj map) to a list
+    if (Array.isArray(j)) return j;
+    if (j && Array.isArray(j.generators)) return j.generators;
+    if (j && Array.isArray(j.results)) return j.results;
+    if (j && Array.isArray(j.stats)) return j.stats;
+    if (j && typeof j === 'object') return Object.keys(j).map(function (k) { var v = j[k]; return (v && typeof v === 'object' && v.name == null) ? Object.assign({}, v, { name: k }) : v; });   // clone (don't mutate input)
+    return [];
+  }
+  function fetchGenStat(name, cb) {   // SINGLE generator: the ?name= response is a FLAT object -> normalize it first
+    try {
+      GM_xmlhttpRequest({ method: 'GET', url: 'https://perchance.org/api/getGeneratorStats?name=' + encodeURIComponent(name) + '&_=' + Date.now(), timeout: 15000,
+        onload: function (r) {
+          var j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
+          var d = unwrap(j);
+          var g = normStat(d) || (d && normStat(d[name])) || normStat(statsArray(d)[0]);
+          if (g) g.raw = j; else g = { raw: j, rawText: (r && r.responseText ? String(r.responseText).slice(0, 600) : '') };   // keep the raw response so we can show/diagnose an unexpected shape
+          cb(g);
+        },
+        onerror: function () { cb(null); }, ontimeout: function () { cb(null); } });
+    } catch (e) { cb(null); }
+  }
+  function fetchGenStatsMany(names, cb) {   // batch ?names=... in chunks; merge into the 'genStats' cache
+    names = (names || []).filter(Boolean); if (!names.length) { if (cb) cb(gget('genStats', {}) || {}); return; }
+    var store = gget('genStats', {}) || {}, chunks = [], i;
+    for (i = 0; i < names.length; i += 40) chunks.push(names.slice(i, i + 40));
+    var pending = chunks.length;
+    function fin() { if (--pending <= 0) { try { gset('genStats', store); } catch (e) {} if (cb) cb(store); } }
+    chunks.forEach(function (chunk) {
+      try {
+        GM_xmlhttpRequest({ method: 'GET', url: 'https://perchance.org/api/getGeneratorStats?names=' + encodeURIComponent(chunk.join(',')) + '&_=' + Date.now(), timeout: 20000,
+          onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) {} statsArray(unwrap(j)).forEach(function (raw) { var nm = raw && (raw.name || raw.generatorName), s = normStat(raw); if (nm && s) store[nm] = { lastEditTime: s.lastEditTime, views: s.views, title: s.title, at: Date.now() }; }); fin(); },
+          onerror: fin, ontimeout: fin });
+      } catch (e) { fin(); }
+    });
+  }
+  function showLastUpdated(name, node) {
+    if (!name || !node) return;
+    function paint(editTime, views) {
+      var parts = [];
+      if (editTime) parts.push('⏱ Updated ' + timeAgo(editTime));
+      if (views != null) parts.push(fmtNum(views) + ' views');
+      if (parts.length) node.textContent = parts.join('  ·  ');
+    }
+    try { var c = (gget('genStats', {}) || {})[name]; if (c && (c.lastEditTime || c.views != null)) paint(c.lastEditTime, c.views); } catch (e) {}
+    fetchGenStat(name, function (g) {
+      if (g && (g.lastEditTime || g.views != null)) {
+        paint(g.lastEditTime, g.views);
+        try { var m = gget('genStats', {}) || {}; m[name] = { lastEditTime: (g.lastEditTime != null ? g.lastEditTime : (m[name] && m[name].lastEditTime)), views: (g.views != null ? g.views : (m[name] && m[name].views)), at: Date.now() }; gset('genStats', m); } catch (e) {}
+      } else {
+        try { var rec = (gget('recent', []) || []).filter(function (x) { return x && x.name === name; })[0]; node.textContent = rec && rec.t ? ('⏱ Last visited ' + timeAgo(rec.t)) : '⏱ Stats unavailable'; } catch (e) {}
+      }
+    });
+  }
+
+  // ---- "About this page": PUBLIC stats for ANY generator (owned or not) -------------
+  // All three endpoints are public (no auth): getGeneratorStats (views/lastEditTime/publicId),
+  // getGeneratorsAndDependencies (imports), downloadGenerator (source). So you can inspect a
+  // generator you don't own. Lazily loaded when the <details> is opened (no calls until then).
+  function fetchGenDeps(name, cb) {
+    try {
+      GM_xmlhttpRequest({ method: 'GET', url: 'https://perchance.org/api/getGeneratorsAndDependencies?generatorNames=' + encodeURIComponent(name) + '&_=' + Date.now(), timeout: 15000,
+        onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) {} cb(j); },
+        onerror: function () { cb(null); }, ontimeout: function () { cb(null); } });
+    } catch (e) { cb(null); }
+  }
+  function aboutThisPage(name) {
+    var det = el('details', { class: 'wc-about', style: { marginTop: '8px' } });
+    det.appendChild(el('summary', { style: { cursor: 'pointer', fontSize: '12px', opacity: '0.85', userSelect: 'none' }, text: 'ⓘ About this page — public stats (works for any generator)' }));
+    var bd = el('div', { class: 'wc-section-note', style: { marginTop: '6px' }, text: 'Open to load…' });
+    det.appendChild(bd);
+    var loaded = false;
+    function kv(k, v) { var d = el('div', { style: { margin: '2px 0' } }); d.appendChild(el('b', { style: { display: 'inline-block', minWidth: '96px', opacity: '0.65' }, text: k })); d.appendChild(document.createTextNode(' ' + v)); return d; }
+    det.addEventListener('toggle', function () {
+      if (!det.open || loaded) return; loaded = true; bd.textContent = 'Loading…';
+      fetchGenStat(name, function (g) {
+        bd.innerHTML = '';
+        var hasFields = g && (g.views != null || g.lastEditTime != null || g.publicId || g.author);
+        if (hasFields) {
+          bd.appendChild(kv('Views', g.views != null ? fmtNum(g.views) : '—'));
+          bd.appendChild(kv('Last edited', g.lastEditTime ? (timeAgo(g.lastEditTime) + '  (' + new Date(g.lastEditTime).toLocaleDateString() + ')') : '—'));
+          if (g.publicId) bd.appendChild(kv('Public id', String(g.publicId)));
+          if (g.author) bd.appendChild(kv('Author', String(g.author)));
+          if (g.title) bd.appendChild(kv('Title', String(g.title)));
+          if (g.description) bd.appendChild(kv('About', String(g.description)));
+        } else if (g && g.rawText) {
+          bd.appendChild(el('div', { text: 'Couldn’t read the stats response — raw reply below (share it so the fields can be mapped):' }));
+          bd.appendChild(el('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '11px', opacity: '0.8', maxHeight: '120px', overflow: 'auto', margin: '4px 0' }, text: g.rawText }));
+        } else { bd.appendChild(el('div', { text: 'Public stats are unavailable for this page.' })); }
+        bd.appendChild(el('div', { class: 'wc-row', style: { marginTop: '6px', flexWrap: 'wrap' } }, [
+          el('button', { class: 'wc-btn wc-mini', text: 'Open', onclick: function () { location.href = 'https://perchance.org/' + name; } }),
+          el('button', { class: 'wc-btn wc-mini', text: 'View source', title: 'Open this generator’s DSL lists (downloadGenerator API)', onclick: function () { window.open('https://perchance.org/api/downloadGenerator?generatorName=' + encodeURIComponent(name) + '&listsOnly=true', '_blank'); } }),
+          el('button', { class: 'wc-btn wc-mini', text: 'Fork (edit copy)', title: 'Open the editor to copy this generator', onclick: function () { location.href = 'https://perchance.org/' + name + '#edit'; } })
+        ]));
+        var depLine = el('div', { style: { marginTop: '6px', opacity: '0.7', wordBreak: 'break-word' }, text: 'Imports: loading…' });
+        bd.appendChild(depLine);
+        fetchGenDeps(name, function (j) {
+          try {
+            var deps = [], arr = statsArray(j);
+            arr.forEach(function (go) { var d = go && (go.dependencies || go.imports || go.deps); if (Array.isArray(d)) deps = deps.concat(d.map(function (x) { return (x && (x.name || x.generatorName)) || x || ''; })); });
+            if (!deps.length && j && j.dependencies && typeof j.dependencies === 'object' && !Array.isArray(j.dependencies)) deps = Object.keys(j.dependencies);
+            deps = deps.filter(function (x, i, a) { return x && typeof x === 'string' && a.indexOf(x) === i && x !== name; });
+            depLine.textContent = deps.length ? ('Imports: ' + deps.slice(0, 24).join(', ')) : 'Imports: none detected';
+          } catch (e) { depLine.textContent = 'Imports: unavailable'; }
+        });
+      });
+    });
+    return det;
+  }
+
   // Per-generator quick actions for the OPEN generator -- real buttons, not a gear.
   // GitHub sync has its own tab; this row is edit / save / backups / rename / delete.
   function renderThisGenerator(body) {
@@ -1388,6 +1518,10 @@
     if (sm0 && typeof sm0.changeGeneratorName === 'function') actions.appendChild(el('button', { class: 'wc-btn', text: 'Rename\u2026', title: 'Rename this generator (Perchance\u2019s own rename)', onclick: renameThisGenerator }));
     if (sm0 && typeof sm0.deleteGenerator === 'function') actions.appendChild(el('button', { class: 'wc-btn', style: { color: '#e70000', borderColor: '#e70000' }, text: 'Delete\u2026', title: 'Delete this generator \u2014 permanent (Perchance\u2019s own delete)', onclick: deleteThisGenerator }));
     sec.appendChild(actions);
+    var luNode = el('div', { class: 'wc-section-note', style: { marginTop: '6px' }, text: '\u23F1 Last updated: checking\u2026' });
+    sec.appendChild(luNode);
+    try { showLastUpdated(name, luNode); } catch (e) {}
+    try { sec.appendChild(aboutThisPage(name)); } catch (e) {}   // public stats for ANY generator (owned or not)
     if (isEditMode()) {
       var pf = savePreflight();
       sec.appendChild(el('div', { class: 'wc-section-note', style: { marginTop: '6px', cursor: 'pointer' },
@@ -1533,9 +1667,10 @@
     var filter = '';
     var dir = gget('directory', null);
     var search = el('input', { class: 'wc-field', type: 'text', placeholder: 'Search your generators\u2026   \u2191\u2193 move \u00b7 \u21b5 open' });
-    var sortSel = el('select', { class: 'wc-field', style: { maxWidth: '128px', flex: 'none' } }, [['recent', 'Recent'], ['name', 'A\u2192Z'], ['fav', 'Favorites'], ['folder', 'Folders']].map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === sort) op.selected = true; return op; }));
+    var sortSel = el('select', { class: 'wc-field', style: { maxWidth: '128px', flex: 'none' } }, [['recent', 'Recent'], ['edited', 'Edited'], ['views', 'Views'], ['name', 'A\u2192Z'], ['fav', 'Favorites'], ['folder', 'Folders']].map(function (o) { var op = el('option', { value: o[0], text: o[1] }); if (o[0] === sort) op.selected = true; return op; }));
     var loadBtn = el('button', { class: 'wc-btn wc-mini', title: 'Load all your generators from Perchance, grouped by your folders', text: dir ? '\u21bb ' + (dir.names ? dir.names.length : 'All') : 'Load all', onclick: function () { loadDirectory(function (ok) { if (ok) { dir = gget('directory', null); loadBtn.textContent = '\u21bb ' + (dir.names ? dir.names.length : 'All'); sort = 'folder'; sortSel.value = 'folder'; gset('mgrSort', 'folder'); build(); } }); } });
     var clearBtn = el('button', { class: 'wc-btn wc-mini', text: 'Clear', title: 'Clear your visited-generator history (favorites are kept)', onclick: function () { if (confirm('Clear your visited-generator history? Favorites are kept.')) { gset('recent', []); build(); toast('History cleared'); } } });
+    var statsBtn = el('button', { class: 'wc-btn wc-mini', title: 'Load last-edited time + view counts for these generators (Perchance public API), then enable Edited / Views sorting', text: 'Stats', onclick: function () { var names = model().slice(0, 200).map(function (i) { return i.name; }); if (!names.length) { toast('No generators to load stats for'); return; } statsBtn.textContent = '…'; fetchGenStatsMany(names, function () { statsBtn.textContent = 'Stats'; build(); toast('Loaded stats for ' + names.length + ' generators'); }); } });
     var listEl = el('ul', { class: 'wc-list wc-grid' });
     var rows = [], sel = 0;
     function fkey(f) { return f === 'uncategorized' ? '\uffff' : (f || '\ufffe'); }
@@ -1552,9 +1687,13 @@
       favorites().forEach(add);
       if (d && d.names) d.names.forEach(add);
       recent.forEach(function (r) { add(r.name); });
+      var statMap = gget('genStats', {}) || {};   // last-edit time + views from getGeneratorStats (loaded via the Stats button)
+      items.forEach(function (i) { var s = statMap[i.name]; if (s) { i.editTime = s.lastEditTime || 0; i.views = (s.views != null ? s.views : null); if (!i.title && s.title) i.title = s.title; } });
       if (filter) items = items.filter(function (i) { return (i.name + (i.title || '') + (i.folder || '')).toLowerCase().indexOf(filter.toLowerCase()) !== -1; });
       if (sort === 'name') items.sort(function (a, b) { return a.name.localeCompare(b.name); });
       else if (sort === 'fav') items.sort(function (a, b) { return (b.fav ? 1 : 0) - (a.fav ? 1 : 0); });
+      else if (sort === 'edited') items.sort(function (a, b) { return (b.editTime || 0) - (a.editTime || 0); });
+      else if (sort === 'views') items.sort(function (a, b) { return (b.views || 0) - (a.views || 0); });
       else if (sort === 'folder') items.sort(function (a, b) { return fkey(a.folder) === fkey(b.folder) ? a.name.localeCompare(b.name) : fkey(a.folder).localeCompare(fkey(b.folder)); });
       else items.sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
       return items;
@@ -1573,7 +1712,8 @@
         var open = el('button', { class: 'wc-btn wc-mini', text: 'open', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name; } });
         var edit = el('button', { class: 'wc-btn wc-mini', text: 'edit', onclick: function (e) { e.stopPropagation(); location.href = 'https://perchance.org/' + it.name + '#edit'; } });
         var forget = el('button', { class: 'wc-btn wc-mini', text: '\u2715', title: 'Remove from your visited list', onclick: function (e) { e.stopPropagation(); var r = gget('recent', []).filter(function (x) { return x.name !== it.name; }); gset('recent', r); build(); } });
-        var li = el('li', { onclick: function () { location.href = 'https://perchance.org/' + it.name; } }, [star, el('span', { class: 'wc-gname', text: it.title || it.name }), el('span', { class: 'wc-gslug', text: it.name }), open, edit, forget]);
+        var slugText = it.name + ((it.editTime || it.views != null) ? ('   ·   ' + [it.editTime ? timeAgo(it.editTime) : '', (it.views != null ? fmtNum(it.views) + ' views' : '')].filter(Boolean).join(' · ')) : '');
+        var li = el('li', { onclick: function () { location.href = 'https://perchance.org/' + it.name; } }, [star, el('span', { class: 'wc-gname', text: it.title || it.name }), el('span', { class: 'wc-gslug', text: slugText }), open, edit, forget]);
         var ri = rows.length;
         if (ri === 0) li.classList.add('wc-sel');
         listEl.appendChild(li); rows.push(li);
@@ -1595,7 +1735,7 @@
       el('div', { class: 'wc-section-note', text: 'Favorites, generators you\u2019ve opened, and \u2014 via Load all \u2014 your whole Perchance directory grouped by your folders. Save / rename / delete the open one are up top; GitHub sync is its own tab.' })
     ]);
     renderThisGenerator(body);
-    body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel, loadBtn, clearBtn ]));
+    body.appendChild(el('div', { class: 'wc-row', style: { marginBottom: '12px' } }, [ el('div', { style: { flex: '1' } }, [search]), sortSel, statsBtn, loadBtn, clearBtn ]));
     body.appendChild(listEl);
     body.appendChild(crud);
     build();
@@ -2453,11 +2593,13 @@
     return sbBusBC;
   }
   function sbBusPush(source, origin, channel, message) {
-    try { source.postMessage({ channel: SB, type: 'bus', busChannel: channel, message: message }, origin && origin !== 'null' ? origin : '*'); } catch (e) {}
+    try { source.postMessage({ channel: SB, type: 'bus', busChannel: channel, message: message }, origin && origin !== 'null' ? origin : '*'); return true; } catch (e) { return false; }
   }
   function sbBusDeliverLocal(channel, message) {
     var subs = sbBusSubs[channel]; if (!subs) return;
-    for (var i = 0; i < subs.length; i++) sbBusPush(subs[i].source, subs[i].origin, channel, message);
+    var live = [];   // prune subscribers whose frame is gone (postMessage throws) so dead iframes don't accumulate forever
+    for (var i = 0; i < subs.length; i++) { if (sbBusPush(subs[i].source, subs[i].origin, channel, message)) live.push(subs[i]); }
+    if (live.length) sbBusSubs[channel] = live; else delete sbBusSubs[channel];
   }
   function sbServiceBus(payload, source, origin) {
     return new Promise(function (resolve) {
@@ -4698,16 +4840,17 @@
       var rows = []; var offset = 0;
       function next() {
         return rpc(slug, 'page', { db: db, store: store, offset: offset, limit: 500 }).then(function (page) {
-          rows = rows.concat(page.rows || []);
-          offset += (page.rows || []).length;
-          if (page.done) return rows;
+          var batch = page.rows || [];
+          rows = rows.concat(batch);
+          offset += batch.length;
+          if (page.done || !batch.length) return rows;   // no-progress guard: an empty, not-done page would recurse forever
           return next();
         });
       }
       return next();
     }
-    var decoder = window.IDBManEngine({});
-    function decodeRow(r) { try { return decoder.decodeValue(r.valueEnc); } catch (e) { return r.valueEnc; } }
+    var decoder = null; try { decoder = window.IDBManEngine ? window.IDBManEngine({}) : null; } catch (e) {}   // guard: a bare throw here detached the caller's .then/.catch -> spinner hung
+    function decodeRow(r) { try { return decoder ? decoder.decodeValue(r.valueEnc) : r.valueEnc; } catch (e) { return r.valueEnc; } }
     var chars = [], threads = [], messages = [], summaries = [];
     return pageAll('characters').then(function (rows) { chars = rows.map(decodeRow); report.counts.characters = chars.length; return pageAll('threads'); })
       .then(function (rows) { threads = rows.map(decodeRow); report.counts.threads = threads.length; return pageAll('messages'); })
@@ -6550,7 +6693,7 @@
     bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '8px' } }, [
       el('button', { class: 'wlib-mini', text: '\u29c9 Run sweep backup now', onclick: function () {
         var dm = window.weldDataManager;
-        if (dm && typeof dm.sweep === 'function') { gset('guardLastSweep', Date.now()); dm.open(); setTimeout(dm.sweep, 80); }
+        if (dm && typeof dm.sweep === 'function') { gset('guardLastSweep', Date.now()); dm.open(); setTimeout(function () { try { dm.sweep(); } catch (e) {} }, 80); }   // wrap: passing dm.sweep bare lost its `this`
         else toast('Data Manager not loaded');
       } }),
       el('span', { class: 'wlib-note', text: 'Reminder appears after ' + NAG_DAYS + ' days, at most once a day.' })
@@ -7220,8 +7363,10 @@
     var msgIn = el('textarea', { class: 'wlib-field', placeholder: 'A note to your future self\u2026', style: { minHeight: '54px', resize: 'vertical', width: '100%', boxSizing: 'border-box' } });
     var dateIn = el('input', { type: 'date', class: 'wlib-field', style: { flex: '0 0 150px' } });
     var tomorrow = new Date(Date.now() + 86400000);
-    dateIn.value = tomorrow.toISOString().slice(0, 10);
-    dateIn.min = tomorrow.toISOString().slice(0, 10);
+    // LOCAL date — the seal check parses dateIn.value as local midnight, so a UTC slice could pre-fill "today" for negative-UTC users and get rejected
+    var tdy = tomorrow.getFullYear() + '-' + ('0' + (tomorrow.getMonth() + 1)).slice(-2) + '-' + ('0' + tomorrow.getDate()).slice(-2);
+    dateIn.value = tdy;
+    dateIn.min = tdy;
     bd.appendChild(msgIn);
     bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '6px' } }, [
       dateIn,
@@ -7977,7 +8122,7 @@
     function watchUpdate(prev, freshHash, now) {
       now = now || Date.now();
       if (!prev || !prev.hash) return { rec: { hash: freshHash, t: now, changedAt: 0 }, changed: false };
-      if (prev.hash === freshHash) return { rec: { hash: freshHash, t: now, changedAt: prev.changedAt || 0 }, changed: false };
+      if (prev.hash === freshHash) return { rec: { hash: freshHash, t: now, changedAt: prev.changedAt || 0, seenAt: prev.seenAt }, changed: false };   // preserve seenAt: an unchanged re-check must not resurrect a dismissed change
       return { rec: { hash: freshHash, t: now, changedAt: now, prevHash: prev.hash }, changed: true };
     }
 
