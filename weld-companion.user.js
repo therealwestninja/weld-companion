@@ -1398,7 +1398,12 @@
     var dgCard = el('div', { class: 'wc-card wc-col' });
     dgCard.appendChild(el('label', { class: 'wc-label', text: '🧪 Diagnostics · self-test' }));
     try { renderSelfTest(dgCard); } catch (e) { dgCard.appendChild(el('div', { class: 'wc-section-note', text: 'Self-test failed to render.' })); }
-    grid.appendChild(aiCard); grid.appendChild(cfCard); grid.appendChild(dgCard);
+    var seCard = el('div', { class: 'wc-card wc-col' });
+    var sePendCount = seQueue().filter(function (x) { return x.status === 'pending'; }).length;
+    seCard.appendChild(el('label', { class: 'wc-label', text: '📝 Self-edits' + (sePendCount ? ' · ' + sePendCount + ' pending' : '') }));
+    var seBody = el('div', {}); seCard.appendChild(seBody);
+    try { seRenderInto(seBody); } catch (e) { seBody.appendChild(el('div', { class: 'wc-section-note', text: 'Self-edit queue failed to render.' })); }
+    grid.appendChild(aiCard); grid.appendChild(cfCard); grid.appendChild(dgCard); grid.appendChild(seCard);
     body.appendChild(grid);
   }
   try {
@@ -2719,6 +2724,308 @@
     for (var i = 0; i < subs.length; i++) { if (sbBusPush(subs[i].source, subs[i].origin, channel, message)) live.push(subs[i]); }
     if (live.length) sbBusSubs[channel] = live; else delete sbBusSubs[channel];
   }
+  // ---- the outer Helper as a bus AGENT --------------------------------------------------------
+  // A reserved channel lets the INNER AI (a generator's in-page character) and this OUTER Helper
+  // (the companion, running the user's own model) call and trigger each other. A message
+  // { to:'helper', text, id } published on SB_AGENT_CH makes the companion run the Helper on it and
+  // publish { to:'inner', from:'helper', text, replyTo } back onto the same channel. Both directions
+  // ride the existing 'bus' capability, so consent + cross-tab fan-out already apply.
+  var SB_AGENT_CH = 'weld:agent';
+  var sbAgentBusy = false;
+  function sbAgentSystem() {
+    var cfg = aiConfig();
+    return (cfg.instruction && cfg.instruction.trim())
+      || 'You are the outer developer-Helper for a self-modifying Perchance generator. Its inner in-page AI character messages you to discuss or request changes to how it works (a new ability, a fix, different behaviour). Reply concisely and practically: acknowledge, ask ONE clarifying question if needed, or describe how the change would be applied. You cannot edit files in this reply; you are the reviewing/advising half of the loop.';
+  }
+  function sbPublishAgent(message) {   // companion -> everyone on the agent channel (frames this tab + other tabs)
+    sbBusDeliverLocal(SB_AGENT_CH, message);
+    var bc = sbBusChannel(); if (bc) { try { bc.postMessage({ channel: SB_AGENT_CH, message: message }); } catch (e) {} }
+  }
+  var SE_PROPOSAL_PREFIX = '[SELF-EDIT PROPOSAL] ';
+  function sbMaybeAgent(channel, message) {
+    if (channel !== SB_AGENT_CH || !message || message.to !== 'helper') return;
+    // Self-edit proposals are NEVER answered conversationally and NEVER auto-applied --
+    // they are enqueued for human review. A burst just appends; each ask piles up safely.
+    try {
+      var raw = String(message.text == null ? '' : message.text);
+      if (raw.indexOf(SE_PROPOSAL_PREFIX) === 0) {
+        var body = raw.slice(SE_PROPOSAL_PREFIX.length);
+        var item = seEnqueue(body, { from: (message.from || 'inner') });
+        var pend = seQueue().filter(function (x) { return x.status === 'pending'; }).length;
+        try { sbPublishAgent({ to: 'inner', from: 'helper', kind: 'status', text: 'Queued your proposal for review (#' + item.id + ' of ' + pend + ' pending).', replyTo: message.id }); } catch (e) {}
+        return;
+      }
+    } catch (e) {}
+    if (sbAgentBusy) return;
+    var cfg = aiConfig();
+    if (!cfg || cfg.provider === 'builtin') return;   // the Helper agent needs the user's OWN model configured
+    sbAgentBusy = true;
+    callOwnAI(cfg, sbAgentSystem(), String(message.text == null ? '' : message.text), function (err, reply) {
+      sbAgentBusy = false;
+      sbPublishAgent({ to: 'inner', from: 'helper', text: err ? ('(helper error: ' + String(err).slice(0, 120) + ')') : String(reply || ''), replyTo: message.id });
+    });
+  }
+
+  // ============================================================ A2. self-edit approval queue
+  // The inner AI can PROPOSE changes to its own generator; nothing is ever written or saved
+  // without a human Accept click FOLLOWED by a Confirm-on-diff click. Proposals are enqueued
+  // (durably, in storage) and reviewed from the Tools tab. On Accept the user's own model
+  // drafts ONE targeted find/replace edit; the user sees the diff and only then confirms,
+  // which applies it to the DSL editor and triggers the normal Save. No auto-accept anywhere.
+  var SE_KEY = 'wcSelfEdits';
+  var SE_CAP = 100;
+  var seApplyBusy = false;   // one apply at a time
+  function seQueue() { var q = gget(SE_KEY, []); return (q && q.length !== undefined) ? q : []; }
+  function seSave(q) {
+    // Cap: keep newest; when over cap drop the oldest TERMINAL items (applied/rejected) first.
+    try {
+      if (q.length > SE_CAP) {
+        var terminal = function (s) { return s === 'applied' || s === 'rejected'; };
+        // oldest-first sweep of terminal items until within cap
+        for (var i = 0; i < q.length && q.length > SE_CAP; ) {
+          if (terminal(q[i].status)) q.splice(i, 1); else i++;
+        }
+        if (q.length > SE_CAP) q = q.slice(q.length - SE_CAP);   // still over -> hard trim oldest
+      }
+    } catch (e) {}
+    gset(SE_KEY, q);
+    return q;
+  }
+  function seEnqueue(text, extra) {
+    var q = seQueue();
+    var item = {
+      id: (gget('wcSelfEditSeq', 0) || 0) + 1,
+      text: String(text == null ? '' : text),
+      status: 'pending',
+      ts: Date.now(),
+      from: (extra && extra.from) || 'inner',
+      generator: (function () { try { return genName() || window.generatorName || ''; } catch (e) { return ''; } })(),
+      note: '',
+      draft: null
+    };
+    gset('wcSelfEditSeq', item.id);
+    q.push(item);
+    seSave(q);
+    try { seRefresh(); } catch (e) {}
+    return item;
+  }
+  function seFind(id) { var q = seQueue(); for (var i = 0; i < q.length; i++) if (q[i].id === id) return q[i]; return null; }
+  function seUpdate(id, patch) {
+    var q = seQueue();
+    for (var i = 0; i < q.length; i++) if (q[i].id === id) { for (var k in patch) q[i][k] = patch[k]; break; }
+    seSave(q);
+    try { seRefresh(); } catch (e) {}
+  }
+  function seRemove(id) {
+    var q = seQueue().filter(function (x) { return x.id !== id; });
+    seSave(q);
+    try { seRefresh(); } catch (e) {}
+  }
+  function sePublish(msg) { try { sbPublishAgent(msg); } catch (e) {} }
+
+  // ---- draft one targeted edit via the user's OWN model -------------------------------------
+  function seDraftSystem() {
+    return 'You are the developer Helper for a self-modifying Perchance generator. You are given the current FULL source of the generator and a change PROPOSAL from its inner AI. Produce ONE single targeted edit that implements the proposal, as strict JSON only, with keys "find", "replace", "note". "find" MUST be an exact, short, UNIQUE snippet copied verbatim from the current source (enough context to occur exactly once, but as short as possible). "replace" is the full replacement for that snippet. "note" is one short line describing what changed. Do not include any prose, markdown, or code fences -- return only the JSON object. If the change is not safe or not expressible as one edit, return {"find":"","replace":"","note":"cannot express as a single safe edit: <why>"}.';
+  }
+  function seDraftUser(item, source) {
+    return 'PROPOSAL:\n' + String(item.text || '') + '\n\n--- CURRENT SOURCE (DSL / top panel) ---\n' + String(source || '');
+  }
+  function seParseDraft(reply) {
+    // callOwnAI(json=true) usually returns clean JSON text; be defensive about fences/prose.
+    var obj = null;
+    try { obj = JSON.parse(reply); } catch (e) {}
+    if (!obj) {
+      try {
+        var s = String(reply || '');
+        var a = s.indexOf('{'), b = s.lastIndexOf('}');
+        if (a !== -1 && b > a) obj = JSON.parse(s.slice(a, b + 1));
+      } catch (e2) {}
+    }
+    if (!obj || typeof obj !== 'object') return null;
+    return { find: String(obj.find == null ? '' : obj.find), replace: String(obj.replace == null ? '' : obj.replace), note: String(obj.note == null ? '' : obj.note) };
+  }
+  // count exact (non-regex) occurrences of needle in hay
+  function seCountOccurrences(hay, needle) {
+    if (!needle) return 0;
+    var n = 0, i = 0;
+    while (true) { var j = hay.indexOf(needle, i); if (j === -1) break; n++; i = j + needle.length; }
+    return n;
+  }
+  function seApplyDraft(id) {
+    // Final write path -- reached ONLY from the Confirm button on the diff. Verifies the
+    // find snippet occurs exactly once before touching the editor.
+    var item = seFind(id); if (!item || !item.draft) return;
+    var d = item.draft;
+    try {
+      var view = dslView();
+      if (!view) { seUpdate(id, { status: 'error', note: 'DSL editor not found' }); toast('Editor not available'); sePublish({ to: 'inner', from: 'helper', kind: 'status', text: 'Could not apply proposal #' + id + ': editor not available.' }); return; }
+      var src = viewText(view);
+      var occ = seCountOccurrences(src, d.find);
+      if (occ !== 1) {
+        seUpdate(id, { status: 'error', note: 'find snippet matched ' + occ + ' times (need exactly 1)' });
+        toast('Cannot apply: snippet matched ' + occ + ' times');
+        sePublish({ to: 'inner', from: 'helper', kind: 'status', text: 'Could not apply proposal #' + id + ': target snippet matched ' + occ + ' times (need exactly 1).' });
+        return;
+      }
+      var next = src.replace(d.find, function () { return d.replace; });   // function replacer: literal $ safe
+      if (!viewSet(view, next)) { seUpdate(id, { status: 'error', note: 'editor write failed' }); toast('Editor write failed'); sePublish({ to: 'inner', from: 'helper', kind: 'status', text: 'Could not apply proposal #' + id + ': editor write failed.' }); return; }
+      try { doSave(); } catch (e) {}
+      seUpdate(id, { status: 'applied', note: d.note || 'applied' });
+      toast('Applied proposal #' + id + ' — reload to see it');
+      sePublish({ to: 'inner', from: 'helper', kind: 'status', text: 'Applied proposal #' + id + ': ' + (d.note || 'applied') + '. Reload to see it.' });
+    } catch (e) {
+      seUpdate(id, { status: 'error', note: 'apply error: ' + String((e && e.message) || e).slice(0, 120) });
+      sePublish({ to: 'inner', from: 'helper', kind: 'status', text: 'Could not apply proposal #' + id + ': ' + String((e && e.message) || e).slice(0, 120) });
+    }
+  }
+
+  // ---- review UI (mounts as a card in the Tools tab) ----------------------------------------
+  var seCardEl = null;         // live container; re-rendered in place when the queue changes
+  var seShowDeferred = false;
+  var seExpanded = {};         // id -> bool (read/expand toggle)
+  function seRefresh() {
+    try { if (seCardEl && document.body.contains(seCardEl)) seRenderInto(seCardEl); } catch (e) {}
+  }
+  function seStatusColor(s) {
+    return s === 'pending' ? 'var(--wc-arc)'
+      : s === 'applied' ? '#5fbf7a'
+      : s === 'rejected' ? '#d9736b'
+      : s === 'error' ? '#e0894a'
+      : 'var(--wc-faint)';
+  }
+  function seShort(t, n) { t = String(t || ''); return t.length > n ? t.slice(0, n) + '…' : t; }
+  function seRenderInto(container) {
+    seCardEl = container;
+    try { container.innerHTML = ''; } catch (e) {}
+    var q = seQueue();
+    var pending = q.filter(function (x) { return x.status === 'pending'; }).length;
+    var deferred = q.filter(function (x) { return x.status === 'deferred'; }).length;
+
+    var head = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' } }, [
+      el('span', { class: 'wc-section-note', style: { marginTop: '0' }, text: pending + ' pending' + (pending ? '' : ' — nothing to review') })
+    ]);
+    if (deferred) {
+      head.appendChild(el('button', {
+        class: 'wc-btn wc-mini', text: (seShowDeferred ? 'Hide' : 'Show') + ' deferred (' + deferred + ')',
+        onclick: function () { seShowDeferred = !seShowDeferred; seRefresh(); }
+      }));
+    }
+    container.appendChild(head);
+
+    var visible = q.filter(function (x) { return x.status !== 'deferred' || seShowDeferred; });
+    visible.sort(function (a, b) { return b.id - a.id; });   // newest-first
+    if (!visible.length) { container.appendChild(el('div', { class: 'wc-section-note', text: 'No proposals yet. The inner AI sends these over the agent bus.' })); return; }
+
+    visible.forEach(function (item) { container.appendChild(seRow(item)); });
+  }
+  function seRow(item) {
+    var row = el('div', { style: { border: '1px solid var(--wc-line)', borderRadius: '9px', padding: '9px 10px', marginBottom: '8px', background: 'var(--wc-surface-2)' } });
+    var top = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '5px' } }, [
+      el('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: seStatusColor(item.status), flex: '0 0 auto' } }),
+      el('strong', { style: { fontSize: '11px' }, text: '#' + item.id + ' · ' + item.status }),
+      el('span', { class: 'wc-section-note', style: { marginTop: '0', marginLeft: 'auto' }, text: (item.generator || 'this generator') })
+    ]);
+    row.appendChild(top);
+
+    var expanded = !!seExpanded[item.id];
+    var textNode = el('div', { style: { font: '400 12px/1.5 var(--wc-sans)', color: 'var(--wc-ink)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginBottom: '6px' }, text: expanded ? String(item.text || '') : seShort(item.text, 160) });
+    row.appendChild(textNode);
+
+    var actions = el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } });
+    actions.appendChild(el('button', { class: 'wc-btn wc-mini', text: expanded ? 'Collapse' : 'Read', onclick: function () { seExpanded[item.id] = !expanded; seRefresh(); } }));
+
+    if (item.status === 'pending' || item.status === 'deferred' || item.status === 'error') {
+      actions.appendChild(el('button', { class: 'wc-btn wc-mini wc-btn-accent', text: 'Accept…', onclick: function () { seBeginAccept(item.id); } }));
+      actions.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Edit', onclick: function () { seBeginEdit(item.id, row); } }));
+      if (item.status !== 'deferred') actions.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Defer', onclick: function () { seUpdate(item.id, { status: 'deferred' }); toast('Deferred #' + item.id); } }));
+      else actions.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Un-defer', onclick: function () { seUpdate(item.id, { status: 'pending' }); } }));
+      actions.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Reject', onclick: function () { seDoReject(item.id); } }));
+    }
+    actions.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Delete', onclick: function () { if (window.confirm('Delete proposal #' + item.id + ' from the queue?')) { seRemove(item.id); toast('Deleted #' + item.id); } } }));
+    row.appendChild(actions);
+
+    if (item.note) row.appendChild(el('div', { class: 'wc-section-note', text: (item.status === 'error' ? '⚠ ' : '') + item.note }));
+
+    // a live draft/diff area lives inside the row when Accept is in progress
+    var slot = el('div', { 'data-se-slot': String(item.id) });
+    row.appendChild(slot);
+    if (expanded && item.draft && item.status !== 'applied') seRenderDiff(slot, item);
+    return row;
+  }
+  function seDoReject(id) {
+    var reason = '';
+    try { reason = window.prompt('Reject proposal #' + id + ' — optional short reason:', '') || ''; } catch (e) {}
+    reason = String(reason).trim().slice(0, 200);
+    seUpdate(id, { status: 'rejected', note: reason ? ('rejected: ' + reason) : 'rejected' });
+    sePublish({ to: 'inner', from: 'helper', kind: 'status', text: 'Rejected proposal #' + id + (reason ? ': ' + reason : '') });
+    toast('Rejected #' + id);
+  }
+  function seBeginEdit(id, row) {
+    var item = seFind(id); if (!item) return;
+    var ta = el('textarea', { style: { width: '100%', minHeight: '90px', boxSizing: 'border-box', font: '400 12px/1.5 var(--wc-sans)', margin: '6px 0' } });
+    ta.value = String(item.text || '');
+    var bar = el('div', { style: { display: 'flex', gap: '6px' } }, [
+      el('button', { class: 'wc-btn wc-mini wc-btn-accent', text: 'Update', onclick: function () { seUpdate(id, { text: String(ta.value || ''), draft: null }); toast('Updated #' + id); } }),
+      el('button', { class: 'wc-btn wc-mini', text: 'Cancel', onclick: function () { seRefresh(); } })
+    ]);
+    try { row.appendChild(el('div', {}, [ta, bar])); ta.focus(); } catch (e) {}
+  }
+  // ---- Accept: draft the edit, then require a Confirm on the diff before writing ----
+  function seBeginAccept(id) {
+    if (seApplyBusy) { toast('Another proposal is being applied — wait for it to finish'); return; }
+    var cfg; try { cfg = aiConfig(); } catch (e) { cfg = null; }
+    if (!cfg || cfg.provider === 'builtin') { toast('Configure a real model in AI Helper first — the built-in model cannot draft edits'); return; }
+    var view = dslView();
+    if (!view) { toast('DSL editor not found on this page'); return; }
+    var item = seFind(id); if (!item) return;
+    var src = viewText(view);
+    seApplyBusy = true;
+    toast('Drafting edit for #' + id + '…');
+    // reflect a "drafting" state in the row
+    seExpanded[id] = true; seRefresh();
+    var slot = seSlot(id); if (slot) { slot.innerHTML = ''; slot.appendChild(el('div', { class: 'wc-section-note', text: 'Asking your model to draft one targeted edit…' })); }
+    try {
+      callOwnAI(cfg, seDraftSystem(), seDraftUser(item, src), function (err, reply) {
+        seApplyBusy = false;
+        if (err) { toast('Draft failed: ' + String(err).slice(0, 120)); var s = seSlot(id); if (s) { s.innerHTML = ''; s.appendChild(el('div', { class: 'wc-section-note', text: '⚠ draft failed: ' + String(err).slice(0, 160) })); } return; }
+        var draft = seParseDraft(reply);
+        if (!draft) { toast('Model did not return a usable edit'); var s2 = seSlot(id); if (s2) { s2.innerHTML = ''; s2.appendChild(el('div', { class: 'wc-section-note', text: '⚠ could not parse the drafted edit' })); } return; }
+        if (!draft.find) { toast('Model could not express this as one safe edit'); seUpdate(id, { note: draft.note || 'no single-edit available' }); return; }
+        seUpdate(id, { draft: draft });   // triggers seRefresh, which renders the diff (row is expanded)
+      }, true, 2000);
+    } catch (e) { seApplyBusy = false; toast('Draft error: ' + String((e && e.message) || e).slice(0, 120)); }
+  }
+  function seSlot(id) { try { return document.querySelector('[data-se-slot="' + id + '"]'); } catch (e) { return null; } }
+  function seRenderDiff(slot, item) {
+    if (!slot || !item || !item.draft) return;
+    slot.innerHTML = '';
+    var d = item.draft;
+    var occ = 0; try { occ = seCountOccurrences(viewText(dslView()), d.find); } catch (e) {}
+    var wrap = el('div', { style: { marginTop: '8px', borderTop: '1px dashed var(--wc-line)', paddingTop: '8px' } });
+    wrap.appendChild(el('div', { class: 'wc-section-note', style: { marginTop: '0' }, text: 'Drafted edit' + (d.note ? ' — ' + d.note : '') + '  ·  matches: ' + occ }));
+    var pre = function (label, txt, color) {
+      return el('div', { style: { marginTop: '6px' } }, [
+        el('div', { class: 'wc-section-note', style: { marginTop: '0' }, text: label }),
+        el('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', font: '400 11px/1.45 var(--wc-mono, monospace)', background: 'var(--wc-surface-3)', border: '1px solid var(--wc-line)', borderLeft: '3px solid ' + color, borderRadius: '6px', padding: '6px 8px', margin: '2px 0 0', maxHeight: '180px', overflow: 'auto' }, text: String(txt || '') })
+      ]);
+    };
+    wrap.appendChild(pre('find (remove)', d.find, '#d9736b'));
+    wrap.appendChild(pre('replace (with)', d.replace, '#5fbf7a'));
+    var bar = el('div', { style: { display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap' } });
+    if (occ !== 1) {
+      bar.appendChild(el('div', { class: 'wc-section-note', style: { marginTop: '0', color: '#e0894a' }, text: '⚠ target must match exactly once (matches ' + occ + ') — edit the proposal or re-draft' }));
+    } else {
+      bar.appendChild(el('button', { class: 'wc-btn wc-mini wc-btn-accent', text: 'Confirm & save', onclick: function () {
+        if (!window.confirm('Apply this edit to the generator and save?\n\n' + (d.note || '') + '\n\nThis writes to the code editor and triggers Save.')) return;
+        seApplyDraft(item.id);
+      } }));
+    }
+    bar.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Re-draft', onclick: function () { seBeginAccept(item.id); } }));
+    bar.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Cancel', onclick: function () { seUpdate(item.id, { draft: null }); } }));
+    wrap.appendChild(bar);
+    slot.appendChild(wrap);
+  }
+
   function sbServiceBus(payload, source, origin) {
     return new Promise(function (resolve) {
       var op = payload && payload.op, channel = String((payload && payload.channel) || '');
@@ -2737,6 +3044,7 @@
       if (op === 'publish') {
         sbBusDeliverLocal(channel, payload.message);                                      // same-tab subscribers
         var bc = sbBusChannel(); if (bc) { try { bc.postMessage({ channel: channel, message: payload.message }); } catch (e) {} }   // other tabs
+        sbMaybeAgent(channel, payload.message);                                           // outer Helper reacts to inner->helper messages
         return resolve({ ok: true, published: channel });
       }
       resolve({ ok: false, reason: 'bad-op' });
