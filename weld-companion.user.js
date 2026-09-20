@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/therealwestninja/weld-companion/issues
 // @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld-companion/main/weld-companion.user.js
 // @updateURL    https://raw.githubusercontent.com/therealwestninja/weld-companion/main/weld-companion.user.js
-// @version      1.54.2
+// @version      1.54.4
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -56,7 +56,7 @@
 (function () {
   'use strict';
 
-  var WC_VERSION = '1.54.2';
+  var WC_VERSION = '1.54.4';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -166,6 +166,7 @@
   // works too. A write via dispatch is recorded in the editor's own undo history.
   function viewForDocId(docId) {
     try { var v = window.docIdToView && window.docIdToView[docId]; if (isCmView(v) && !v.destroyed) return v; } catch (e) {}
+    try { var uv = (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow.docIdToView) && unsafeWindow.docIdToView[docId]; if (isCmView(uv) && !uv.destroyed) return uv; } catch (e) {}   // sandboxed managers: page globals live on unsafeWindow
     try { var arr = window.editorViewsByDocId && window.editorViewsByDocId[docId]; if (arr) for (var i = 0; i < arr.length; i++) if (isCmView(arr[i]) && !arr[i].destroyed) return arr[i]; } catch (e) {}
     var named = docId === 'modelText' ? window.modelTextEditor : (docId === 'outputTemplate' ? window.outputTemplateEditor : null);
     return isCmView(named) ? named : null;
@@ -2130,7 +2131,7 @@
   function enhanceInputs() {
     $$('textarea').forEach(function (ta) {
       if (ta.dataset.wcResize) return; ta.dataset.wcResize = '1';
-      if (ta.id === 'aiHelperInputEl') return;
+      if (ta.id === 'aiHelperInputEl' || ta.id === 'aiAgentInputEl') return;
       if (ta.closest && ta.closest('.wc-root, [role="dialog"], dialog, [class*="modal" i], [class*="popup" i], [class*="dialog" i], [class*="overlay" i], [class*="settings" i]')) return;
       if (!ta.offsetParent || ta.clientHeight < 40) return;
       ta.style.resize = ta.style.resize || 'vertical';
@@ -2395,26 +2396,50 @@
     var box = $('#aiHelperInstructions') || $('[id*="aiHelperInstruction" i]') || $('#aiHelperInputEl');
     if (box && 'value' in box && !box.dataset.wcSet) { box.dataset.wcSet = '1'; box.value = cfg.instruction; }
   }
+  // Perchance renamed the editor helper from aiHelper* to aiAgent*. Keep both
+  // selectors so local-model routing works in the legacy and current editors.
+  function helperSubmitButton() { return $('#aiHelperSubmitBtn') || $('#aiAgentSendBtn'); }
+  function helperPromptInput() { return $('#aiHelperInputEl') || $('#aiAgentInputEl'); }
+  // Shared route: send the Helper prompt to the user's own model and write the
+  // result into the DSL pane. Returns true when it took ownership of the send.
+  function routeHelperToOwnModel(e) {
+    var cfg = aiConfig(); if (cfg.provider === 'builtin') return false; // let Perchance handle it
+    var input = helperPromptInput(); var dv = dslView(); if (!input || !dv) return false;
+    var prompt = (input.value || '').trim(); if (!prompt) return false;
+    e.stopImmediatePropagation(); e.preventDefault();
+    var sys = cfg.instruction || 'You are a Perchance generator coding assistant. Given the current code and an instruction, return the COMPLETE updated code only, no explanation. Respect Perchance DSL conventions and avoid bare [word] list-reference traps.';
+    var current = viewText(dv);
+    toast('Asking ' + (PROVIDERS[cfg.provider] || {}).label + '\u2026', 4000);
+    callOwnAI(cfg, sys, 'CURRENT CODE:\n' + current + '\n\nINSTRUCTION:\n' + prompt, function (err, txt) {
+      if (err) return toast(('\u2717 ' + err).slice(0, 90), 5000);
+      var code = txt.replace(/^```[a-z]*\n?/i, '').replace(/```\s*$/, '').trim();
+      var unmute = muteBugFinderError(); viewSet(dv, code); setTimeout(unmute, 2000);
+      toast('\u2713 Applied ' + (PROVIDERS[cfg.provider] || {}).label + ' output');
+    });
+    return true;
+  }
   // If the user picked their own provider, intercept the Helper submit and route
-  // it to their model, writing the result into the model editor. Best-effort:
-  // we wrap the submit button rather than the internal generateText.
+  // it to their model. Best-effort: we wrap the submit button (and, for the current
+  // aiAgent panel, Enter in the prompt box -- its keydown handler calls send()
+  // directly and never clicks the button) rather than the internal generateText.
+  // Both listeners are capture-phase on the target element, so they run before
+  // Perchance's own onclick / bubble keydown handlers and can stop them.
   function hookHelperSubmit() {
-    var btn = $('#aiHelperSubmitBtn'); if (!btn || btn.dataset.wcHook) return; btn.dataset.wcHook = '1';
-    btn.addEventListener('click', function (e) {
-      var cfg = aiConfig(); if (cfg.provider === 'builtin') return; // let Perchance handle it
-      var input = $('#aiHelperInputEl'); var dv = dslView(); if (!input || !dv) return;
-      var prompt = (input.value || '').trim(); if (!prompt) return;
-      e.stopImmediatePropagation(); e.preventDefault();
-      var sys = cfg.instruction || 'You are a Perchance generator coding assistant. Given the current code and an instruction, return the COMPLETE updated code only, no explanation. Respect Perchance DSL conventions and avoid bare [word] list-reference traps.';
-      var current = viewText(dv);
-      toast('Asking ' + (PROVIDERS[cfg.provider] || {}).label + '\u2026', 4000);
-      callOwnAI(cfg, sys, 'CURRENT CODE:\n' + current + '\n\nINSTRUCTION:\n' + prompt, function (err, txt) {
-        if (err) return toast(('\u2717 ' + err).slice(0, 90), 5000);
-        var code = txt.replace(/^```[a-z]*\n?/i, '').replace(/```\s*$/, '').trim();
-        var unmute = muteBugFinderError(); viewSet(dv, code); setTimeout(unmute, 2000);
-        toast('\u2713 Applied ' + (PROVIDERS[cfg.provider] || {}).label + ' output');
-      });
-    }, true);
+    var btn = helperSubmitButton();
+    if (btn && !btn.dataset.wcHook) {
+      btn.dataset.wcHook = '1';
+      btn.addEventListener('click', function (e) { routeHelperToOwnModel(e); }, true);
+    }
+    var input = helperPromptInput();
+    if (input && !input.dataset.wcHook) {
+      input.dataset.wcHook = '1';
+      input.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+        // Mirror Perchance: on the mobile editor layout Enter is a newline, not send.
+        if (pageProp('__isMobileEditorLayout')) return;
+        routeHelperToOwnModel(e);
+      }, true);
+    }
   }
 
   // ============================================================ bootstrap
