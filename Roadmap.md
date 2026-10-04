@@ -9,7 +9,7 @@ Items are grouped by the capability or tool they extend, then sorted easiest-fir
 
 - **Full state export / import** — one-click export of all Companion data (favorites, Scrapbook, Lore Library, character exports, comfort settings, all Data Manager dumps) as a single portable file. Mirror: import to restore on a new machine. *(offline)*
 - **Companion-to-Companion sync** — encode full state as a QR code or short link; scan on another device to import. No server. *(offline)*
-- **Asset manager** — inventory every external asset a generator loads, check liveness, offer to re-host dead ones to user.uploads.dev, maintain a personal asset library reusable across generators. *(online)*
+- **Asset manager** — inventory every external asset a generator loads, check liveness, offer to re-host dead ones to user.uploads.dev, maintain a personal asset library reusable across generators. *(online)* *(the Project tab inventories every external address and checks liveness from the Project tab; re-hosting is still open.)*
 - **Grief recovery / session archaeology** — given any IndexedDB dump, reconstruct a human-readable timeline including deleted rows. Not just "here are your characters" but the full database history. *(offline)*
 
 ---
@@ -26,7 +26,7 @@ Items are grouped by the capability or tool they extend, then sorted easiest-fir
 - **Prompt / output quality log** — quick thumbs-up / thumbs-down on any output, stored locally per generator. Feeds into a "my ratings" sort in the Generators tab. *(offline)*
 - **Tab snapshot / session restore** — save all currently open Perchance-related tabs as a named session, restore them all at once later. *(offline)*
 - **Manuscript assembler** — drag saved Scrapbook entries into order, add prose between them, export as `.docx` or `.md`. Perchance as a drafting tool. *(offline)*
-- **Cross-generator search** — search Scrapbook entries, generator names, and character descriptions across your full visited history. *(offline)*
+- **Cross-generator search** — search Scrapbook entries, generator names, and character descriptions across your full visited history. *(offline)* *(the Project tab searches the lists and HTML panels of generators you have analyzed; Scrapbook and character search are still open.)*
 - **Scheduled generators** — run a generator on a schedule and save the result to the Scrapbook automatically. Daily tarot pull, weekly writing prompt. *(offline / background)*
 - **"Send to…" output routing** — pipe output into another open generator as its seed, append to an Obsidian note, post to a Discord webhook, or copy shaped for a specific app. *(online for webhooks)*
 - **Ambient generation / prefetch cache** — maintain a pool of pre-generated outputs for favourite generators, silently refreshing in the background. Zero wait time on open. *(offline)*
@@ -49,7 +49,7 @@ Items are grouped by the capability or tool they extend, then sorted easiest-fir
 *Mixed.*
 
 - **Usage patterns / personal analytics** — most-used generators, time-of-day patterns, session lengths. Entirely local. *(offline)*
-- **Generator subscription / update notifier** — periodically fetch source of starred generators, notify when it changes. *(online)*
+- **Generator subscription / update notifier** — periodically fetch source of starred generators, notify when it changes. *(online)* *(the Project tab flags starred generators edited since you last looked, on demand; background polling and notifications are still open.)*
 - **Dead generator detection and repair suggestions** — health-check starred generators; ⚠ badge; fix suggestions for renamed imports. *(online)*
 - **Discover** — browse Perchance's public gallery from the drawer with a "surprise me" button. *(online)*
 - **Competitive awareness for authors** — monitor generators in the same category; alert when a notable one appears or changes. *(online)*
@@ -63,11 +63,11 @@ Items are grouped by the capability or tool they extend, then sorted easiest-fir
 - **Time tracker** — session clock, weekly writing hours, exportable CSV log. Tracks automatically because the Companion is already running. *(offline)*
 - **Ritual and habit support** — quiet streak tracking; gentle prompt for daily creative rituals. *(offline)*
 - **Living style guide** — extract implicit consistency rules from saved outputs; flag when a new output breaks your canon. *(offline)*
-- **Weld Lint overlay** — run the brace-trap scanner live in the editor; underline issues as you type. *(offline)*
+- **Weld Lint overlay** — run the brace-trap scanner live in the editor; underline issues as you type. *(offline)* *(the Project tab adds an on-demand analyzer with click-to-jump findings in the Project tab; live underlining is still open.)*
 - **Accessibility audit** — output contrast ratio, font size, `prefers-reduced-motion` compliance. One-line result in the Generators tab. *(offline)*
-- **Local version history** — track every edit; rollback to any version; diff between any two. *(offline)*
+- **Local version history** — track every edit; rollback to any version; diff between any two. *(offline)* *(the Project tab keeps local snapshots with compare and restore; a per-edit history is still open.)*
 - **Contextual platform tutorial** — "how does this work?" panel specific to the generator you're looking at. *(offline)*
-- **DSL reader / explainer** — "explain this generator in plain English." The AI Helper writes code; this reads it. *(online — uses AI)*
+- ~~**DSL reader / explainer**~~ — completed as the review-first AI project workspace, with selectable DSL/HTML context and explicit diff-before-apply. *(online or local AI)*
 - **Atomic GitHub commits** — push DSL + HTML as a single commit rather than two. *(online)*
 - **Richer GitHub manager** — sync-status badge and pre-Pull/Push diff. *(online)*
 - **Conflict detection for collaborators** — detect divergence via the bus; alert both authors before either saves. *(offline)*

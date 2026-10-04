@@ -25,7 +25,7 @@ The **⚡ Weld** drawer has a result-tools header (copy / save / pin / undo-rero
 **👁 Comfort** *(per-generator, remembered)* — theme filters (Off / Dim / Warm / Sepia / Gray / Dark), font size, max width, line height, dyslexia-friendly font, focus mode, and an option to apply the sizing to the **code editor** too.
 
 **🛠 Tools**
-- **🤖 AI Helper** — override the helper's instruction, or route it through your own model: **OpenAI / Anthropic / Google** (key + token-by-token streaming) *or a free, private **local model** — Ollama / OpenAI-compatible, no key, reaching `localhost`*. Failures are classified into a plain cause + fix. Default stays the built-in Perchance helper.
+- **🤖 AI Helper** — a review-first project workspace for explanations, debugging, and proposed DSL/HTML changes. Use **OpenAI / Anthropic / Google** or a private **local model** through Ollama / LM Studio; replies stay editable until you explicitly review a diff and apply it. Optional interception can route Perchance's current AI Agent controls into the workspace, while the default leaves Perchance untouched.
 - **🧪 Diagnostics** — a one-click **self-test** of the companion's capabilities (anchor, storage, fetch + Perchance API, your AI provider) with a copyable report.
 - **👤 Character Files** — import/export AICC character `.json`, or fetch from a GitHub raw URL.
 
