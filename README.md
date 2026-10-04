@@ -6,7 +6,7 @@
 
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it, *point at your own GPT, or run a free local model*), AICC character file import/export, and a one-click **self-test** · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
-[![Checks](https://github.com/JawlessEel/weld-companion/actions/workflows/test.yml/badge.svg)](https://github.com/JawlessEel/weld-companion/actions/workflows/test.yml)
+[![Checks](https://github.com/therealwestninja/weld-companion/actions/workflows/test.yml/badge.svg)](https://github.com/therealwestninja/weld-companion/actions/workflows/test.yml)
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
 [![Version](https://img.shields.io/badge/version-1.61.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
@@ -610,7 +610,7 @@ Keep changes feature-detected and fail-soft — never break the host page.
 
 ## License
 
-MIT © 2026 **therealwestninja**. This repository is a fork maintained by [JawlessEel](https://github.com/JawlessEel), with additions credited in the commit history; the original project is [therealwestninja/weld-companion](https://github.com/therealwestninja/weld-companion).
+MIT © 2026 **therealwestninja**
 
 - DeviantArt: [west-ninja](https://www.deviantart.com/west-ninja)
 - GitHub: [therealwestninja](https://github.com/therealwestninja)

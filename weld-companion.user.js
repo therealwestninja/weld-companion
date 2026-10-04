@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Weld Companion for Perchance
 // @namespace    https://github.com/therealwestninja/weld-companion
-// @homepageURL  https://github.com/JawlessEel/weld-companion
-// @supportURL   https://github.com/JawlessEel/weld-companion/issues
-// @downloadURL  https://raw.githubusercontent.com/JawlessEel/weld-companion/main/weld-companion.user.js
-// @updateURL    https://raw.githubusercontent.com/JawlessEel/weld-companion/main/weld-companion.user.js
+// @homepageURL  https://github.com/therealwestninja/weld-companion
+// @supportURL   https://github.com/therealwestninja/weld-companion/issues
+// @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld-companion/main/weld-companion.user.js
+// @updateURL    https://raw.githubusercontent.com/therealwestninja/weld-companion/main/weld-companion.user.js
 // @version      1.61.0
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
