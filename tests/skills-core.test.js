@@ -2,9 +2,9 @@ const assert = require('node:assert/strict');
 const C = require('../src/skills-core.js');
 
 // Stable catalog IDs support saved favorites; every preset must be runnable and scoped.
-assert.equal(C.presets.length, 109);
+assert.equal(C.presets.length, 166);
 assert.equal(new Set(C.presets.map(p => p.id)).size, C.presets.length);
-assert.equal(C.categories.length, 14);
+assert.equal(C.categories.length, 17);
 for (const p of C.presets) {
   assert.ok(C.categories.some(c => c.id === p.category));
   assert.equal(p.steps.length, 3);
@@ -84,6 +84,27 @@ assert.throws(() => C.buildPrompt('fix-bugs', { type: 'unknown' }), /known gener
 const concise = C.buildPrompt('fix-bugs', { concise: true });
 assert.match(concise, /Preserve complete code, exact names, error details, verification evidence/);
 assert.ok(!C.buildPrompt('fix-bugs').includes('REPLY STYLE'));
+// Skybridge, Tavern/Chub card, rebrand and AI-input-helper skills (1.62.0).
+assert.deepEqual(C.sections.map(s => s.id).slice(-3), ['cards', 'rework', 'assist']);
+assert.ok(C.buildPrompt('skybridge-integrate').includes('call root.weldSkybridge() once early'));
+assert.ok(C.buildPrompt('skybridge-integrate').includes('gate every privileged call on sb.has(name)'));
+assert.match(C.buildPrompt('skybridge-integrate'), /Never place keys on the bridge/);
+assert.match(C.buildPrompt('skybridge-diagnose'), /MODE: REVIEW ONLY/);
+assert.match(C.buildPrompt('skybridge-bus'), /untrusted/);
+assert.match(C.buildPrompt('card-spec-export'), /chara_card_v2/);
+assert.match(C.buildPrompt('card-spec-export'), /tEXt chunk keyed chara/);
+assert.match(C.buildPrompt('card-spec-import'), /ccv3/);
+assert.match(C.buildPrompt('world-info-advanced'), /character_book/);
+assert.match(C.buildPrompt('rebrand-replace'), /Do not rename IDs, list names, plugin imports or storage keys/);
+assert.match(C.buildPrompt('rebrand-replace'), /owns or has permission/);
+assert.match(C.buildPrompt('remove-community'), /leave existing storage keys and user data untouched/);
+assert.match(C.buildPrompt('ai-input-assist'), /one click undoes any change/);
+assert.match(C.buildPrompt('ai-input-assist'), /never auto-run on load/);
+assert.ok(C.get('community-audit').mode === 'review' && C.get('brand-audit').mode === 'review');
+assert.ok(C.search('tavern').length >= 10 && C.search('rebrand', 'rework').length >= 1);
+assert.ok(C.search('', 'cards', null, { type: 'dashboard' }).length === 0);
+assert.ok(C.search('', 'assist', null, { type: 'dashboard' }).length >= 10);
+for (const id of ['ccv2', 'ccv3', 'st-docs', 'st-worldinfo']) assert.ok(C.sources.some(s => s.id === id));
 for (const s of C.sources) {
   assert.match(s.url, /^https:\/\//);
   if (s.path) assert.match(s.url, /\/blob\/[a-f0-9]{40}\//);

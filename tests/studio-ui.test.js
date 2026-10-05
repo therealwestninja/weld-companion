@@ -83,7 +83,7 @@ click('Export project JSON');
 assert.equal(C.importBundle(downloads.at(-1).content).sessions.length, 2);
 // Recreate the whole UI module to represent a page reload, then explicitly reopen.
 const id = stored().project.id;
-loadUI(); select('Project', id);
+loadUI(); select('Project', id); click('World & settings');
 assert.equal(find('textarea', 'Public world description').value, 'Public realm');
 // Simulate another tab writing before this UI saves.
 const key = 'studio:project:v1:' + id, external = store.get(key);

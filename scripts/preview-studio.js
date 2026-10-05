@@ -16,6 +16,7 @@ const routes = {
   '/style.css': ['text/css', css],
   '/el.js': ['text/javascript', el],
   '/core.js': ['text/javascript', fs.readFileSync(path.join(root, 'src/studio-core.js'), 'utf8')],
+  '/dad.js': ['text/javascript', fs.readFileSync(path.join(root, 'src/studio-dad.js'), 'utf8')],
   '/ui.js': ['text/javascript', fs.readFileSync(path.join(root, 'src/studio-ui.js'), 'utf8')]
 };
 const server = http.createServer((req, res) => {

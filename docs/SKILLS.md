@@ -1,11 +1,11 @@
 # Generator skills
 
-Open **Weld > Skills** on a Perchance generator. The library contains **109 presets in 14 sections** for full browser applications as well as creative generators. Dashboards and complex applications come first; all original 48 preset IDs remain compatible with favorites.
+Open **Weld > Skills** on a Perchance generator. The library contains **166 presets in 17 sections** for full browser applications as well as creative generators. Dashboards and complex applications come first; all original 48 preset IDs remain compatible with favorites.
 
 | Section | Presets |
 | --- | ---: |
 | Dashboards & live data | 9 |
-| Prompts, models & plugins | 6 |
+| Prompts, models & plugins | 11 |
 | Debug & repair | 8 |
 | Design & modernize | 8 |
 | Add features | 8 |
@@ -18,8 +18,13 @@ Open **Weld > Skills** on a Perchance generator. The library contains **109 pres
 | Text & randomness | 5 |
 | Stories & worlds | 8 |
 | Games & interaction | 5 |
+| SillyTavern, Chub & character cards | 31 |
+| Rebrand, simplify & privacy | 8 |
+| AI input helpers & toolkit | 13 |
 
 Browse collapsible sections or combine search, generator/application type, task mode and favorites. Generic tasks remain available for every type. Dashboard tasks cover feed adapters, financial calculations, provenance/freshness, terminal layouts, charts, recovery, report parity and AI analyst grounding. Advanced story/chat tasks cover branches, ensemble characters, memory, card interoperability, sync conflicts, vault recall and multimodal workflows. The prompts/models/plugins section covers compiled prompts, preset exchange, model capabilities, routing, reusable interfaces and agent/tool contracts.
+
+**Skybridge** (Prompts, models & plugins): connect a generator to Weld Companion with the real `weld.skybridge` API (import, trigger call, capability checks, storage, own-model AI, bus) and diagnose a link that will not form. **SillyTavern, Chub & character cards**: Character Card V2/V3 import and export (JSON and PNG), field mapping and validation, alternate greetings and swipes, macros, example dialogue, Author’s Note and depth prompts, prompt inspector, Continue/Regenerate/Impersonate, personas, quick replies, regex rules, expressions, rolling summary, chat-log import/export, group chat, World Info upgrades (secondary keys, probability, recursion, budgets, timed effects), lorebook editor and import/export, and a Chub-style library. **Rebrand, simplify & privacy**: audit and replace branding, centralize it in one config block, remove promotional links and community/social chat features, go fully local. **AI input helpers & toolkit**: Rewrite & Fill buttons for prompt inputs (rewrite filled text, generate empty fields from the others and the generator context), fill-all, locks and undo, streaming with Stop, usage guard, diagnostics panel, command palette, share links and templates. Rebrand and removal skills apply only to generators you own or may modify and keep licence and attribution notices. Format-specific prompts tell the helper to check real sample files and keep unknown fields; they do not assert behavior of any particular app version.
 
 Dropdown options use opaque backgrounds and text colors from Weld's adopted theme, with matching native dark/light controls (1.60.1).
 

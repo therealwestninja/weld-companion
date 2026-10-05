@@ -8,7 +8,7 @@ Favorites · reading comfort · save & pin results · undo-reroll · a full gene
 
 [![Checks](https://github.com/therealwestninja/weld-companion/actions/workflows/test.yml/badge.svg)](https://github.com/therealwestninja/weld-companion/actions/workflows/test.yml)
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.61.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.64.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -61,7 +61,7 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 
 | Tab | What's in it |
 | :-- | :----------- |
-| **Skills** | 109 presets in 14 grouped sections for dashboards, chat/story systems, prompt studios, plugins, debugging and more, with type/mode filters and native AI handoff. |
+| **Skills** | 166 presets in 17 grouped sections for dashboards, chat/story systems, SillyTavern/Chub card and lore features, Skybridge setup, rebranding, AI input helpers, prompt studios, plugins, debugging and more, with type/mode filters and native AI handoff. |
 | ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort (incl. **Edited** / **Views**), per-row open/edit, and a **Stats** button that pulls real **view counts + last-edited times** from Perchance's public API. A **This Generator** panel shows the open generator's status and an **About this page** card (public stats — views, last edited, title, imports — for *any* generator, even ones you don't own), plus owner actions. |
 | 📒 **Library** | The reader's home, grouped by task. **📚 Collect**: a permanent **Scrapbook** of saved results (searchable, taggable, exportable), **Chat stories** (read or export any AICC thread as styled HTML, Markdown, or text), **clipboard history**, and your **👍/👎 ratings**. **🛡 Care**: a **backup guardian**, a **time tracker** (per-generator minutes, CSV export), a **time capsule**, **output rules** (post-processing on save), and **Move everything** (full state export/import). Plus **search everything**, **session replay**, and a **spaced-repetition review queue** in Collect; **My Perchance** stats, **tab snapshots**, **My boundaries**, and a **Ctrl/Cmd+Shift+S** quick-save hotkey; a **keepsake HTML archive** and **recommendation bundles** to share generators; **lore link health** (catches removed/quarantined uploads before they break a character), **generator watch** (update notifications for favorites), and a one-click **platform speed check**; night light gains an **ambient mode** that follows hour and season. A sticky header keeps save / read-aloud / rate / random-favorite in reach. |
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
@@ -218,9 +218,13 @@ If you've saved a note on a generator, a small floating 🗒 badge appears when 
 
 **Read aloud** speaks the current page's output, any Scrapbook entry, or a whole chat story using the browser's built-in speech — local, no network, no key. **Per-generator notes** let you jot "great for elf names" on any generator, searchable from the Scrapbook box. **🎲 Random favorite** (in the sticky header) jumps to a random starred generator. **Night light** now lives in the **Comfort** tab beside the theme it controls — it auto-applies a comfort theme (Warm, Dim, Sepia, Gray, or Dark) on an hour schedule, e.g. Warm from 20:00 to 07:00 — or in **ambient mode**, where the theme follows the hour and season (warm in the evening, earlier in winter, later in summer; dark late at night; southern-hemisphere aware) — restoring your previous theme outside those hours; your manual comfort settings always win when it's off.
 
-### Character & World Studio (v1.56.0)
+### Character & World Studio (v1.56.0, expanded in v1.63.0 and v1.64.0)
 
 The **Studio** tab adds guided character editing, shared world lore with activation and knowledge rules, relationships, timelines, five chatbot templates, model-connected conversation tests, side-by-side reply comparisons, approved playthrough memory, consistency checking, and project export/import with snapshots. It uses your existing AI provider settings and character/lore interfaces.
+
+Version 1.63.0 adds a sample world and welcome screen, Tavern V2/V3 card import and export (JSON and PNG), World Info and lorebook import/export, advanced lore (secondary keys, probability, sticky/cooldown/delay, groups, recursion), alternate greetings, message variants, Continue/Regenerate/Impersonate, personas, macros, Author's Note, quick replies, regex rules, a prompt inspector, summaries, chat import/export, a world bible export and model-assisted drafting with undo.
+
+Version 1.64.0 reads and writes Dad Chat (dad-chat-v2) files: characters, chats with variants, personas, lorebooks, world books, Story Forge zips, Tavern/Chub PNG cards and full backups, with a preview before anything changes, plus Dad Chat export formats and a zip pack.
 
 See [the Studio guide](docs/STUDIO.md) for setup, privacy and knowledge rules, persistence, AICC export limitations, and development commands.
 
@@ -239,7 +243,7 @@ See [the Project guide](docs/PROJECT.md).
 
 ### Skills — application and generator library (v1.60.0)
 
-The **Skills** tab provides **109 presets in 14 collapsible sections**, with search, generator/application type filters, review/implementation filters and saved favorites. It treats Perchance projects as full applications: data terminals, advanced branching story bots, image/vision studios, prompt editors and reusable plugins. Presets cover real feed contracts and calculations, source freshness, report/AI-packet parity, branch isolation, sync conflicts, character-card interoperability and bounded model routing, alongside debugging, design, performance and quality. Each task includes a workflow and acceptance checks; selected research sources are linked in the detail view. Add your goal, optionally include fresh editor findings, review the editable prompt and send it directly to Perchance's native AI input. Existing helper drafts are preserved; press **Send** there to run it. Review-only instructions request an audit without code changes. No third-party skill code, agents or hooks are installed.
+The **Skills** tab provides **166 presets in 17 collapsible sections**, with search, generator/application type filters, review/implementation filters and saved favorites. It treats Perchance projects as full applications: data terminals, advanced branching story bots, image/vision studios, prompt editors and reusable plugins. Presets cover real feed contracts and calculations, source freshness, report/AI-packet parity, branch isolation, sync conflicts, character-card interoperability and bounded model routing, alongside debugging, design, performance and quality. Each task includes a workflow and acceptance checks; selected research sources are linked in the detail view. Add your goal, optionally include fresh editor findings, review the editable prompt and send it directly to Perchance's native AI input. Existing helper drafts are preserved; press **Send** there to run it. Review-only instructions request an audit without code changes. No third-party skill code, agents or hooks are installed.
 
 See [the Skills guide](docs/SKILLS.md). No separate model configuration is required for the native handoff.
 

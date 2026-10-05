@@ -68,3 +68,14 @@ The optional concise-reply setting adapts only the communication principle from 
 User-supplied downloaded HTML examples were inspected locally to guide task coverage, including embedded paired source and referenced module inventories. Financial report JSON/Markdown/AI-packet structure and PDF text were inspected as export examples. The files are not bundled or published, and their contents are task evidence rather than instructions. A downloaded wrapper or module manifest does not prove that all referenced modules are present or current.
 
 That review added focused tasks for dashboard snapshot/export parity and analyst grounding; branching conversations, ensemble characters, cloud conflict handling and selective vault recall; prompt compilation, editable presets, model routing and plugin contracts; and lorebook schemas/activation plus image-bearing PNG card and receiver import verification. The catalog requires reading actual current modules and importer/provider contracts before acting. It does not assume every bot uses the same lore fields, tokenizer, card format or deep-link import.
+
+## Chat-card and lore references (1.62.0)
+
+The SillyTavern, Chub and character-card skills describe common conventions and link public documentation only; nothing is bundled and no behavior of any app version is asserted. They tell the helper to inspect real sample files before mapping fields.
+
+- [Character Card V2 specification](https://github.com/malfoyslastname/character-card-spec-v2)
+- [Character Card V3 specification](https://github.com/kwaroran/character-card-spec-v3)
+- [SillyTavern documentation](https://docs.sillytavern.app/)
+- [SillyTavern World Info](https://docs.sillytavern.app/usage/core-concepts/worldinfo/)
+
+Skybridge skills are based on this repository's own `weld-skybridge/` plugin source.

@@ -119,7 +119,7 @@
       E('option', { value: 'review', text: 'Review only' }), E('option', { value: 'change', text: 'Make changes' })]);
     mode.value = S.mode; mode.addEventListener('change', () => { S.mode = mode.value; drawList(); });
     wrap.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', margin: '12px 0' } },
-      [['dashboard-architecture', 'Plan dashboard'], ['create-dashboard', 'Build an app'], ['fix-bugs', 'Fix problems'], ['custom-feature', 'Add a feature'], ['lorebook-builder', 'Build lorebook']].map(([id, title]) =>
+      [['dashboard-architecture', 'Plan dashboard'], ['create-dashboard', 'Build an app'], ['fix-bugs', 'Fix problems'], ['custom-feature', 'Add a feature'], ['lorebook-builder', 'Build lorebook'], ['skybridge-integrate', 'Connect Skybridge'], ['ai-input-assist', 'Rewrite & Fill buttons'], ['card-spec-export', 'Tavern card export']].map(([id, title]) =>
         E('button', { type: 'button', class: 'wc-btn wc-mini', text: title, onclick: () => {
           S.selected = id; S.query = ''; S.category = ''; S.type = ''; S.mode = ''; S.favoritesOnly = false;
           search.value = ''; category.value = ''; type.value = ''; mode.value = ''; fav.checked = false;

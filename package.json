@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "build": "node scripts/build-studio.js",
-    "test": "node tests/skybridge-contracts.test.js && node tests/ai-workspace.test.js && node tests/model-chat-ui.test.js && node tests/editor-resolution.test.js && node tests/studio.test.js && node tests/studio-ui.test.js && node tests/project-core.test.js && node tests/project-ui.test.js && node tests/project-sample.test.js && node tests/dev-core.test.js && node tests/bridge.test.js && node tests/dev-ui.test.js && node tests/skills-core.test.js && node tests/skills-ui.test.js",
+    "test": "node tests/skybridge-contracts.test.js && node tests/ai-workspace.test.js && node tests/model-chat-ui.test.js && node tests/editor-resolution.test.js && node tests/studio.test.js && node tests/studio-features.test.js && node tests/studio-dad.test.js && node tests/studio-ui.test.js && node tests/studio-ui-features.test.js && node tests/studio-ui-dad.test.js && node tests/project-core.test.js && node tests/project-ui.test.js && node tests/project-sample.test.js && node tests/dev-core.test.js && node tests/bridge.test.js && node tests/dev-ui.test.js && node tests/skills-core.test.js && node tests/skills-ui.test.js",
     "check": "node scripts/build-studio.js --check && node --check weld-companion.user.js && npm test",
     "bridge": "node bridge/weld-bridge.js"
   }

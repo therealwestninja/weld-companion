@@ -8,6 +8,7 @@
 <main class="wc-root"><p>Development fixture — simulated model; no Perchance account data.</p><p id="notice" role="status"></p><div id="app"></div></main>
 <script src="/el.js"></script>
 <script src="/core.js"></script>
+<script src="/dad.js"></script>
 <script>
 window.weldStudioHost = {
   el,
@@ -19,9 +20,14 @@ window.weldStudioHost = {
     const a = document.createElement('a'); a.download = name; a.href = URL.createObjectURL(new Blob([content]));
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
+  downloadBytes: (name, bytes, mime) => {
+    const a = document.createElement('a'); a.download = name; a.href = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  },
   ask: (system, user, callback) => {
     const t = setTimeout(() => callback(null, system.includes('JSON array') ?
-      '["The traveler asked about the harbor."]' : 'Welcome to Silver Harbor. What would you like to explore?'), 700);
+      '["The traveler asked about the harbor."]' : system.includes('ONLY a JSON object') ?
+      '{"name":"Fixture Fox","personality":"Quick and curious","opening":"Hello!"}' : 'Welcome to Silver Harbor. What would you like to explore?'), 700);
     return { abort: () => clearTimeout(t) };
   }
 };
