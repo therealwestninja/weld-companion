@@ -604,10 +604,13 @@
   // a copy of a key the repo does not have is imported; any other copy is filed under _weld-data/legacy/ and then removed
   // from storage, so an old computer can never bring back something that was deleted.
   async function repoMigrate() {
-    const lg = rpLegacy(); let moved = 0, filed = 0;
+    const lg = rpLegacy(); let moved = 0, filed = 0, held = 0;
     if (lg && typeof lg.keys === 'function') {
       for (const key of lg.keys().filter(k => lg.owns(k))) {
         const old = lg.get(key); if (old === undefined) continue;
+        // Same rule as live vault saves: a chat copy with a plaintext secret-shaped config value stays on this computer.
+        const vk = key.indexOf('sbk:') === 0 ? key.slice(key.indexOf(':', 4) + 1) : key;
+        if (C.parseKey(vk).kind === 'chat-copy' && C.secretScan(old && old.data).length) { held++; continue; }
         const r = await RP.importLegacy(key, old, 'browser');
         if (r) { lg.del(key); if (r === 'moved') moved++; else filed++; }
       }
@@ -627,6 +630,7 @@
       } catch (e) {}
     }
     if (moved || filed) { try { H.toast('Moved ' + moved + ' record' + (moved === 1 ? '' : 's') + ' from this computer into your GitHub repo' + (filed ? ' (' + filed + ' older local cop' + (filed === 1 ? 'y' : 'ies') + ' filed under _weld-data/legacy)' : '') + '.', 9000); } catch (e) {} }
+    if (held) { try { H.toast(held + ' chat cop' + (held === 1 ? 'y holds' : 'ies hold') + ' a plaintext secret-shaped value (an API key or token), so ' + (held === 1 ? 'it was' : 'they were') + ' kept in this browser and not sent to GitHub.', 9000); } catch (e) {} }
   }
   let repoTimer = null;
   async function repoRefresh() { try { await RP.load(); } catch (e) {} if (host) scheduleDraw(); }

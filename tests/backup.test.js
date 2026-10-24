@@ -140,7 +140,8 @@ const fakeIdb = { deleteDatabase: n => { droppedDbs.push(n); const r = {}; setTi
 const settings = new Map();
 // older Studio/Scrapbook copies still in Weld storage (moved into the folder once access is allowed)
 const legacyStore = new Map([['scrapbook', [{ id: 'sb-a', t: 10, text: 'kept line' }]], ['studio:index:v1', [{ id: 'p1', name: 'World' }]],
-  ['studio:project:v1:p1', { revision: 3, project: { id: 'p1', name: 'World' }, snapshots: [] }], ['favorites', ['x']]]);
+  ['studio:project:v1:p1', { revision: 3, project: { id: 'p1', name: 'World' }, snapshots: [] }], ['favorites', ['x']],
+  ['sbk:alpha:weld:genvault:alpha/chat/snap-1700000000000-aaaaaa', { generator: 'alpha', data: { config: { apiKey: 'sk-live-not-real' } } }]]);
 const toasts = [];
 const R = require('../src/repo-store.js');
 // a fake GitHub Contents API: sha-checked writes (409 when another computer got there first), directory listing, blobs
@@ -179,7 +180,7 @@ const gh = (() => {
 const host = {
   toast: m => toasts.push(String(m)),
   gh: { config: () => ({ owner: 'me', repo: 'weld', branch: 'main', token: gh.token }), api: (m, p, b) => gh.api(m, p, b) },
-  legacy: { owns: k => /^(scrapbook|favorites|studio:.*)$/.test(k), keys: () => [...legacyStore.keys()], get: k => legacyStore.has(k) ? JSON.parse(JSON.stringify(legacyStore.get(k))) : undefined, del: k => { legacyStore.delete(k); } },
+  legacy: { owns: k => /^(scrapbook|favorites|studio:.*|sbk:.*)$/.test(k), keys: () => [...legacyStore.keys()], get: k => legacyStore.has(k) ? JSON.parse(JSON.stringify(legacyStore.get(k))) : undefined, del: k => { legacyStore.delete(k); } },
   get: (k, d) => settings.has(k) ? settings.get(k) : d, set: (k, v) => { settings.set(k, v); return true; },
   pageWindow: () => ({ showDirectoryPicker: async () => { pickerCalls++; return pickedDir; }, indexedDB: fakeIdb }),
   slug: () => 'alpha', favorites: () => ['delta'],
@@ -273,7 +274,9 @@ for (const f of ['src/backup-core.js', 'src/backup-ui.js']) assert.ok(!/console\
   // GitHub repo store: older storage copies are moved in once (verified), after which Weld storage holds none of them
   {
     await until(() => FF.ready() && !legacyStore.has('scrapbook'), 'data moved to the repo');
-    assert.deepEqual([...legacyStore.keys()], [], 'every work key is moved out of browser storage');
+    assert.deepEqual([...legacyStore.keys()], ['sbk:alpha:weld:genvault:alpha/chat/snap-1700000000000-aaaaaa'], 'every work key is moved out of browser storage except a secret-shaped chat copy');
+    assert.ok(!gh.paths().some(p => /genvault/.test(p)), 'the secret-shaped chat copy never reaches the repo');
+    assert.ok(toasts.some(t => /1 chat copy holds a plaintext secret-shaped value/.test(t)));
     const names = gh.paths().filter(f => /^_weld-data\/[^/]+\.json$/.test(f));
     assert.equal(names.length, 4); assert.ok(names.some(n => /studio-project-v1-p1-[0-9a-f]{8}\.json$/.test(n)) && names.some(n => /\/scrapbook-/.test(n)) && names.some(n => /\/favorites-/.test(n)));
     assert.ok(toasts.some(t => /Moved 4 records from this computer into your GitHub repo/.test(t)));

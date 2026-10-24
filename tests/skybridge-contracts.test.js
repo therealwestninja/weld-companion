@@ -545,3 +545,24 @@ console.log('skybridge and GitHub push contract tests passed');
   };
   run().catch((e) => { console.error(e); process.exit(1); });
 }
+// Generator storage writes have a budget: 60 a minute and 1000 keys per generator (rewrites of an existing key are fine).
+{
+  const run = async () => {
+    const NS = 'weldCompanion', store = new Map();
+    const gget = (k, d) => { const v = store.get(NS + ':' + k); return v === undefined ? d : JSON.parse(v); };
+    const gset = (k, v) => { store.set(NS + ':' + k, JSON.stringify(v)); return true; };
+    const X = require('../src/bridge-extras.js');
+    const env = { NS, autoSaveOn: () => true, gget, gset, GM_listValues: () => Array.from(store.keys()), Promise, String, Date, window: { WeldBackupCore: require('../src/backup-core.js'), WeldBridgeExtras: X } };
+    const { sbServiceStorage } = load(['sbServiceStorage'], between('function sbStoreKey(', 'function sbServiceAI('), env);
+    for (let i = 0; i < 60; i++) assert.equal((await sbServiceStorage('fast', { op: 'set', key: 'k' + i, value: i })).ok, true);
+    const over = await sbServiceStorage('fast', { op: 'set', key: 'k60', value: 60 });
+    assert.deepEqual([over.ok, over.code], [false, 'rate-limited'], 'the 61st write in a minute is refused');
+    assert.equal((await sbServiceStorage('other', { op: 'set', key: 'a', value: 1 })).ok, true, 'the limit is per generator');
+    for (let i = 0; i < 1000; i++) store.set(NS + ':sbk:full:x' + i, '1');
+    const full = await sbServiceStorage('full', { op: 'set', key: 'new', value: 1 });
+    assert.deepEqual([full.ok, full.code], [false, 'storage-full']);
+    assert.equal((await sbServiceStorage('full', { op: 'set', key: 'x5', value: 2 })).ok, true, 'rewriting an existing key is allowed');
+    console.log('Skybridge storage write budget tests passed');
+  };
+  run().catch((e) => { console.error(e); process.exit(1); });
+}
