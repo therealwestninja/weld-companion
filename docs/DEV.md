@@ -27,6 +27,30 @@ Folder changes are **never** applied automatically, and you get a notification w
 
 Also here: **Download published copy** (fetches the saved version from Perchance into the folder), **Download all starred generators**, and a list of the generators already in the folder.
 
+**Download all files and assets (this generator)** saves the current editor panels,
+all files from its selected `src` draft, and readable cached public assets/models
+into `<name>/` in the master save folder. Models are assembled into complete files
+under `.weld-backup/assets/`; source files keep their `src/` paths. The local
+`.weld-backup/local-manifest.json` records origins, file sizes and SHA-256 checksums.
+This option uses the current editor, including unsaved changes, rather than the
+published copy. It requires the generator's editor and preview to be loaded.
+
+After that manual download succeeds, automatic project and asset updates are
+enabled **only for that generator**. Other generators require their own explicit
+selection. Checks run once a minute while that editor is visible and folder
+access remains granted; reopening its editor resumes them. The setting also
+works when ordinary folder watching is off. Unchanged files are not replaced,
+and a changed computer copy blocks automatic replacement when the browser copy
+changes too. Use a manual download to explicitly replace matching local files.
+Removed source/cache files are retained locally; the manifest lists the current
+snapshot. No private chat databases, credentials, ordinary HTTP cache or storage
+from other origins are exported; the status reports unavailable storage.
+
+**Pause project and asset updates (this generator)** stops just these updates.
+**Pause automatic writes in all tabs** stops both panel mirroring and all project
+and asset updates. Changing or disconnecting the save folder clears these
+opt-ins, so another location is never populated automatically.
+
 ## Agent bridge (MCP)
 
 Lets agents such as Claude Code, Codex, Gemini CLI, Antigravity and Copilot's agent mode **read the generator you have open and propose changes**, through a small program on your computer. It uses MCP, the standard way these tools connect to other programs.

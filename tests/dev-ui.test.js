@@ -92,7 +92,25 @@ const window = { confirm: m => { confirms.push(m); return confirmAnswer; }, loca
 window.WeldProjectCore = P; window.WeldDevCore = D; window.weldProjectHost = host;
 window.weldProject = { current: () => ({ name: slug, dsl: live.dsl, html: live.html, deps: null, source: 'editor' }), fetchPublished: async s => ({ name: s, dsl: 'output\n  published ' + s + '\n', html: '<p>[output]</p>' }) };
 const documentStub = { hidden: false, getElementById: id => walk(parent).find(n => n.attrs.id === id), createElement: () => new Element('div'), querySelector: () => null };
-const context = { window, document: documentStub, console, setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {}, Promise, JSON, Date, Math, Object, Array, Set, Map, String, Number, Error, RegExp, URL, Blob };
+// Shared IndexedDB fixture: two independent generator tabs must reuse one master handle.
+const folderDb = new Map();
+const indexedDB = { open() {
+  const request = {};
+  setTimeout(() => {
+    request.result = { transaction() {
+      const tx = { objectStore: () => ({
+        get: key => ({ result: folderDb.get(key) }),
+        put: (value, key) => { folderDb.set(key, value); return {}; },
+        delete: key => { folderDb.delete(key); return {}; },
+      }) };
+      setTimeout(() => tx.oncomplete?.(), 0);
+      return tx;
+    } };
+    request.onsuccess?.();
+  }, 0);
+  return request;
+} };
+const context = { window, document: documentStub, console, indexedDB, setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {}, Promise, JSON, Date, Math, Object, Array, Set, Map, String, Number, Error, RegExp, URL, Blob };
 vm.runInNewContext(fs.readFileSync('src/dev-ui.js', 'utf8'), context);
 const dev = window.weldDev, render = () => dev.render(parent);
 const norm = t => t.replace(/\r\n?/g, '\n');
@@ -100,6 +118,12 @@ const norm = t => t.replace(/\r\n?/g, '\n');
 (async () => {
   // ============================================================ folder sync
   render(); await sleep(30); render();
+  // 1.92.0: the master-folder panel is off by default and can be switched back on.
+  assert.doesNotMatch(bodyText(), /Choose folder/);
+  openSection('Folder sync'); assert.match(bodyText(), /switched off/);
+  assert.equal(store.get('folderSync') && store.get('folderSync').showPanel, undefined);
+  click('Show folder sync'); await sleep(30); render();
+  assert.equal(store.get('folderSync').showPanel, true, 'choice is remembered');
   assert.match(bodyText(), /Choose folder/);
   openSection('Folder sync');
   click('Choose folder…'); await until(() => dev.state.F.handle, 2000, 'folder');
@@ -111,6 +135,7 @@ const norm = t => t.replace(/\r\n?/g, '\n');
   render(); click('Write editor to folder'); await until(() => root.read('zoo/zoo-top-panel.txt'), 2000, 'file written');
   assert.equal(root.read('zoo/zoo-top-panel.txt'), live.dsl);
   assert.equal(root.read('zoo/zoo-html-panel.html'), live.html);
+  await until(() => !dev.state.F.busy && dev.state.F.plan?.state === 'in-sync', 2000, 'folder write and sync completion');
   await dev.tick(true); assert.equal(dev.state.F.plan.state, 'in-sync');
 
   // An agent edits the file on disk: Weld flags it, shows a diff, and applies it only on request.
@@ -129,6 +154,7 @@ const norm = t => t.replace(/\r\n?/g, '\n');
   assert.match(confirms[0], /Ctrl\+Z undoes it/);
   assert.deepEqual(applied.map(a => a[0]), ['dsl', 'html']);
   assert.equal(norm(applied[0][1]), agentDsl, 'CRLF from the folder is normalized');
+  await until(() => !dev.state.S.view && !dev.state.F.busy && dev.state.F.plan?.state === 'in-sync', 2000, 'folder apply and sync completion');
   await dev.tick(true); assert.equal(dev.state.F.plan.state, 'in-sync');
 
   // Declining the confirmation applies nothing.
@@ -141,9 +167,9 @@ const norm = t => t.replace(/\r\n?/g, '\n');
   assert.equal(dev.state.F.plan.state, 'in-sync');
   live.dsl += '  eel\n';
   await dev.tick(true); assert.equal(dev.state.F.plan.state, 'editor-ahead');
-  dev.state.F.cfg.autoMirror = true; await dev.tick(true);
-  assert.equal(norm(root.read('zoo/zoo-top-panel.txt')), live.dsl, 'auto-mirror wrote the editor to the folder');
-  assert.equal(dev.state.F.plan.state, 'in-sync'); dev.state.F.cfg.autoMirror = false;
+  dev.state.F.cfg.autoMirror = true; host.set('folderSync', dev.state.F.cfg); await dev.tick(true);
+  assert.notEqual(norm(root.read('zoo/zoo-top-panel.txt')), live.dsl, 'auto-mirror was removed in 1.90.0: the folder is only written on request');
+  assert.equal(dev.state.F.plan.state, 'editor-ahead'); click('Write editor to folder'); await sleep(60); assert.equal(norm(root.read('zoo/zoo-top-panel.txt')), live.dsl); assert.equal(dev.state.F.plan.state, 'in-sync');
 
   // Both changed -> conflict, and overwriting asks first.
   live.dsl += '  fox\n'; root.put('zoo/zoo-top-panel.txt', 'output\n  something else\n');
@@ -168,6 +194,57 @@ const norm = t => t.replace(/\r\n?/g, '\n');
   assert.match(bodyText(), /confirm access/); click('Allow access'); await until(() => dev.state.F.perm === 'granted', 2000, 'permission');
   // Starred seeding writes both generators.
   root = root; render(); click('Download all starred generators'); await until(() => !dev.state.F.seeding && /published castle/.test(root.read('castle/castle-top-panel.txt') || ''), 3000, 'starred seeding');
+  // Another generator tab inherits the master location without opening a picker.
+  const otherParent = new Element('main');
+  const otherHost = { ...host, slug: () => 'castle', live: () => ({ dsl: 'output\n  castle editor\n', html: '<p>castle</p>' }) };
+  const otherWindow = { ...window, weldProjectHost: otherHost }; otherWindow.top = otherWindow;
+  const otherDoc = { ...documentStub, getElementById: id => walk(otherParent).find(n => n.attrs.id === id) };
+  const otherContext = { ...context, window: otherWindow, document: otherDoc };
+  vm.runInNewContext(fs.readFileSync('src/dev-ui.js', 'utf8'), otherContext);
+  const otherDev = otherWindow.weldDev;
+  picked = null; otherDev.render(otherParent);
+  await until(() => otherDev.state.F.handle, 2000, 'inherited master folder');
+  assert.equal(otherDev.state.F.handle, root);
+  assert.equal(picked, null, 'no per-generator picker needed');
+  assert.match(text(otherParent), /Master Dev location/);
+
+  // Change master in one tab: other open tabs switch even with watching disabled.
+  const oldRoot = root, oldDsl = oldRoot.read('zoo/zoo-top-panel.txt');
+  const oldBaseKey = 'base:' + dev.state.F.revision + ':zoo';
+  assert.ok(folderDb.has(oldBaseKey));
+  host.set('folderSync', { ...store.get('folderSync'), autoMirror: true, watch: false });
+  root = new FakeDir('JawlessEel_perchance_backups');
+  otherDev.render(otherParent);
+  const changeMaster = walk(otherParent).find(n => n.tagName === 'button' && n.attrs.text === 'Change master folder…');
+  assert.ok(changeMaster); changeMaster.click();
+  await until(() => otherDev.state.F.handle === root && store.get('folderSync').autoMirror === false, 2000, 'new master folder');
+  await dev.tick(false);
+  assert.equal(dev.state.F.handle, root);
+  assert.equal(dev.state.F.cfg.autoMirror, false);
+  assert.equal(dev.state.F.plan, null, 'old sync plan is discarded on folder change');
+  assert.equal(oldRoot.read('zoo/zoo-top-panel.txt'), oldDsl, 'old folder is untouched');
+  assert.equal(root.read('zoo/zoo-top-panel.txt'), null, 'selecting master does not write');
+  assert.equal(root.read('castle/castle-top-panel.txt'), null, 'other generator is not auto-written');
+  await dev.tick(true); assert.equal(dev.state.F.plan.state, 'no-disk', 'old-folder baseline is not reused');
+
+  // Global pause reaches another open tab without applying anything to its editor.
+  host.set('folderSync', { ...store.get('folderSync'), autoMirror: true });
+  render(); click('Pause automatic writes in all tabs');
+  await otherDev.tick(false);
+  assert.equal(otherDev.state.F.cfg.autoMirror, false);
+  assert.equal(root.items.size, 0);
+  render(); click('Write editor to folder');
+  await until(() => root.read('zoo/zoo-top-panel.txt'), 2000, 'manual master write');
+  assert.equal(root.read('zoo/zoo-top-panel.txt'), live.dsl);
+  assert.equal(oldRoot.read('zoo/zoo-top-panel.txt'), oldDsl);
+
+  // Disconnect once and every open generator releases the handle.
+  render(); click('Disconnect folder');
+  await until(() => !folderDb.has('handle'), 2000, 'master disconnect');
+  await otherDev.tick(false);
+  assert.equal(otherDev.state.F.handle, null);
+  assert.equal(otherDev.state.F.cfg.autoMirror, false);
+  assert.equal(root.read('zoo/zoo-top-panel.txt'), live.dsl, 'disconnect deletes no files');
   console.log('Dev tab folder sync passed');
 
   // ============================================================ agent bridge (real server)

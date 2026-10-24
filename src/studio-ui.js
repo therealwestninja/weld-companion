@@ -528,6 +528,14 @@
             s.proposals.push(...suggestions); if (!save()) throw new Error('Memory proposals were not saved.');
           });
       })]);
+    row(parent, [button('Download memories (.md)', () => {
+      if (!s.memories.length && !s.proposals.length) throw new Error('This playthrough has no memories to download.');
+      download(s.name + '.memories.md', C.memoriesText(s));
+    }), button('Clear all memories', () => {
+      if (!s.memories.length && !s.proposals.length) throw new Error('This playthrough has no memories to clear.');
+      if (!window.confirm('Clear ' + s.memories.length + ' approved memories and ' + s.proposals.length + ' pending proposals from this playthrough? Download them first if you want a copy. Messages and world canon are not touched.')) return;
+      C.clearMemories(s); save(); draw();
+    })]);
     s.proposals.forEach(m => {
       area(parent, 'Proposed memory (not yet used)', m.text, value => { m.text = value; save(); });
       row(parent, [button('Approve', () => { C.approve(s, m.id, m.text); save(); draw(); }),
@@ -708,7 +716,7 @@
   }
   function welcome(body) {
     heading(body, 'Welcome to Studio');
-    note(body, 'Build characters, worlds and chatbot projects, test them with your own model, and move them to and from Tavern-style cards, lorebooks and chats. Everything is stored in this browser.');
+    note(body, 'Build characters, worlds and chatbot projects, test them with your own model, and move them to and from Tavern-style cards, lorebooks and chats. Projects are saved as files in your backup folder (Weld > Backups), never in Weld itself.');
     row(body, [button('Open the sample world', () => adopt(C.sample())), ...(Dad ? [importButton()] : []),
       button('Start from a Tavern card (PNG or JSON)', () => pickFile('.png,.json,image/png,application/json', 25000000, file => importCard(file).then(card => {
         const res = C.fromCard(card), np = C.project(res.character.name + ' world', 'character');
@@ -720,7 +728,7 @@
     parent.innerHTML = '';
     const body = E('div', { id: 'wc-studio-body' }); parent.appendChild(body);
     heading(body, 'Character & World Studio');
-    note(body, 'Local project storage · Model: ' + H.model());
+    note(body, (typeof H.storage === 'function' ? H.storage() : 'Local project storage') + ' · Model: ' + H.model());
     if (status) note(body, status);
     if (busy) row(body, [button('Stop generation', stop, true)]);
     const index = H.get(INDEX, []);

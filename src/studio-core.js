@@ -403,6 +403,20 @@
       return { id: id(), text: v.trim() };
     });
   }
+  function memoriesText(s) {
+    const lines = ['# Memories: ' + text(s.name), '', '## Approved (' + s.memories.length + ')', ''];
+    s.memories.forEach(m => lines.push('- ' + text(m.text).replace(/\r?\n/g, '\n  ')));
+    if (s.proposals.length) {
+      lines.push('', '## Pending proposals, not used by the model (' + s.proposals.length + ')', '');
+      s.proposals.forEach(m => lines.push('- ' + text(m.text).replace(/\r?\n/g, '\n  ')));
+    }
+    return lines.join('\n') + '\n';
+  }
+  function clearMemories(s) {
+    const cleared = { memories: s.memories.length, proposals: s.proposals.length };
+    s.memories = []; s.proposals = [];
+    return cleared;
+  }
   function approve(s, proposalId, edited) {
     if (!s.proposals.some(m => m.id === proposalId)) throw new Error('Memory proposal no longer exists.');
     if (!text(edited).trim() || edited.length > 2000) throw new Error('Memory must contain 1–2000 characters.');
@@ -808,7 +822,7 @@
   }
 
   return { VERSION, templates, id, copy, project, character, loreEntry, session, validate, migrate, visible, audit, context, lorePreview, recordLore,
-    parseMemories, approve, addVariant, pickVariant, setVariantText, expand, unresolvedMacros, applyRegex, riskyPattern, bundle, importBundle,
+    parseMemories, memoriesText, clearMemories, approve, addVariant, pickVariant, setVariantText, expand, unresolvedMacros, applyRegex, riskyPattern, bundle, importBundle,
     characterFromAICC, characterToAICC, toV2Card, fromCard, toV2Book, fromV2Book, toWorldInfo, fromWorldInfo,
     pngReadCard, pngWriteCard, crc32, bytesToB64, b64ToBytes, toChatJsonl, fromChatJsonl, transcriptMarkdown, worldBible, stats, assist, sample, estTokens };
 });

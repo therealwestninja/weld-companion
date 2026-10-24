@@ -13,7 +13,7 @@ function between(start, end) {
 }
 
 function load(names, code, extras) {
-  const context = { URL, Number, isFinite, Array, console, ...extras };
+  const context = { URL, Number, isFinite, Array, console, setInterval() { return 0; }, clearInterval() {}, ...extras };
   vm.createContext(context);
   vm.runInContext(code, context);
   return Object.fromEntries(names.map((name) => [name, context[name]]));
@@ -65,6 +65,7 @@ assert.equal(fetchGuard.sbFetchGuard('https://example.com/resource').ok, true);
     const env = {
       PROVIDERS: { localai: { noKey: true, defaultEndpoint: 'http://localhost:1234', defaultModel: 'm', headers: () => ({}), body: () => '{"stream":false}' } },
       sbApplyMaxTokens() {}, sbApplyTemperature() {}, aiUserForProvider: (p, u) => u, aiErr: (s) => 'http ' + s, JSON, String, Array, Object,
+      aiCooldownMsg: () => "", aiNoteRateLimit() {},
       GM_xmlhttpRequest: (o) => { setTimeout(() => { o.onprogress({ status: 200, responseText: text }); o.onload({ status: 200, responseText: text }); }, 0); },
     };
     const f = load(['callOwnAIStream'], between('var STREAM = {', 'var AI_WORKSPACE'), env);
@@ -86,6 +87,73 @@ assert.equal(fetchGuard.sbFetchGuard('https://example.com/resource').ok, true);
     console.log('Skybridge streamed reasoning-model replies tests passed');
   }).catch((e) => { console.error(e); process.exit(1); });
 }
+// Automatic saving into Weld storage is off by default: a generator write is refused and nothing is stored; reads still work.
+{
+  const store = new Map();
+  const gget = (k, d) => (store.has(k) ? store.get(k) : d), gset = (k, v) => { store.set(k, v); return true; };
+  const off = load(['sbServiceStorage'], between('function sbStoreKey(', 'function sbServiceAI('), { NS: 'weldCompanion', autoSaveOn: () => false, gget, gset, GM_listValues: () => [], Promise, window: { WeldBackupCore: require('../src/backup-core.js') } });
+  off.sbServiceStorage('gen-a', { op: 'set', key: 'slot', value: 1 }).then((r) => {
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'autosave-off');
+    assert.equal(store.size, 0);
+    return off.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-a/snapshot', value: { v: 1, generator: 'gen-a' } });
+  }).then((r) => {
+    assert.deepEqual([r.ok, r.code], [false, 'no-backup-folder'], 'Weld keeps no vault copy: with no backup folder the save is refused');
+    assert.equal(store.size, 0);
+    return off.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-b/snapshot', value: { v: 1, generator: 'gen-b' } });
+  }).then((r) => {
+    assert.equal(r.ok, false);   // another generator's vault key is still refused
+    assert.equal(r.code, 'autosave-off');
+    return off.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-a/chat/snap-1720000000000-abc123', value: { v: 1, generator: 'gen-a' } });
+  }).then((r) => {
+    assert.deepEqual([r.ok, r.code], [false, 'vault-chats-off'], 'chat copies are refused while vault chat saving is off');
+    return off.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-a/chat/index', value: [] });
+  }).then((r) => {
+    assert.deepEqual([r.ok, r.code], [false, 'vault-chats-off'], 'the chat index is refused too');
+    assert.equal(store.has('sbk:gen-a:weld:genvault:gen-a/chat/index'), false);
+    store.set('vaultChats', true);
+    return off.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-a/chat/index', value: [] });
+  }).then((r) => {
+    assert.equal(r.code, 'no-backup-folder', 'turning chat saving on passes the gate; still no folder');
+    console.log('Skybridge storage writes are refused while automatic saving is off (vault saves need a backup folder, chat copies only when enabled)');
+  }).catch((e) => { console.error(e); process.exit(1); });
+}
+// Pass-through vault: with a backup folder ready, vault saves go to the folder and never into Weld storage; reads and
+// lists come back from the folder, and an older copy still in storage is the fallback for keys the folder lacks.
+{
+  const store = new Map([['vaultChats', true], ['sbk:gen-a:weld:genvault:gen-a/chat/snap-1-old', { old: true }]]);
+  const folder = new Map(), calls = [];
+  const gget = (k, d) => (store.has(k) ? store.get(k) : d), gset = (k, v) => { store.set(k, v); return true; };
+  const pt = {
+    ready: () => true, noFolder: 'nf',
+    set: async (gen, key, value) => { calls.push(['set', gen, key]); folder.set(key, value); return { ok: true, where: 'folder' }; },
+    get: async (gen, key) => (folder.has(key) ? folder.get(key) : undefined),
+    list: async (gen, prefix) => Array.from(folder.keys()).filter((k) => k.indexOf(prefix) === 0)
+  };
+  const GM_listValues = () => Array.from(store.keys()).map((k) => 'weldCompanion:' + k);
+  const m = load(['sbServiceStorage'], between('function sbStoreKey(', 'function sbServiceAI('), { NS: 'weldCompanion', autoSaveOn: () => false, gget, gset, GM_listValues, Promise, String, window: { WeldBackupCore: require('../src/backup-core.js'), weldBackup: { vault: pt } } });
+  const before = store.size, snap = { v: 1, at: 5, generator: 'gen-a', title: 'A' };
+  m.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-a/snapshot', value: snap }).then((r) => {
+    assert.deepEqual([r.ok, r.where], [true, 'folder']);
+    assert.equal(store.size, before, 'nothing written to Weld storage');
+    return m.sbServiceStorage('gen-a', { op: 'set', key: 'weld:genvault:gen-a/snapshot', value: { v: 1, generator: 'gen-b' } });
+  }).then((r) => {
+    assert.equal(r.code, 'owner-mismatch'); assert.equal(calls.length, 1, 'a mismatched owner never reaches the folder');
+    return m.sbServiceStorage('gen-a', { op: 'get', key: 'weld:genvault:gen-a/snapshot' });
+  }).then((r) => {
+    assert.deepEqual(r.value, snap);
+    return m.sbServiceStorage('gen-a', { op: 'get', key: 'weld:genvault:gen-a/chat/snap-1-old' });
+  }).then((r) => {
+    assert.deepEqual(r.value, { old: true }, 'older stored copy still readable');
+    return m.sbServiceStorage('gen-a', { op: 'list', prefix: 'weld:genvault:gen-a/' });
+  }).then((r) => {
+    assert.deepEqual(Array.from(r.value).sort(), ['weld:genvault:gen-a/chat/snap-1-old', 'weld:genvault:gen-a/snapshot']);
+    return m.sbServiceStorage('gen-a', { op: 'list', prefix: 'slot' });
+  }).then((r) => {
+    assert.deepEqual(Array.from(r.value), [], 'a non-vault prefix does not touch the folder');
+    console.log('Skybridge vault saves pass through to the backup folder');
+  }).catch((e) => { console.error(e); process.exit(1); });
+}
 // Anchor storage: list must see keys that set wrote, using the real NS-prefixed names (it returned [] before 1.65.3).
 {
   const store = new Map();
@@ -94,7 +162,7 @@ assert.equal(fetchGuard.sbFetchGuard('https://example.com/resource').ok, true);
   const gget = (k, d) => { const v = GM_getValue(NS + ':' + k, undefined); return v === undefined ? d : JSON.parse(v); };
   const gset = (k, v) => { GM_setValue(NS + ':' + k, JSON.stringify(v)); return true; };
   const GM_listValues = () => Array.from(store.keys());
-  const anchorStorage = load(['sbServiceStorage'], between('function sbStoreKey(', 'function sbServiceAI('), { NS, gget, gset, GM_listValues, Promise, window: { WeldBackupCore: require('../src/backup-core.js') } });
+  const anchorStorage = load(['sbServiceStorage'], between('function sbStoreKey(', 'function sbServiceAI('), { NS, autoSaveOn: () => true, gget, gset, GM_listValues, Promise, window: { WeldBackupCore: require('../src/backup-core.js') } });
   const call = (gen, payload) => anchorStorage.sbServiceStorage(gen, payload);
   call('gen-a', { op: 'set', key: 'slot1', value: { n: 1 } })
     .then(() => call('gen-a', { op: 'set', key: 'slot2', value: 2 }))
@@ -120,7 +188,7 @@ assert.equal(fetchGuard.sbFetchGuard('https://example.com/resource').ok, true);
       assert.equal(r.value, null, 'nothing was stored by the refused write');
       return call('alpha', { op: 'set', key: 'weld:genvault:alpha/snapshot', value: { generator: 'alpha' } });
     })
-    .then((r) => { assert.equal(r.ok, true); return call('alpha', { op: 'set', key: '', value: 1 }); })
+    .then((r) => { assert.deepEqual([r.ok, r.code], [false, 'no-backup-folder'], 'vault saves never land in Weld storage'); assert.equal(store.has(NS + ':sbk:alpha:weld:genvault:alpha/snapshot'), false); return call('alpha', { op: 'set', key: '', value: 1 }); })
     .then((r) => { assert.deepEqual([r.ok, r.reason], [false, 'bad-key']); console.log('Skybridge anchor storage set/get/list tests passed'); })
     .catch((e) => { console.error(e); process.exit(1); });
 }
@@ -208,6 +276,82 @@ onKey({ key: 'Enter' });
 assert.equal(routed, 1);
 touch = true; onKey({ key: 'Enter' }); assert.equal(routed, 1);
 agentBtn.listeners[0].fn({}); assert.equal(routed, 2);
+
+// GitHub transport settles once, including when the manager never responds.
+{
+  function transport(throws) {
+    const timers = new Map(), responses = [];
+    let nextTimer = 0, options, aborted = 0;
+    const api = load(['ghApi'], between('function ghApi(', 'function ghApiError('), {
+      setTimeout(fn, ms) { timers.set(++nextTimer, { fn, ms }); return nextTimer; },
+      clearTimeout(id) { timers.delete(id); },
+      GM_xmlhttpRequest(o) {
+        if (throws) throw new Error('private transport details');
+        options = o;
+        return { abort() { aborted++; o.onabort(); } };
+      },
+    });
+    api.ghApi('GET', '/repos/owner/repo/git/ref/heads/main', 'private-token', null,
+      (err, status, json) => responses.push({ err, status, json }));
+    return { timers, responses, get options() { return options; }, get aborted() { return aborted; } };
+  }
+  for (const event of ['onerror', 'onabort', 'ontimeout']) {
+    const t = transport();
+    assert.equal(t.options.timeout, undefined, 'restored manager request options omit the native timeout; the watchdog still bounds requests');
+    t.options[event]();
+    assert.equal(t.responses.length, 1);
+    assert.ok(t.responses[0].err);
+    assert.equal(t.timers.size, 0);
+    t.options.onload({ status: 200, responseText: '{"object":{"sha":"late"}}' });
+    assert.equal(t.responses.length, 1, 'late success must not continue a failed push');
+  }
+  const hung = transport();
+  const watchdog = [...hung.timers.values()][0];
+  assert.equal(watchdog.ms, 90000);
+  watchdog.fn();
+  assert.match(hung.responses[0].err.message, /timed out/);
+  assert.equal(hung.aborted, 1);
+  assert.equal(hung.responses.length, 1, 'aborting after timeout must not report twice');
+  assert.equal(hung.timers.size, 0);
+  const ok = transport();
+  ok.options.onload({ status: 200, responseText: '{"object":{"sha":"commit"}}' });
+  assert.equal(ok.responses[0].err, null);
+  assert.equal(ok.responses[0].json.object.sha, 'commit');
+  assert.equal(ok.timers.size, 0);
+  const failedStart = transport(true);
+  assert.match(failedStart.responses[0].err.message, /could not start/);
+  assert.doesNotMatch(failedStart.responses[0].err.message, /private/);
+  assert.equal(failedStart.timers.size, 0);
+}
+// A stalled blob upload names its step and never reaches the branch update.
+{
+  const timers = new Map(), requests = [];
+  let id = 0, hanging, outcome;
+  const push = load(['ghPushFilesAtomic'], between('function ghApi(', 'function ghGateNote('), {
+    setTimeout(fn) { timers.set(++id, fn); return id; },
+    clearTimeout(key) { timers.delete(key); },
+    setInterval() { return 0; }, clearInterval() {},
+    GM_xmlhttpRequest(o) {
+      requests.push(o);
+      if (o.url.endsWith('/ref/heads/main')) o.onload({ status: 200, responseText: '{"object":{"sha":"parent"}}' });
+      else if (o.url.endsWith('/commits/parent')) o.onload({ status: 200, responseText: '{"tree":{"sha":"base-tree"}}' });
+      else hanging = o;
+      return { abort() { o.onabort(); } };
+    },
+  });
+  push.ghPushFilesAtomic('owner', 'repo', 'main', [{ path: 'a.txt', content: 'dsl' }], 'private-token', 'msg',
+    (err, result) => { outcome = { err, result }; });
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();   // no reply in 90s: the blob is sent once more
+  assert.equal(outcome, undefined);
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();
+  assert.match(outcome.err.message, /^POST blob:.*no reply after two 90s tries.*Nothing was changed/);
+  hanging.onload({ status: 201, responseText: '{"sha":"late-blob"}' });
+  assert.equal(requests.length, 4);
+  assert.ok(!requests.some(r => r.method === 'PATCH'));
+  assert.equal(timers.size, 0);
+}
 
 const calls = [];
 const atomicPush = load(
@@ -362,6 +506,42 @@ console.log('skybridge and GitHub push contract tests passed');
     const snap = ctx.sbPresence.snapshot();
     assert.deepEqual(Object.assign({}, snap.tabs), { alpha: 1 }); assert.equal(snap.ignored, 3);   // bad publish + duplicate + bad vault-updated
     console.log('Skybridge bus envelope validation and presence tests passed');
+  };
+  run().catch((e) => { console.error(e); process.exit(1); });
+}
+// Generator sb.ai calls are capped (2 at once, 8 queued, 10 a minute to a cloud key) and a 429 pauses the provider.
+{
+  const run = async () => {
+    const toasts = [], started = [];
+    let cfg = { provider: 'google', keys: { google: 'k' } };
+    const env = { aiConfig: () => cfg, toast: (m) => toasts.push(String(m)), Date, Promise, String, JSON, Math,
+      sbNoModel: () => ({ ok: false, code: 'no-own-model' }), callOwnAIStream() {},
+      setTimeout: () => 0, callOwnAI: (c, s, u, done) => { if (u === 'throw') throw new Error('boom'); started.push(done); } };
+    const ctx = load(['sbServiceAI', 'SB_AI_LIMIT'], between('var SB_AI_LIMIT', 'function sbServiceFetch('), env);
+    const calls = []; for (let i = 0; i < 11; i++) calls.push(ctx.sbServiceAI({ prompt: 'p' + i }));
+    assert.equal(started.length, 2, 'only two bridge calls run at once');
+    const eleventh = await calls[10];
+    assert.deepEqual([eleventh.ok, eleventh.code], [false, 'rate-limited'], 'the 11th call in a minute is refused');
+    assert.equal(toasts.length, 1);
+    started[0](null, 'a'); await calls[0]; await new Promise((r) => setImmediate(r));
+    assert.equal(started.length, 3, 'a finished call lets the next queued one start');
+    cfg = { provider: 'localai', keys: {} };
+    ctx.SB_AI_LIMIT.queue.length = 0; ctx.SB_AI_LIMIT.active = 0;
+    for (let i = 0; i < 12; i++) ctx.sbServiceAI({ prompt: 'local' + i });
+    assert.ok(started.length > 3, 'local models are not held to the per-minute cap');
+    ctx.SB_AI_LIMIT.queue.length = 0; ctx.SB_AI_LIMIT.active = 0;
+    const thrown = await ctx.sbServiceAI({ prompt: 'throw' });
+    assert.equal(thrown.ok, false);
+    assert.equal(ctx.SB_AI_LIMIT.active, 0, 'a call that throws frees its slot');
+
+    const cool = load(['aiCooldownMsg', 'aiNoteRateLimit'], between('var AI_COOL', '// Big context goes BEFORE'), { Date, Math, String });
+    assert.equal(cool.aiCooldownMsg('google'), '');
+    cool.aiNoteRateLimit('google', 500, {});
+    assert.equal(cool.aiCooldownMsg('google'), '', 'only a 429 starts a pause');
+    cool.aiNoteRateLimit('google', 429, { responseText: '{"error":{"details":[{"retryDelay":"42s"}]}}' });
+    assert.match(cool.aiCooldownMsg('google'), /pausing calls to your model for 4[12]s/);
+    assert.equal(cool.aiCooldownMsg('openai'), '', 'another provider is not paused');
+    console.log('Skybridge AI rate limit and 429 back-off tests passed');
   };
   run().catch((e) => { console.error(e); process.exit(1); });
 }

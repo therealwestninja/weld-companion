@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/therealwestninja/weld-companion/issues
 // @downloadURL  https://raw.githubusercontent.com/therealwestninja/weld-companion/main/weld-companion.user.js
 // @updateURL    https://raw.githubusercontent.com/therealwestninja/weld-companion/main/weld-companion.user.js
-// @version      1.74.0
+// @version      1.93.2
 // @description  Quality-of-life upgrades for Perchance: favorites & recently-used, theme/reading comfort, save/copy/pin results, result history (undo-reroll), resizable inputs, generator folder management & CRUD, and an AI Helper you can edit or point at your own GPT (OpenAI / Anthropic / Google). All local, account-free. Companion to the Weld plugin suite; plus a federated Data Manager, an AICC pack (Lore Library, character round-trip, repair & recovery with quarantine), a Tools tab (AI Helper, character files), and a Library tab for readers (Scrapbook, chat story export, backup guardian) with night light in Comfort.
 // @author       therealwestninja
 // @match        https://perchance.org/*
@@ -56,7 +56,7 @@
 (function () {
   'use strict';
 
-  var WC_VERSION = '1.74.0';
+  var WC_VERSION = '1.89.0';
 
   // Top-frame only. With @noframes removed (so the Data Manager agent can run inside
   // generator sandbox frames), every existing module below must stay in the top frame.
@@ -64,14 +64,83 @@
 
   // ============================================================ A. storage + utils
   var NS = 'weldCompanion';
+  // Studio projects and the Scrapbook are not kept in Weld storage: these keys are files in the backup folder
+  // (window.weldBackup.files, src/backup-ui.js). Until the folder is readable, older copies still in storage are read.
+  // Since 1.90.0 ALL work data is a file in the GitHub repo (_weld-data/, src/repo-store.js); only settings and
+  // credentials stay in browser storage, and caches/clipboard history live in memory for the page only.
+  var REPO_KEY_RE = /^(scrapbook|genNotes|capsules|sessions|tabSnaps|favorites|ratings|boundaries|outRules|aiccLore|pins:.*|studio:.*|sbk:.*)$/;
+  var MEMORY_KEYS = { recent: 1, directory: 1, genStats: 1, wdmScan: 1, clipRing: 1, timeTrack: 1, loreHealth: 1, genWatch: 1 };
+  var memStore = {};
+  function memoryKey(key) { return Object.prototype.hasOwnProperty.call(MEMORY_KEYS, key); }
+  function folderKey(key) { return REPO_KEY_RE.test(String(key)); }
+  function folderFiles() { try { var b = window.weldBackup; return b && b.files ? b.files : null; } catch (e) { return null; } }
+  function graw(key) {   // storage only, never the folder
+    try { var v = GM_getValue(NS + ':' + key, undefined); return v === undefined ? undefined : JSON.parse(v); } catch (e) { return undefined; }
+  }
+  var folderRefusedAt = 0;
+  function folderRefused() {
+    if (Date.now() - folderRefusedAt < 15000) return; folderRefusedAt = Date.now();
+    var ff = folderFiles();
+    try { toast('Not saved: your Weld data (Studio projects, Scrapbook, notes, pins, favorites ...) is kept in your GitHub repo. ' + (ff ? ff.status() : 'Set owner, repo and token in Weld > GitHub.'), 9000); } catch (e) {}
+  }
   function gget(key, dflt) {
+    if (folderKey(key)) { var ff = folderFiles(); if (ff) return ff.get(key, dflt); var old = graw(key); return old === undefined ? dflt : old; }
+    if (memoryKey(key)) { return Object.prototype.hasOwnProperty.call(memStore, key) ? JSON.parse(memStore[key]) : dflt; }
     try { var v = GM_getValue(NS + ':' + key, undefined); return v === undefined ? dflt : JSON.parse(v); }
     catch (e) { return dflt; }
   }
+  var GSET_MAX_CHARS = 32 * 1024 * 1024;   // Tampermonkey passes values to the extension in one message; Chrome rejects >64 MiB, which stalls every script
   function gset(key, val) {
-    try { GM_setValue(NS + ':' + key, JSON.stringify(val)); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; }
+    if (folderKey(key)) { var ff = folderFiles(); if (ff && ff.set(key, val)) return true; folderRefused(); return false; }
+    if (memoryKey(key)) { try { memStore[key] = JSON.stringify(val); return true; } catch (e) { return false; } }
+    try { var raw = JSON.stringify(val); if (raw && raw.length > GSET_MAX_CHARS) throw new Error('too-large'); GM_setValue(NS + ':' + key, raw); return true; } catch (e) { try { toast('Save failed — browser storage may be full'); } catch (_) {} return false; }
   }
-  function gdel(key) { try { GM_deleteValue(NS + ':' + key); } catch (e) {} }
+  function gdel(key) {
+    if (folderKey(key)) { var ff = folderFiles(); if (ff && ff.ready()) { ff.set(key, null); return; } }
+    if (memoryKey(key)) { delete memStore[key]; return; }
+    try { GM_deleteValue(NS + ':' + key); } catch (e) {}
+  }
+  // Automatic saving into Weld storage (clipboard history, time tracking, generator-initiated Skybridge writes) is OFF by
+  // default: it filled browser storage. Anything the user does on purpose (Save, Pin, Push, Backups) is unaffected.
+  function autoSaveOn() { return gget('autoSave', false) === true; }
+
+  // ---- storage guard: oversize stored values make Tampermonkey slow or fail to start scripts ("Message exceeded
+  // maximum allowed size of 64MiB"). Runs shortly after load (report only) and from the Tampermonkey menu (removes,
+  // no dialog), and a copy of what is removed is downloaded first. Only generator storage (sbk:) and
+  // vault records (weld:genvault:) are ever offered for removal; every other key is only reported.
+  var GUARD_ITEM_CHARS = 2 * 1024 * 1024, GUARD_TOTAL_CHARS = 40 * 1024 * 1024;
+  function storageGuard(manual) {
+    try {
+      if (typeof GM_listValues !== 'function') return;
+      if (!manual && gget('storageGuardDeclined', 0) > Date.now() - 24 * 3600 * 1000) return;
+      var pre = NS + ':', total = 0, big = [];
+      GM_listValues().forEach(function (k) {
+        var v; try { v = GM_getValue(k, ''); } catch (e) { return; }
+        var n = typeof v === 'string' ? v.length : 0; total += n;
+        if (n > GUARD_ITEM_CHARS) big.push({ key: k, chars: n, removable: k.indexOf(pre + 'sbk:') === 0 || k.indexOf(pre + 'weld:genvault:') === 0 });
+      });
+      var mb = function (n) { return (n / 1048576).toFixed(1) + ' MB'; };
+      if (!big.length && total <= GUARD_TOTAL_CHARS) { if (manual) toast('Weld storage looks healthy: ' + mb(total) + ' in total, no value over 2 MB.', 6000); return; }
+      big.sort(function (a, b) { return b.chars - a.chars; });
+      var rem = big.filter(function (b) { return b.removable; });
+      // No dialogs. On load it only reports; from the menu it downloads a copy of the removable values and deletes them.
+      if (!manual || !rem.length) {
+        gset('storageGuardDeclined', Date.now());   // report at most once a day
+        toast('Weld storage is ' + mb(total) + (big.length ? ', with ' + big.length + ' value(s) over 2 MB' : '') + '. Weld > Backups > Purge all Weld-stored backups clears it' + (rem.length ? ' (or run "Weld: Check storage size" from the userscript menu).' : '.'), 9000);
+        return;
+      }
+      var out = {}; rem.forEach(function (b) { out[b.key] = GM_getValue(b.key, ''); });
+      var blob = new Blob([JSON.stringify(out)], { type: 'application/json' }), a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'weld-oversize-storage-' + new Date().toISOString().slice(0, 10) + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () {
+        rem.forEach(function (b) { try { GM_deleteValue(b.key); } catch (e) {} });
+        toast('Removed ' + rem.length + ' oversize value(s); a copy was downloaded as ' + a.download + '. Reload the page.', 9000);
+      }, 800);
+    } catch (e) {}
+  }
+  try { if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Weld: Check storage size / free space', function () { storageGuard(true); }); } catch (e) {}
+  setTimeout(function () { storageGuard(false); }, 1500);
 
   function el(tag, attrs, children) {
     var n = document.createElement(tag);
@@ -908,68 +977,427 @@
   // stored locally and sent ONLY to api.github.com in the Authorization header --
   // never logged, never put in commit messages.
   function ghToken() { return gget('ghToken', '') || ''; }
-  function ghApi(method, apiPath, token, body, cb) {
+  // opt.timeoutMs (optional): per-request watchdog; default 90s. A timeout error carries err.stalled = true.
+  function ghApi(method, apiPath, token, body, cb, opt) {
+    var settled = false, request = null, watchdog = null;
+    function finish(err, status, json) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      cb(err, status, json);
+    }
+    function timedOut() {
+      var e = new Error('GitHub request timed out. Check your connection and Tampermonkey access to api.github.com; check GitHub before retrying.');
+      e.stalled = true;
+      finish(e, 0, null);
+      try { if (request && typeof request.abort === 'function') request.abort(); } catch (e2) {}
+    }
+    // The watchdog also covers userscript-manager requests that never call a handler.
+    watchdog = setTimeout(timedOut, (opt && opt.timeoutMs) || 90000);
     try {
-      GM_xmlhttpRequest({
+      request = GM_xmlhttpRequest({
         method: method, url: 'https://api.github.com' + apiPath,
         headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
         data: body ? JSON.stringify(body) : null,
-        onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) {} cb(null, r.status, j); },
-        onerror: function () { cb(new Error('network error'), 0, null); },
-        ontimeout: function () { cb(new Error('timeout'), 0, null); }
+        onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) {} finish(null, r.status, j); },
+        onerror: function () { finish(new Error('GitHub network error; check your connection and Tampermonkey access to api.github.com'), 0, null); },
+        onabort: function () { finish(new Error('GitHub request aborted'), 0, null); },
+        ontimeout: timedOut
       });
-    } catch (e) { cb(new Error(String((e && e.message) || e)), 0, null); }
+    } catch (e) {
+      finish(new Error('GitHub request could not start; check Tampermonkey access to api.github.com'), 0, null);
+    }
   }
   function ghApiError(action, status, json) { return new Error(action + ' ' + status + (json && json.message ? ' ' + json.message : '')); }
   function ghBranchPath(branch) { return String(branch || '').replace(/^refs\/heads\//, '').split('/').map(encodeURIComponent).join('/'); }
+  // Git's blob hash of a UTF-8 text: SHA-1 over "blob <bytes>\0<bytes>". Matches the sha GitHub lists for that file,
+  // so a push can tell an unchanged file without uploading it. Resolves null when hashing is unavailable.
+  function ghBlobShaAvailable() { try { return typeof crypto !== 'undefined' && !!crypto.subtle && typeof TextEncoder !== 'undefined'; } catch (e) { return false; } }
+  function ghBlobSha(text) {
+    try {
+      if (!ghBlobShaAvailable()) return Promise.resolve(null);
+      var enc = new TextEncoder(), body = (text instanceof Uint8Array) ? text : enc.encode(String(text)), head = enc.encode('blob ' + body.length + '\0');
+      var all = new Uint8Array(head.length + body.length); all.set(head); all.set(body, head.length);
+      return crypto.subtle.digest('SHA-1', all).then(function (buf) {
+        return Array.prototype.map.call(new Uint8Array(buf), function (b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
+      }, function () { return null; });
+    } catch (e) { return Promise.resolve(null); }
+  }
+  function ghBackupEval(op, arg) {
+    var iframe = document.querySelector('#outputIframeEl'), id = pageProp('generatorPublicId');
+    if (!iframe || !iframe.contentWindow || !/^[\w-]+$/.test(String(id || ''))) return Promise.reject(new Error('Load the generator preview before pushing'));
+    var win = iframe.contentWindow, origin = 'https://' + id + '.perchance.org';
+    return new Promise(function (resolve, reject) {
+      var callerId = 'weld-backup-' + Date.now() + '-' + Math.random();
+      var timer = setTimeout(function () { finish(new Error('Preview backup timed out; branch not updated')); }, 60000);
+      function finish(err, value) { clearTimeout(timer); window.removeEventListener('message', onMessage); err ? reject(err) : resolve(value); }
+      function onMessage(e) {
+        if (e.source !== win || e.origin !== origin || !e.data || e.data.type !== 'evaluateJsResponse' || e.data.callerId !== callerId) return;
+        finish(e.data.error ? new Error('Preview could not read backup assets') : null, e.data.result);
+      }
+      window.addEventListener('message', onMessage);
+      try { win.postMessage({ command: 'evaluateJs', callerId: callerId,
+        js: 'return await (' + window.WeldGitHubBackup.runtime.toString() + ')(' + JSON.stringify(op) + ',' + JSON.stringify(arg || null) + ');' }, origin); }
+      catch (e) { finish(new Error('Could not contact the generator preview')); }
+    });
+  }
+  function ghCollectBackup(name, dslP, htmlP, dsl, html, quiet, includeCache) {
+    if (!quiet) toast(includeCache ? 'Reading project files and cached model inventory…' : 'Reading generator src files…');
+    var timer;
+    return Promise.race([window.WeldGitHubBackup.collect({ name: name, dslPath: dslP, htmlPath: htmlP, dsl: dsl, html: html,
+      state: pageProp('srcState'), evaluate: ghBackupEval, crypto: window.crypto, includeCache: !!includeCache,
+      panels: function (d, h) { return dslView().state.doc.toString() === d && htmlView().state.doc.toString() === h; }
+    }), new Promise(function (_, reject) { timer = setTimeout(function () { reject(new Error('Project inventory timed out; choose the correct editor draft and retry')); }, 90000); })])
+      .finally(function () { clearTimeout(timer); });
+  }
+  function ghBackupNote(backup) {
+    return '\n\nProject backup: ' + backup.manifest.files.length + ' src file(s), ' + (backup.bytes / 1048576).toFixed(1) + ' MiB, ' + backup.files.length + ' GitHub file(s).'
+      + '\nLarge source files use verified 4 MiB parts; .weld-backup/restore.py restores their bytes.'
+      + '\nIncludes editor panels and selected src files only.'
+      + '\nBrowser caches, downloaded models, OPFS, cookies, credentials and private chat databases are not included.'
+      + (backup.manifest.unavailable.length ? '\nUnavailable: ' + backup.manifest.unavailable.join('; ') : '');
+  }
+  // What Push commits: both editor panels plus (when the generator has a src store) every src file under the
+  // generator's folder, via the shared collector (4 MiB parts, secret scan, no caches/models). Never rejects:
+  // if src cannot be read the panels are still offered, with a warning in the confirmation.
+  function ghPushPayload(name, dslP, htmlP, dsl, html) {
+    var panels = [{ path: dslP, content: dsl }, { path: htmlP, content: html }], none = { files: panels, validate: null, note: '' };
+    var hasSrc = false; try { hasSrc = !!pageProp('srcState'); } catch (e) {}
+    if (!hasSrc) return Promise.resolve(none);
+    return ghCollectBackup(name, dslP, htmlP, dsl, html, true, false).then(function (b) {
+      if (!b || !b.manifest || !b.manifest.files || !b.manifest.files.length) return none;
+      var paths = b.manifest.files.map(function (r) { return r.path; }), commits = Math.ceil(b.bytes * 4 / 3 / 2000000);
+      var note = '\n\nAlso commits ' + paths.length + ' src file(s), ' + (b.bytes / 1048576).toFixed(2) + ' MiB (' + b.files.length + ' GitHub file(s) incl. manifest):\n'
+        + paths.slice(0, 15).map(function (x) { return '  ' + x; }).join('\n') + (paths.length > 15 ? '\n  … and ' + (paths.length - 15) + ' more' : '')
+        + '\nUnchanged files are skipped; nothing is deleted. Files over 4 MiB are stored as verified parts.'
+        + (commits > 1 ? '\n\n⚠ Up to ' + commits + ' commits are needed (about 2 MB each), so this is NOT one atomic commit; the two panels go in the last one. If it stops midway, press Push again: the commits already made stay and are skipped.' : '');
+      return { files: b.files, validate: b.validate, note: note };
+    }, function (e) {
+      return { files: panels, validate: null, note: '\n\n⚠ src files NOT included: ' + ((e && e.message) || 'could not read them') + '. Only the two panels will be committed.' };
+    });
+  }
   // Commit both editor panes through Git's blob/tree/commit/ref APIs, rather than
   // two Contents-API PUTs. If any request fails before the final ref update, the
   // branch stays exactly as it was; it can never contain just one pane's update.
   // opts.newBranch (optional): commit on top of `branch` but publish the commit as a NEW branch instead of
   // moving `branch` (used by "Push as pull request"). Existing callers pass no opts and behave as before.
+  // opts.onProgress (optional): receives a plain-language line before each step, for the on-screen status.
+  // cb(err, result, info): result is 'updated' | 'created' | 'unchanged'; info = { sha, url } of the commit.
+  // 'unchanged' means GitHub already holds exactly these files, so no (empty) commit is made.
   function ghPushFilesAtomic(o, repo, branch, files, token, msg, cb, opts) {
-    var base = '/repos/' + o + '/' + repo + '/git/';
-    function api(method, path, body, done) { ghApi(method, base + path, token, body, done); }
-    function fail(action, err, st, json) { cb(err || ghApiError(action, st, json)); }
+    // A stray space or a pasted label ("owner = name") in a custom mapping reads as a 404.
+    function clean(v, label) { return String(v || '').replace(new RegExp('^\\s*' + label + '\\s*[=:]\\s*', 'i'), '').trim(); }
+    o = clean(o, 'owner'); repo = clean(repo, 'repo'); branch = clean(branch, 'branch');
+    var base = '/repos/' + encodeURIComponent(o) + '/' + encodeURIComponent(repo) + '/git/';
+    var lastStep = '';
+    function emit(text) { if (opts && typeof opts.onProgress === 'function') { try { opts.onProgress(text); } catch (e) {} } }
+    function progress(text) { lastStep = text; emit(text); }
+    // Live seconds counter after 5s, so a slow step never looks frozen. GitHub answers in well under a second; a
+    // long wait is Tampermonkey being slow to relay the request (most often oversized stored values), not GitHub.
+    // Slow replies are waited for (90s watchdog), never cut short. A request that gets NO reply in 90s (Tampermonkey's
+    // background worker restarting can drop one) is sent once more when that is safe: reads, and blob/tree/commit
+    // objects (content-addressed; an unused extra is harmless). Branch moves/creates are sent once and re-read instead.
+    function api(method, path, body, done) {
+      if (opts && typeof opts.onStep === 'function') { try { opts.onStep(method + ' ' + path.split('/')[0]); } catch (e) {} }
+      call(method, base + path, body, done, (method === 'GET' || (method === 'POST' && path !== 'refs')) ? 2 : 1);
+    }
+    function call(method, fullPath, body, done, tries) {
+      var attempt = 0, label = lastStep.replace(/…$/, '');
+      (function go() {
+        attempt++;
+        var started = Date.now();
+        var tick = setInterval(function () {
+          var s = Math.round((Date.now() - started) / 1000);
+          if (s < 5) return;
+          emit(label + ' — waiting ' + s + 's' + (attempt > 1 ? ' (second try)' : '') + '…'
+            + (s >= 20 ? ' Tampermonkey is slow to relay this (GitHub itself is fast). Usually oversized Weld storage: afterwards run Tampermonkey menu → “Weld: Check storage size / free space”.' : ''));
+        }, 1000);
+        ghApi(method, fullPath, token, body, function (err, st, json) {
+          clearInterval(tick);
+          if (err && err.stalled && attempt < tries) { emit(label + ' — no reply in 90s, sending again…'); return go(); }
+          if (err && err.stalled && tries > 1) {
+            var e2 = new Error('no reply after two 90s tries (Tampermonkey never delivered the request). Nothing was changed on GitHub. Reload this Perchance tab (or turn Tampermonkey off and on), run “Weld: Check storage size / free space” from the Tampermonkey menu, then push again.');
+            e2.stalled = true; err = e2;
+          }
+          done(err, st, json);
+        });
+      })();
+    }
+    function info(sha, htmlUrl) { return { sha: sha, url: htmlUrl || ('https://github.com/' + encodeURIComponent(o) + '/' + encodeURIComponent(repo) + '/commit/' + sha) }; }
+    function fail(action, err, st, json) { cb(err ? new Error(action + ': ' + err.message) : ghApiError(action, st, json)); }
     var branchPath = ghBranchPath(branch);
     if (!branchPath) return cb(new Error('Branch is required'));
+    // Fast path for a plain push of text files: GraphQL does it in 2 requests (1 when nothing changed) instead of
+    // ~7 REST ones. Each request through Tampermonkey can take a long time, so the count matters far more than size.
+    // Pull requests, binary/lazy files and browsers without hashing use the REST path below; so does any GraphQL
+    // failure before the commit request is sent.
+    var fastOk = !(opts && (opts.newBranch || opts.transport === 'rest')) && files.length > 0 && ghBlobShaAvailable() && typeof btoa === 'function'
+      && files.every(function (f) { return !f.read && (!f.encoding || f.encoding === 'utf-8') && typeof f.content === 'string'; });
+    if (fastOk) return ghPushGraphQL(rest);
+    if (!fastOk && files.some(function (f) { return f.read; }) && !(opts && opts.transport === 'rest') && ghBlobShaAvailable() && typeof btoa === 'function' && typeof atob === 'function') return ghPushBatched(rest);
+    rest();
+    function rest() {
+    progress('Checking ' + o + '/' + repo + '@' + branch + '…');
     api('GET', 'ref/heads/' + branchPath, null, function (err, st, ref) {
+      if (!err && st === 404) {
+        // A 404 can mean "repo hidden from this token" or "no such branch"; ask GitHub which, and who the token is.
+        return ghApi('GET', '/repos/' + o + '/' + repo, token, null, function (eR, sR, repoJson) {
+          ghApi('GET', '/user', token, null, function (eU, sU, user) {
+            var who = (!eU && sU === 200 && user && user.login) ? 'token is for "' + user.login + '"' : 'token not accepted by GitHub (' + (eU ? 'network' : sU) + ')';
+            var why = eR ? 'could not check the repo' : sR === 200 ? 'repo is visible, so branch "' + branch + '" does not exist (token ' + (repoJson && repoJson.permissions && repoJson.permissions.push ? 'can' : 'cannot') + ' push)' : 'this token cannot see ' + o + '/' + repo + ' (check its repository access and owner)';
+            cb(new Error('GET branch 404 Not Found. ' + why + '; ' + who));
+          });
+        });
+      }
       if (err || st !== 200 || !ref || !ref.object || !ref.object.sha) return fail('GET branch', err, st, ref);
       var parent = ref.object.sha;
       api('GET', 'commits/' + encodeURIComponent(parent), null, function (eCommit, sCommit, parentCommit) {
         if (eCommit || sCommit !== 200 || !parentCommit || !parentCommit.tree || !parentCommit.tree.sha) return fail('GET commit', eCommit, sCommit, parentCommit);
-        var blobs = [], i = 0;
+        var blobs = [], i = 0, skipped = 0, have = {};
         function putBlob() {
           if (i >= files.length) return putTree();
           var f = files[i++];
-          api('POST', 'blobs', { content: f.content, encoding: 'utf-8' }, function (eBlob, sBlob, blob) {
+          function send(content) {
+            progress('Uploading ' + f.path + ' (' + i + ' of ' + files.length + ')…');
+            api('POST', 'blobs', { content: content, encoding: f.encoding || 'utf-8' }, function (eBlob, sBlob, blob) {
             if (eBlob || (sBlob !== 201 && sBlob !== 200) || !blob || !blob.sha) return fail('POST blob', eBlob, sBlob, blob);
             blobs.push({ path: f.path, mode: '100644', type: 'blob', sha: blob.sha });
             putBlob();
+          }); }
+          // Lazy src files are read first, then hashed (bytes for base64, text otherwise) so an unchanged one is not re-uploaded.
+          if (f.read) Promise.resolve().then(f.read).then(function (content) {
+            if (!have[f.path] || !ghBlobShaAvailable()) return send(content);
+            var bytes = null;
+            try { if (f.encoding === 'base64') bytes = Uint8Array.from(atob(content), function (c) { return c.charCodeAt(0); }); } catch (e) { return send(content); }
+            return ghBlobSha(bytes || content).then(function (sha) {
+              if (sha && sha === have[f.path]) { skipped++; progress('Unchanged: ' + f.path + ' (' + i + ' of ' + files.length + ')'); blobs.push({ path: f.path, mode: '100644', type: 'blob', sha: sha }); putBlob(); }
+              else send(content);
+            });
+          }).catch(function () { cb(new Error('Backup asset read failed; branch not updated')); });
+          else if (!have[f.path] || (f.encoding && f.encoding !== 'utf-8')) send(f.content);
+          // GitHub already holds a file at this path: upload only if its git hash differs from ours.
+          else ghBlobSha(f.content).then(function (sha) {
+            if (sha && sha === have[f.path]) { skipped++; progress('Unchanged: ' + f.path + ' (' + i + ' of ' + files.length + ')'); blobs.push({ path: f.path, mode: '100644', type: 'blob', sha: sha }); putBlob(); }
+            else send(f.content);
           });
         }
+        // Read the existing hashes of the target folders (one small listing per folder) so unchanged files are not
+        // re-uploaded; a large unchanged HTML panel was the slowest part of a push. Any failure here just means
+        // "upload everything", as before. Skipped when the browser cannot hash (no crypto.subtle).
+        function listExisting(next) {
+          if (!ghBlobShaAvailable()) return next();
+          var dirs = [];
+          files.forEach(function (f) { var d = f.path.indexOf('/') === -1 ? '' : f.path.slice(0, f.path.lastIndexOf('/')); if (dirs.indexOf(d) === -1) dirs.push(d); });
+          if (!dirs.length) return next();
+          progress('Comparing with ' + branch + '…');
+          var k = 0;
+          (function one() {
+            if (k >= dirs.length) return next();
+            var d = dirs[k++], ref = d ? parent + ':' + d.split('/').map(encodeURIComponent).join('/') : parentCommit.tree.sha;
+            api('GET', 'trees/' + ref, null, function (eT, sT, t) {
+              if (!eT && sT === 200 && t && t.tree && t.tree.forEach) t.tree.forEach(function (x) { if (x && x.type === 'blob' && x.sha) have[(d ? d + '/' : '') + x.path] = x.sha; });
+              one();
+            });
+          })();
+        }
         function putTree() {
+          try { if (opts && opts.validate) opts.validate(); } catch (e) { return cb(e); }
+          // Every file matched what is already on the branch: nothing to commit.
+          if (files.length && skipped === files.length) return cb(null, 'unchanged', info(parent, parentCommit.html_url));
           api('POST', 'trees', { base_tree: parentCommit.tree.sha, tree: blobs }, function (eTree, sTree, tree) {
             if (eTree || (sTree !== 201 && sTree !== 200) || !tree || !tree.sha) return fail('POST tree', eTree, sTree, tree);
+            // Same tree as the branch head: GitHub already has these exact files. Skip the empty commit.
+            if (tree.sha === parentCommit.tree.sha) return cb(null, 'unchanged', info(parent, parentCommit.html_url));
+            progress('Creating the commit…');
             api('POST', 'commits', { message: msg, tree: tree.sha, parents: [parent] }, function (eNew, sNew, commit) {
               if (eNew || (sNew !== 201 && sNew !== 200) || !commit || !commit.sha) return fail('POST commit', eNew, sNew, commit);
               if (opts && opts.newBranch) {
                 if (!/^[\w.\/-]{1,120}$/.test(opts.newBranch) || /\.\.|\/\/|\.lock$|^\/|\/$/.test(opts.newBranch)) return fail('POST branch', new Error('Unsafe branch name'));
+                progress('Creating branch ' + opts.newBranch + '…');
                 return api('POST', 'refs', { ref: 'refs/heads/' + opts.newBranch, sha: commit.sha }, function (eNew2, sNew2, made) {
-                  if (eNew2 || sNew2 !== 201) return fail('POST branch', eNew2, sNew2, made);
-                  cb(null, 'created');
+                  if (!eNew2 && sNew2 === 201) return cb(null, 'created', info(commit.sha, commit.html_url));
+                  if (!eNew2) return fail('POST branch', eNew2, sNew2, made);
+                  // No answer: the branch may still have been created. Re-read it before reporting failure.
+                  api('GET', 'ref/heads/' + ghBranchPath(opts.newBranch), null, function (eChk, sChk, now) {
+                    if (!eChk && sChk === 200 && now && now.object && now.object.sha === commit.sha) return cb(null, 'created', info(commit.sha, commit.html_url));
+                    fail('POST branch', eNew2, sNew2, made);
+                  });
                 });
               }
+              progress('Moving ' + branch + ' to the new commit…');
               api('PATCH', 'refs/heads/' + branchPath, { sha: commit.sha, force: false }, function (eRef, sRef, updated) {
-                if (eRef || sRef !== 200) return fail('PATCH branch', eRef, sRef, updated);
-                cb(null, 'updated');
+                if (!eRef && sRef === 200) return cb(null, 'updated', info(commit.sha, commit.html_url));
+                if (!eRef) return fail('PATCH branch', eRef, sRef, updated);
+                // No answer (timeout / network drop) on the last step: GitHub may still have applied it. Ask before reporting failure.
+                progress('No reply from GitHub; checking whether ' + branch + ' was updated…');
+                api('GET', 'ref/heads/' + branchPath, null, function (eChk, sChk, now) {
+                  if (!eChk && sChk === 200 && now && now.object && now.object.sha === commit.sha) return cb(null, 'updated', info(commit.sha, commit.html_url));
+                  if (!eChk && sChk === 200) return fail('PATCH branch', eRef, sRef, updated);   // confirmed not moved
+                  cb(new Error('PATCH branch: ' + eRef.message + ' GitHub could not confirm whether the push landed; open the repo to check before retrying.'));
+                });
               });
             });
           });
         }
-        putBlob();
+        listExisting(putBlob);
       });
     });
+    }
+    // Src push: a first push can be hundreds of files and every Tampermonkey-relayed request costs ~20-30s, so files
+    // go in through GraphQL createCommitOnBranch (base64 additions) in batches under ~2 MB / 150 files, not one blob each. The
+    // existing hashes of the generator folder come from ONE recursive tree read, so unchanged files are skipped.
+    // opts.last lists paths (the two panels) that go in the final commit. More than one batch means more than one commit.
+    function ghPushBatched(fallback) {
+      var LIMIT = 2000000, MAXFILES = 150, target = (opts && opts.newBranch) || branch, last = (opts && opts.last) || [];
+      function gql(query, variables, done, tries) { call('POST', '/graphql', { query: query, variables: variables }, done, tries); }
+      var hq = 'query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){target{oid ...on Commit{url parents(first:1){nodes{oid}}}}}}}';
+      function readHead(ref, done) {
+        gql(hq, { owner: o, name: repo, ref: 'refs/heads/' + ref }, function (err, st, json) {
+          var r = !err && st === 200 && json && !json.errors && json.data && json.data.repository && json.data.repository.ref && json.data.repository.ref.target;
+          done(err, r && r.oid ? { oid: r.oid, url: r.url, parent: r.parents && r.parents.nodes && r.parents.nodes[0] && r.parents.nodes[0].oid } : null);
+        }, 2);
+      }
+      var dirs = files.map(function (f) { return f.path.split('/').slice(0, -1); }), common = dirs[0] || [];
+      dirs.forEach(function (d) { var n = 0; while (n < common.length && n < d.length && common[n] === d[n]) n++; common = common.slice(0, n); });
+      var dir = common.join('/');
+      progress('Checking ' + o + '/' + repo + '@' + branch + '…');
+      readHead(branch, function (e0, head) {
+        if (!head) return fallback();
+        function afterHave(have) {
+          var items = [], i = 0, skipped = 0;
+          (function nextFile() {
+            if (i >= files.length) return planAndCommit(items, skipped);
+            var f = files[i++];
+            progress('Reading ' + f.path + ' (' + i + ' of ' + files.length + ')…');
+            Promise.resolve().then(function () { return f.read ? f.read() : f.content; }).then(function (content) {
+              var b64 = f.encoding === 'base64' ? content : ghB64(content), bytes = null;
+              if (f.encoding === 'base64') bytes = Uint8Array.from(atob(content), function (c) { return c.charCodeAt(0); });
+              return ghBlobSha(bytes || content).then(function (sha) {
+                if (sha && have[f.path] === sha) skipped++; else items.push({ path: f.path, b64: b64, last: last.indexOf(f.path) !== -1 });
+                nextFile();
+              });
+            }).catch(function () { cb(new Error('Backup asset read failed; branch not updated')); });
+          })();
+        }
+        function planAndCommit(items, skipped) {
+          try { if (opts && opts.validate) opts.validate(); } catch (e) { return cb(e); }
+          if (!items.length) return cb(null, 'unchanged', info(head.oid, head.url));
+          var queue = ghPlanBatches(items, LIMIT, MAXFILES), done = 0, expected = head.oid, lastInfo = null, delay = (opts && opts.retryDelayMs != null) ? opts.retryDelayMs : 3000;
+          progress(items.length + ' changed file(s), ' + skipped + ' unchanged, in ' + queue.length + ' commit(s)…');
+          function retryable(err, st) { return !!err || st === 499 || st === 502 || st === 503 || st === 504 || st === 408 || st === 429; }
+          function resume() { return ' ' + done + ' of ' + (done + queue.length) + ' commit(s) are already on ' + target + (opts && opts.newBranch ? '. Press Push as pull request again to start a new branch.' : '. Press Push again to resume: unchanged files are skipped, only the remaining files are sent, and the two panels go in the last commit.'); }
+          function commitNext() {
+            if (!queue.length) return cb(null, (opts && opts.newBranch) ? 'created' : 'updated', lastInfo);
+            send(queue.shift(), 0);
+          }
+          // One commit, with retries: a 499/5xx/timeout is first checked (did it land after all?), then the same
+          // batch is sent again up to 2 more times, then split in half (batches of one file are only retried).
+          function send(b, attempt) {
+            var n = done + queue.length + 1;
+            progress('Committing batch ' + (done + 1) + ' of ' + n + ' (' + b.length + ' file(s))' + (attempt ? ', retry ' + attempt : '') + '…');
+            var input = { branch: { repositoryNameWithOwner: o + '/' + repo, branchName: target }, message: { headline: n > 1 ? msg + ' (part ' + (done + 1) + ' of ' + n + ')' : msg }, expectedHeadOid: expected,
+              fileChanges: { additions: b.map(function (it) { return { path: it.path, contents: it.b64 }; }) } };
+            gql('mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid url}}}', { input: input }, function (err, st, json) {
+              var c = !err && st === 200 && json && !json.errors && json.data && json.data.createCommitOnBranch && json.data.createCommitOnBranch.commit;
+              if (c && c.oid) { expected = c.oid; lastInfo = info(c.oid, c.url); done++; return commitNext(); }
+              if (!retryable(err, st)) {
+                if (done === 0 && !(opts && opts.newBranch)) return fallback();   // refused before anything was written: REST retries cleanly
+                return cb(new Error('Commit refused by GitHub: ' + ((json && json.errors && json.errors[0] && json.errors[0].message) || ('HTTP ' + st)) + '.' + resume()));
+              }
+              var why = err ? err.message : 'HTTP ' + st;
+              progress('GitHub did not confirm the commit (' + why + '); checking ' + target + '…');
+              readHead(target, function (e2, now) {
+                if (now && now.oid !== expected && now.parent === expected) { expected = now.oid; lastInfo = info(now.oid, now.url); done++; return commitNext(); }   // it landed
+                if (attempt < 2) { progress('Retrying the same batch (' + (attempt + 1) + ' of 2) after ' + why + '…'); return setTimeout(function () { send(b, attempt + 1); }, delay * (attempt + 1)); }
+                if (b.length > 1) {
+                  var half = Math.ceil(b.length / 2);
+                  progress('Splitting the batch into smaller commits after repeated ' + why + '…');
+                  queue.unshift(b.slice(0, half), b.slice(half));
+                  return commitNext();
+                }
+                cb(new Error('Commit of ' + b[0].path + ' failed after retries (' + why + ').' + resume()));
+              });
+            }, 1);
+          }
+          if (opts && opts.newBranch) {
+            if (!/^[\w.\/-]{1,120}$/.test(opts.newBranch) || /\.\.|\/\/|\.lock$|^\/|\/$/.test(opts.newBranch)) return cb(new Error('POST branch: Unsafe branch name'));
+            progress('Creating branch ' + opts.newBranch + '…');
+            return api('POST', 'refs', { ref: 'refs/heads/' + opts.newBranch, sha: head.oid }, function (eR, sR, made) {
+              if (eR || sR !== 201) return fail('POST branch', eR, sR, made);
+              commitNext();
+            });
+          }
+          commitNext();
+        }
+        if (!dir) return afterHave({});
+        progress('Comparing with ' + branch + '…');
+        api('GET', 'trees/' + encodeURIComponent(head.oid) + ':' + dir.split('/').map(encodeURIComponent).join('/') + '?recursive=1', null, function (eT, sT, t) {
+          var have = {};
+          if (!eT && sT === 200 && t && t.tree && t.tree.forEach && !t.truncated) t.tree.forEach(function (x) { if (x && x.type === 'blob' && x.sha) have[dir + '/' + x.path] = x.sha; });
+          afterHave(have);
+        });
+      });
+    }
+    function ghPushGraphQL(fallback) {
+      var head = null, names = files.map(function (f, n) { return 'f' + n; });
+      function gql(query, variables, done, tries) { call('POST', '/graphql', { query: query, variables: variables }, done, tries); }
+      function gqlErr(st, json) { return (json && json.errors && json.errors.length) ? json.errors.map(function (e) { return e.message; }).join('; ') : (json && json.message) || ('HTTP ' + st); }
+      // One read: the branch head plus the current blob hash of every target path (null when the file is new).
+      var q = 'query($owner:String!,$name:String!,$ref:String!' + names.map(function (n) { return ',$' + n + ':String!'; }).join('') + '){repository(owner:$owner,name:$name){'
+        + 'ref(qualifiedName:$ref){target{oid ...on Commit{url}}}'
+        + names.map(function (n) { return n + ':object(expression:$' + n + '){...on Blob{oid}}'; }).join('') + '}}';
+      function readState(done) {
+        var vars = { owner: o, name: repo, ref: 'refs/heads/' + branch };
+        files.forEach(function (f, n) { vars[names[n]] = branch + ':' + f.path; });
+        gql(q, vars, function (err, st, json) {
+          var r = !err && st === 200 && json && !json.errors && json.data && json.data.repository;
+          if (!r || !r.ref || !r.ref.target || !r.ref.target.oid) return done(null);
+          done({ head: r.ref.target.oid, url: r.ref.target.url, oids: names.map(function (n) { return r[n] && r[n].oid || null; }) });
+        }, 2);
+      }
+      progress('Checking ' + o + '/' + repo + '@' + branch + '…');
+      readState(function (s) {
+        if (!s) return fallback();   // branch missing, no access, or GraphQL unavailable: REST explains it properly
+        head = s.head;
+        Promise.all(files.map(function (f) { return ghBlobSha(f.content); })).then(function (shas) {
+          var changed = files.filter(function (f, n) { return !shas[n] || shas[n] !== s.oids[n]; });
+          try { if (opts && opts.validate) opts.validate(); } catch (e) { return cb(e); }
+          if (!changed.length) return cb(null, 'unchanged', info(head, s.url));
+          progress('Committing ' + changed.map(function (f) { return f.path; }).join(' + ') + '…');
+          var input = { branch: { repositoryNameWithOwner: o + '/' + repo, branchName: branch }, message: { headline: msg }, expectedHeadOid: head,
+            fileChanges: { additions: changed.map(function (f) { return { path: f.path, contents: ghB64(f.content) }; }) } };
+          gql('mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid url}}}', { input: input }, function (err, st, json) {
+            var c = !err && st === 200 && json && !json.errors && json.data && json.data.createCommitOnBranch && json.data.createCommitOnBranch.commit;
+            if (c && c.oid) return cb(null, 'updated', info(c.oid, c.url));
+            if (!err) return fallback();   // GitHub refused it (permission, branch moved...): nothing was written; REST retries cleanly
+            // No reply to the commit request: it may still have landed. Re-read before reporting anything.
+            progress('No reply from GitHub; checking whether ' + branch + ' was updated…');
+            readState(function (now) {
+              if (now && now.head !== head && changed.every(function (f) { var n = files.indexOf(f); return now.oids[n] === shas[n]; })) return cb(null, 'updated', info(now.head, now.url));
+              if (now && now.head === head) return cb(new Error('Commit: ' + err.message + ' (' + gqlErr(st, json) + '). The branch was not changed.'));
+              cb(new Error('Commit: ' + err.message + ' GitHub could not confirm whether the push landed; open the repo to check before retrying.'));
+            });
+          }, 1);
+        });
+      });
+    }
+  }
+  // Split changed files into commits of at most ~limit base64 chars; items flagged last (the panels) go in the final commit.
+  // A file larger than the limit gets a commit of its own.
+  function ghPlanBatches(items, limit, maxFiles) {
+    var ordered = items.filter(function (x) { return !x.last; }).concat(items.filter(function (x) { return x.last; })), out = [], cur = [], size = 0;
+    ordered.forEach(function (it) {
+      if (cur.length && (size + it.b64.length > limit || (maxFiles && cur.length >= maxFiles))) { out.push(cur); cur = []; size = 0; }
+      cur.push(it); size += it.b64.length;
+    });
+    if (cur.length) out.push(cur);
+    return out;
+  }
+  // UTF-8 text -> base64 (GraphQL file contents), chunked so large panels don't overflow the argument limit.
+  function ghB64(text) {
+    var b = new TextEncoder().encode(String(text)), s = '', CH = 0x8000;
+    for (var i = 0; i < b.length; i += CH) s += String.fromCharCode.apply(null, b.subarray(i, i + CH));
+    return btoa(s);
   }
   // Pre-push check with Weld's own analyzer (undefined names, silent no-ops, id collisions, ...). It only
   // adds lines to the confirmation you already see, never blocks, and can be switched off in Code checks.
@@ -981,6 +1409,78 @@
       if (!g.count) return '';
       return '\n\n⚠ Weld found ' + g.count + ' possible problem(s) (heuristic):\n' + g.lines.join('\n') + (g.more ? '\n… and ' + g.more + ' more (see the Project tab)' : '');
     } catch (e) { return ''; }
+  }
+  // On-screen push status. A push is ~6 sequential GitHub requests, so a 2s toast read as "nothing happened"
+  // and a finished push looked like a failure. This box stays up for every step, then shows the outcome
+  // (with a link to the commit) until it times out or is closed. Failures stay until closed.
+  // The outcome stays until Close is clicked, and if the page removes the box it is put back (a box that vanished
+  // mid-push read as "no success or failure message").
+  function ghPushStatus(text) {
+    var line = el('span', { text: text });
+    var box = el('div', { class: 'wc-root wc-toast wc-toast-in wc-gh-status', role: 'status', 'aria-live': 'polite' }, [line]);
+    document.body.appendChild(box);
+    var ended = false, closed = false;
+    var keep = setInterval(function () { try { if (!closed && !box.isConnected && document.body) document.body.appendChild(box); } catch (e) {} }, 1000);
+    function close() { closed = true; clearInterval(keep); try { box.remove(); } catch (e) {} }
+    return {
+      step: function (t) { if (!ended) line.textContent = t; },
+      end: function (t, link, linkText) {
+        ended = true; line.textContent = t;
+        try { console.log('[weld github] ' + t); } catch (e) {}
+        try { if (!box.isConnected && document.body) document.body.appendChild(box); } catch (e) {}
+        if (link) box.appendChild(el('a', { class: 'wc-gh-status-link', href: link, target: '_blank', rel: 'noopener noreferrer', text: linkText || 'View on GitHub' }));
+        box.appendChild(el('button', { class: 'wc-btn wc-mini', text: 'Close', onclick: close }));
+      }
+    };
+  }
+  // GitHub connection test (GitHub tab): times tiny requests so a slow push can be traced to Tampermonkey, the
+  // network path, a busy page or a hidden tab. The report holds timings only, never the token or file contents.
+  function ghSpeedTest(out) {
+    var lines = [], t0 = Date.now(), maxLag = 0, last = Date.now(), hiddenSeen = document.visibilityState !== 'visible';
+    function log(s) { lines.push(s); out.textContent = lines.join('\n'); }
+    var lagTimer = setInterval(function () { var n = Date.now(); maxLag = Math.max(maxLag, n - last - 50); last = n; }, 50);
+    function onVis() { if (document.visibilityState !== 'visible') hiddenSeen = true; }
+    document.addEventListener('visibilitychange', onVis);
+    function gm(label, opt) {
+      return new Promise(function (res) {
+        var s = Date.now(), done = false, w = null;
+        function fin(r) { if (done) return; done = true; clearTimeout(w); log(label + ': ' + (Date.now() - s) + ' ms' + (r ? ' (' + r + ')' : '')); res(); }
+        w = setTimeout(function () { fin('no reply in 90s'); }, 90000);
+        try {
+          GM_xmlhttpRequest(Object.assign({ method: 'GET', onload: function (x) { fin('HTTP ' + x.status); },
+            onerror: function () { fin('network error'); }, ontimeout: function () { fin('timeout'); } }, opt));
+        } catch (e) { fin('could not start'); }
+      });
+    }
+    var tok = ghToken(), mgr = '';
+    try { mgr = (GM_info.scriptHandler || '?') + ' ' + (GM_info.version || ''); } catch (e) { mgr = 'unknown manager'; }
+    log('Weld ' + WC_VERSION + ' · ' + mgr + ' · ' + ((navigator.userAgent.match(/(Edg|Chrome|Firefox)\/[\d.]+/) || ['browser ?'])[0]));
+    log('Tab visible at start: ' + (document.visibilityState === 'visible' ? 'yes' : 'NO'));
+    // Tampermonkey hands every frame that runs Weld a copy of the script and of its stored values, so both sizes matter.
+    try {
+      var keys = GM_listValues(), chars = 0;
+      keys.forEach(function (k) { try { var v = GM_getValue(k, ''); chars += typeof v === 'string' ? v.length : 0; } catch (e) {} });
+      log('Weld storage: ' + (chars / 1048576).toFixed(1) + ' MB in ' + keys.length + ' values');
+    } catch (e) { log('Weld storage: could not measure'); }
+    try { log('Script size: ' + (GM_info.scriptSource ? (GM_info.scriptSource.length / 1048576).toFixed(2) + ' MB' : 'unknown') + ' · frames on this page: ' + document.querySelectorAll('iframe').length + ' (each Perchance frame may run its own copy)'); } catch (e) {}
+    var p = Promise.resolve();
+    [1, 2, 3].forEach(function (n) { p = p.then(function () { return gm('Tampermonkey → api.github.com #' + n, { url: 'https://api.github.com/zen' }); }); });
+    if (tok) p = p.then(function () { return gm('Tampermonkey → api.github.com with token', { url: 'https://api.github.com/rate_limit',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }); });
+    p = p.then(function () { return gm('Tampermonkey → perchance.org (not GitHub)', { method: 'HEAD', url: 'https://perchance.org/welcome' }); });
+    p = p.then(function () {
+      var s = Date.now();
+      return Promise.resolve().then(function () { return fetch('https://api.github.com/zen', { cache: 'no-store' }); }).then(
+        function (r) { log('Direct browser request → api.github.com: ' + (Date.now() - s) + ' ms (HTTP ' + r.status + ')'); },
+        function () { log('Direct browser request → api.github.com: blocked (expected; Perchance only allows its own site)'); });
+    });
+    return p.then(function () {
+      clearInterval(lagTimer); document.removeEventListener('visibilitychange', onVis);
+      log('Longest page freeze: ' + Math.max(0, maxLag) + ' ms');
+      log('Tab hidden during test: ' + (hiddenSeen ? 'YES (Chrome slows hidden tabs; keep this tab in front while pushing)' : 'no'));
+      log('Total: ' + Math.round((Date.now() - t0) / 1000) + ' s');
+      return lines.join('\n');
+    });
   }
   // Commit both panes to a NEW branch and open a pull request against the configured branch, so the change
   // can be reviewed (by you, Copilot, Codex, Claude...) before it reaches main. Needs a token with
@@ -1001,21 +1501,26 @@
     var branch = DC ? DC.pushBranchName(name) : ('weld/' + name + '-' + Date.now());
     var dsl = mt.state.doc.toString(), html = ot.state.doc.toString();
     var dslP = R.cfg.dslPath.replace(/\{name\}/g, function () { return name; }), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, function () { return name; });
+    ghPushPayload(name, dslP, htmlP, dsl, html).then(function (P) {
     var msg = 'Open a pull request for “' + name + '”?\n\nrepo: ' + R.cfg.owner + '/' + R.cfg.repo + '\nnew branch: ' + branch + '  →  into ' + base + '\nDSL  → ' + dslP + '\nHTML → ' + htmlP
-      + '\n\n' + base + ' is NOT changed until you merge the pull request.' + ghGateNote(name, dsl, html);
+      + '\n\n' + base + ' is NOT changed until you merge the pull request.' + P.note + ghGateNote(name, dsl, html);
     if (!confirm(msg)) { toast('Cancelled'); return; }
-    toast('Creating branch and pull request…');
-    ghPushFilesAtomic(R.cfg.owner, R.cfg.repo, base, [{ path: dslP, content: dsl }, { path: htmlP, content: html }], token, 'Update ' + name + ' via Weld Companion', function (err) {
-      if (err) { console.error('[weld pr]', err.message); toast('Could not create the branch: ' + err.message, 6000); return; }
+    var status = ghPushStatus('Creating branch and pull request for ' + name + '…');
+    ghPushFilesAtomic(R.cfg.owner, R.cfg.repo, base, P.files, token, 'Update ' + name + ' via Weld Companion', function (err, result) {
+      if (err) { console.error('[weld pr]', err.message); status.end('✗ Could not create the branch: ' + err.message + ' ' + base + ' was not changed.'); return; }
+      if (result === 'unchanged') { status.end('✓ Nothing to propose: ' + base + ' already has this exact version of ' + name + '. No branch or pull request was made.', null, null); return; }
+      status.step('Opening the pull request…');
       ghApi('POST', '/repos/' + R.cfg.owner + '/' + R.cfg.repo + '/pulls', token, { title: 'Update ' + name + ' via Weld Companion', head: branch, base: base,
-        body: 'Created by Weld Companion from the editor.\n\nFiles: `' + dslP + '`, `' + htmlP + '`.' }, function (e2, st, pr) {
+        body: 'Created by Weld Companion from the editor.\n\nFiles: `' + dslP + '`, `' + htmlP + '`' + (P.files.length > 2 ? ' and ' + (P.files.length - 2) + ' src file(s) in the same folder.' : '.') }, function (e2, st, pr) {
         if (e2 || (st !== 201 && st !== 200) || !pr || !pr.html_url) {
-          toast('Branch ' + branch + ' was created, but the pull request failed (' + ((pr && pr.message) || e2 && e2.message || st) + '). Open it on GitHub.', 8000); return;
+          status.end('⚠ Branch ' + branch + ' was created, but the pull request failed (' + ((pr && pr.message) || e2 && e2.message || st) + '). Open it on GitHub.',
+            'https://github.com/' + R.cfg.owner + '/' + R.cfg.repo + '/compare/' + base + '...' + branch, 'Open on GitHub'); return;
         }
         try { copyText(pr.html_url); } catch (e) {}
-        toast('Pull request opened (link copied): ' + pr.html_url, 8000);
+        status.end('✓ Pull request opened for ' + name + ' (link copied).', pr.html_url, 'View pull request');
       });
-    }, { newBranch: branch });
+    }, { newBranch: branch, validate: P.validate, last: [dslP, htmlP], onProgress: function (t) { status.step(t); } });
+    }, function (e) { toast('Push cancelled: ' + ((e && e.message) || 'could not prepare files')); });
   }
   function pushToGitHub(over) {
     var name = genName();
@@ -1033,22 +1538,28 @@
     var branch = R.cfg.branch || 'main';
     var dsl = mt.state.doc.toString(), html = ot.state.doc.toString();
     var dslP = R.cfg.dslPath.replace(/\{name\}/g, name), htmlP = R.cfg.htmlPath.replace(/\{name\}/g, name);
+    ghPushPayload(name, dslP, htmlP, dsl, html).then(function (P) {
     var confirmMsg = 'Push \u201C' + name + '\u201D to GitHub?' + (R.overridden ? '  [custom mapping]' : '') + '\n\n'
       + 'repo: ' + R.cfg.owner + '/' + R.cfg.repo + '@' + branch + '\n'
       + 'DSL  \u2192 ' + dslP + '   (' + dsl.length + ' chars)\n'
       + 'HTML \u2192 ' + htmlP + '   (' + html.length + ' chars)\n\n'
-      + 'This COMMITS over the GitHub copies of these two files.';
+      + 'This COMMITS over the GitHub copies of these files.' + P.note;
     var pushLint = lintHtmlScripts();
     if (pushLint.length) { console.warn('[weld lint]', pushLint); confirmMsg += '\n\n\u26A0 ' + pushLint.length + ' JavaScript problem(s) in the HTML pane (see console) \u2014 pushing commits them as-is.'; }
     confirmMsg += ghGateNote(name, dsl, html);
     if (!confirm(confirmMsg)) { toast('Cancelled'); return; }
-    toast('Pushing ' + name + ' to GitHub\u2026');
+    var where = R.cfg.owner + '/' + R.cfg.repo + '@' + branch;
+    var status = ghPushStatus('Pushing ' + name + ' to ' + where + '\u2026');
+    var t0 = Date.now();
+    function took() { var s = Math.round((Date.now() - t0) / 1000); return s < 5 ? '' : ' Took ' + (s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's') + '.'; }
     var commitMsg = 'Update ' + name + ' via Weld Companion';   // sent to GitHub; no token, no local paths
-    ghPushFilesAtomic(R.cfg.owner, R.cfg.repo, branch, [{ path: dslP, content: dsl }, { path: htmlP, content: html }], token, commitMsg, function (err, result) {
-      if (err) { console.error('[weld push]', err.message); toast('Push failed: ' + err.message); return; }
+    ghPushFilesAtomic(R.cfg.owner, R.cfg.repo, branch, P.files, token, commitMsg, function (err, result, info) {
+      if (err) { console.error('[weld push]', err.message); status.end('\u2717 Push failed: ' + err.message + took()); return; }
       console.log('[weld github] pushed atomically', { name: name, dsl: dslP, html: htmlP, result: result, branch: branch });
-      toast('Pushed ' + name + ' (one atomic commit)');
-    });
+      if (result === 'unchanged') { status.end('\u2713 Already up to date: ' + where + ' has this exact version of ' + name + '. Nothing new to commit.' + took(), info && info.url, 'View latest commit'); return; }
+      status.end('\u2713 Pushed ' + name + ' to ' + where + (info && info.sha ? ' (commit ' + String(info.sha).slice(0, 7) + ')' : '') + '.' + took(), info && info.url, 'View commit');
+    }, { validate: P.validate, last: [dslP, htmlP], onProgress: function (t) { status.step(t); } });
+    }, function (e) { toast('Push cancelled: ' + ((e && e.message) || 'could not prepare files')); });
   }
   function ghConfigure() {
     var cfg = ghCfg();
@@ -1122,7 +1633,7 @@
   }
 
   // expose a tiny namespace for debugging / other scripts
-  window.weldCompanion = { gget: gget, gset: gset, gdel: gdel, version: WC_VERSION };   // canonical storage helpers; appended modules delegate here (one source of truth)
+  window.weldCompanion = { gget: gget, gset: gset, gdel: gdel, autoSaveOn: autoSaveOn, version: WC_VERSION };   // canonical storage helpers; appended modules delegate here (one source of truth)
 
   // ---- adopt Perchance's own theme ------------------------------------------
   // Our chrome should belong to the page, not impose a foreign palette. We read
@@ -1272,6 +1783,8 @@
     '  display:flex;align-items:center;gap:9px;opacity:0;transition:opacity .3s cubic-bezier(.2,.8,.2,1),transform .3s cubic-bezier(.2,.8,.2,1);}',
     '.wc-toast::after{content:"";position:absolute;left:0;top:14%;height:72%;width:3px;border-radius:3px;background:var(--wc-arc);box-shadow:0 0 12px var(--wc-arc);}',
     '.wc-toast-in{opacity:1;transform:translateX(-50%) translateY(0) scale(1);}',
+    '.wc-gh-status{max-width:min(620px,calc(100vw - 32px));flex-wrap:wrap;}',
+    '.wc-gh-status-link{color:var(--wc-arc);font-weight:600;text-decoration:underline;}',
     // ---- buttons ----
     '.wc-btn{appearance:none;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01));color:var(--wc-ink);',
     '  border:1px solid var(--wc-line);border-radius:9px;padding:8px 13px;font:600 12px/1 var(--wc-sans);letter-spacing:.2px;',
@@ -1863,6 +2376,16 @@
       el('button', { class: 'wc-btn', text: 'Save token', title: 'Store the token locally for Push', onclick: function () { var v = tokIn.value.trim(); if (!v) { toast('Paste a token first'); return; } gset('ghToken', v); tokIn.value = ''; tokIn.placeholder = '\u2022\u2022\u2022\u2022 token saved \u2014 type to replace'; toast('GitHub token saved'); } }),
       el('button', { class: 'wc-btn', text: 'Clear token', title: 'Remove the stored token', onclick: function () { gdel('ghToken'); tokIn.value = ''; tokIn.placeholder = 'github_pat_\u2026 / ghp_\u2026'; toast('GitHub token cleared'); } })
     ]));
+    // Connection test: shows where a slow push spends its time. Timings only; safe to copy and share.
+    var speedOut = el('pre', { class: 'wc-section-note', style: { whiteSpace: 'pre-wrap', margin: '8px 0 0', display: 'none' } });
+    var speedReport = '';
+    var speedCopy = el('button', { class: 'wc-btn', text: 'Copy report', style: { display: 'none' }, onclick: function () { try { copyText(speedReport); toast('Report copied'); } catch (e) {} } });
+    var speedBtn = el('button', { class: 'wc-btn', text: 'Test connection speed', title: 'Time a few tiny GitHub requests (about 10 seconds when healthy)', onclick: function () {
+      speedBtn.disabled = true; speedOut.style.display = ''; speedCopy.style.display = 'none'; speedOut.textContent = 'Testing\u2026 keep this tab in front.';
+      ghSpeedTest(speedOut).then(function (r) { speedReport = r; speedCopy.style.display = ''; }, function () {}).then(function () { speedBtn.disabled = false; });
+    } });
+    cardTok.appendChild(row([speedBtn, speedCopy]));
+    cardTok.appendChild(speedOut);
     colB.appendChild(cardTok);
 
     var cardLint = el('div', { class: 'wc-card' });
@@ -1887,13 +2410,27 @@
 
     var cardSb = el('div', { class: 'wc-card' });
     cardSb.appendChild(head('Skybridge'));
-    cardSb.appendChild(note('Generators that import the weld-skybridge plugin can use storage, your own AI model, web fetch/search and the message bus through Weld. By default they just work, with no prompts. Turn this on only if you want a prompt the first time each generator uses each capability.'));
+    cardSb.appendChild(note('Generators that import the weld-skybridge plugin can use storage, your own AI model, web fetch/search and the message bus through Weld. By default Weld asks the first time each generator uses each capability and remembers your answer. Turn the box off to allow everything without prompts.'));
     var sbChk = el('input', { type: 'checkbox', id: 'wc-sb-ask', style: { margin: '0 8px 0 0' } });
     sbChk.checked = sbAskMode();
     sbChk.onchange = function () { gset('sbAsk', !!sbChk.checked); toast('Skybridge asks before use: ' + (sbChk.checked ? 'ON' : 'OFF (always allowed)')); };
     cardSb.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginTop: '4px' } }, [
       sbChk,
       el('label', { class: 'wc-section-note', for: 'wc-sb-ask', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Ask before a generator uses Skybridge (off = always allowed)' })
+    ]));
+    var asChk = el('input', { type: 'checkbox', id: 'wc-autosave', style: { margin: '0 8px 0 0' } });
+    asChk.checked = autoSaveOn();
+    asChk.onchange = function () { gset('autoSave', !!asChk.checked); toast('Automatic saving into Weld storage: ' + (asChk.checked ? 'ON' : 'OFF')); };
+    cardSb.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginTop: '4px' } }, [
+      asChk,
+      el('label', { class: 'wc-section-note', for: 'wc-autosave', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Save automatically into Weld storage (clipboard history, time tracking, generator saves). Off by default so storage does not fill up; manual Save, Pin, Push and Backups still work.' })
+    ]));
+    var vcChk = el('input', { type: 'checkbox', id: 'wc-vault-chats', style: { margin: '0 8px 0 0' } });
+    vcChk.checked = sbVaultChatsOn();
+    vcChk.onchange = function () { gset('vaultChats', !!vcChk.checked); toast('Generator chat copies to your backup folder: ' + (vcChk.checked ? 'ON' : 'OFF')); };
+    cardSb.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', marginTop: '4px' } }, [
+      vcChk,
+      el('label', { class: 'wc-section-note', for: 'wc-vault-chats', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Let generators send chat copies through Weld into your backup folder (Weld > Backups). Weld never keeps them itself. Off by default.' })
     ]));
     cardSb.appendChild(row([ el('button', { class: 'wc-btn', text: 'Reset permissions', title: 'Forget every saved allow/deny answer (only used when asking is on)', onclick: function () { gset('sb:perm', {}); toast('Skybridge: permissions reset'); } }) ]));
     colB.appendChild(cardSb);
@@ -2445,6 +2982,7 @@
   function callOwnAI(cfg, sys, user, cb, json, maxTokens, temperature) {
     var p = PROVIDERS[cfg.provider]; if (!p) return cb('Unknown provider', null);
     var key = (cfg.keys || {})[cfg.provider]; if (!key && !p.noKey) return cb('No API key set for ' + p.label, null);
+    var cool = aiCooldownMsg(cfg.provider); if (cool) return cb(cool, null);
     var endpoint = (cfg.endpoints || {})[cfg.provider] || p.defaultEndpoint;
     var model = (cfg.models || {})[cfg.provider] || p.defaultModel;
     var bodyStr = p.body(model, sys, aiUserForProvider(cfg.provider, user), json);
@@ -2452,7 +2990,7 @@
     return GM_xmlhttpRequest({
       method: 'POST', url: p.url(model, key, endpoint), headers: p.headers(key), data: bodyStr, timeout: 120000,
       onload: function (res) {
-        if (res.status && (res.status < 200 || res.status >= 300)) return cb(aiErr(res.status, res.responseText, cfg.provider), null);
+        if (res.status && (res.status < 200 || res.status >= 300)) { aiNoteRateLimit(cfg.provider, res.status, res); return cb(aiErr(res.status, res.responseText, cfg.provider), null); }
         try { var j = JSON.parse(res.responseText); var txt = p.extract(j, json);
           var finish = j && j.choices && j.choices[0] && j.choices[0].finish_reason;
           if (finish === 'length' || (j && (j.stop_reason === 'max_tokens' || j.done_reason === 'length')) ||
@@ -2467,6 +3005,22 @@
       onerror: function (res) { cb(aiErr((res && res.status) || 0, (res && res.responseText) || '', cfg.provider), null); },
       ontimeout: function () { cb((cfg.provider === 'ollama' || cfg.provider === 'localai') ? 'Timed out — a local model can be slow on its first (cold) call; try again once it is loaded.' : 'Timed out contacting ' + p.label, null); }
     });
+  }
+  // Provider back-off: after a 429, every own-model call (workspace, bridge, drafts) waits out the provider's
+  // retry delay instead of piling more requests onto a key that is already throttled.
+  var AI_COOL = { until: 0, provider: '' };
+  function aiCooldownMsg(provider) {
+    var left = AI_COOL.until - Date.now();
+    if (left <= 0 || AI_COOL.provider !== provider) return '';
+    return 'Rate limited by the provider (HTTP 429). Weld is pausing calls to your model for ' + Math.ceil(left / 1000) + 's.';
+  }
+  function aiNoteRateLimit(provider, status, res) {
+    if (status !== 429) return;
+    var secs = 60;
+    var ra = /retry-after:\s*(\d+)/i.exec(String((res && res.responseHeaders) || ''));
+    var rd = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(String((res && res.responseText) || ''));   // Gemini sends it in the body
+    if (ra) secs = +ra[1]; else if (rd) secs = Math.ceil(+rd[1]);
+    AI_COOL.until = Date.now() + Math.max(15, Math.min(600, secs)) * 1000; AI_COOL.provider = provider;
   }
 
   // Big context goes BEFORE the request, split by this marker. Anthropic gets it as a cacheable block (repeat
@@ -2538,6 +3092,7 @@
     var p = PROVIDERS[prov]; if (!p) return cb('Unknown provider', null);
     var key = (cfg.keys || {})[prov]; if (!key && !p.noKey) return cb('No API key set for ' + p.label, null);
     var st = STREAM[prov]; if (!st) return callOwnAI(cfg, sys, user, cb, json, maxTokens, temperature);   // no stream cfg (e.g. Ollama NDJSON) -> single-shot
+    var cool = aiCooldownMsg(prov); if (cool) return cb(cool, null);
     var endpoint = (cfg.endpoints || {})[prov] || p.defaultEndpoint;
     var model = (cfg.models || {})[prov] || p.defaultModel;
     var bodyStr = st.body(model, sys, aiUserForProvider(prov, user), json);
@@ -2571,7 +3126,7 @@
         method: 'POST', url: st.url(model, key, endpoint), headers: p.headers(key), data: bodyStr,
         timeout: 120000,
         onprogress: function (res) { try { pump(res.responseText); } catch (e) {} },
-        onload: function (res) { if (res.status && (res.status < 200 || res.status >= 300)) return finish(aiErr(res.status, res.responseText, prov)); try { pump(res.responseText); } catch (e) {} finish(null); },
+        onload: function (res) { if (res.status && (res.status < 200 || res.status >= 300)) { aiNoteRateLimit(prov, res.status, res); return finish(aiErr(res.status, res.responseText, prov)); } try { pump(res.responseText); } catch (e) {} finish(null); },
         onerror: function (res) { finish(aiErr((res && res.status) || 0, (res && res.responseText) || '', prov)); },
         ontimeout: function () { finish((prov === 'ollama' || prov === 'localai') ? 'Timed out — a local model can be slow on its first (cold) call.' : 'timeout'); }
       });
@@ -3018,7 +3573,7 @@
   var SB_WIN = (function () {
     try { return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; } catch (e) { return window; }
   })();
-  var SB_BUILD = 'sb-anchor/2026-10-06.1';   // bump on every change; printed at mount so a stale userscript is obvious
+  var SB_BUILD = 'sb-anchor/2026-10-11.1';   // bump on every change; printed at mount so a stale userscript is obvious
   // verbose-logging toggle: ?sbdebug in the URL, or window.WELD_SKYBRIDGE_DEBUG = true
   var SB_DEBUG = false;
   try {
@@ -3043,10 +3598,10 @@
     var all = sbPerms(); if (!all[gen]) all[gen] = {}; all[gen][cap] = !!allowed; gset('sb:perm', all);
   }
   // ask the user once per (generator, capability). Returns a Promise<bool>.
-  // Default: no prompts. The user installed and runs this script, so every capability is allowed and any
-  // stored "no" is ignored (a suppressed confirm() used to be saved as a permanent denial). The opt-in
-  // 'sbAsk' setting restores the per-generator prompt for people who want it.
-  function sbAskMode() { return gget('sbAsk', false) === true; }
+  // Default: ask once per (generator, capability) and remember the answer; a stored "no" is honoured.
+  // A prompt the browser suppressed (instant "no") refuses that call but is not saved as a denial.
+  // Turning the 'sbAsk' setting off is an explicit opt-out that allows every capability without prompting.
+  function sbAskMode() { return gget('sbAsk', true) !== false; }
   function sbConsent(gen, cap) {
     return new Promise(function (resolve) {
       if (!sbAskMode()) return resolve(true);
@@ -3068,6 +3623,8 @@
 
   // per-generator storage namespace, so one generator can't read another's keys
   function sbStoreKey(gen, key) { return 'sbk:' + gen + ':' + key; }
+  // Generator chat copies (weld:genvault:<gen>/chat/*) are refused unless this is turned on (Settings > Skybridge); when on they go to the backup folder.
+  function sbVaultChatsOn() { return gget('vaultChats', false) === true; }
 
   function sbReply(source, origin, nonce, result) {
     try { source.postMessage({ channel: SB, type: 'reply', nonce: nonce, result: result }, origin && origin !== 'null' ? origin : '*'); } catch (e) {}
@@ -3076,11 +3633,25 @@
   function sbServiceStorage(gen, payload) {
     return new Promise(function (resolve) {
       var op = payload && payload.op;
+      // Vault keys (weld:genvault:<gen>/snapshot, chat/index, chat/snap-*) pass straight through to the backup folder
+      // chosen in Weld > Backups and are never written to Weld storage. Older copies still in storage remain readable.
+      var BC = window.WeldBackupCore, pt = window.weldBackup && window.weldBackup.vault;
+      var sbPk = (typeof payload.key === 'string' && payload.key.indexOf('weld:genvault:') === 0 && BC && BC.parseKey) ? BC.parseKey(payload.key) : null;
+      var sbVault = !!(sbPk && sbPk.gen === gen && (sbPk.kind === 'snapshot' || sbPk.kind === 'chat-index' || sbPk.kind === 'chat-copy'));
       if (op === 'get') {
+        if (sbVault && pt && pt.ready()) return pt.get(gen, payload.key).then(function (v) { resolve({ ok: true, value: v === undefined ? gget(sbStoreKey(gen, payload.key), null) : v }); }, function () { resolve({ ok: true, value: gget(sbStoreKey(gen, payload.key), null) }); });
         resolve({ ok: true, value: gget(sbStoreKey(gen, payload.key), null) });
       } else if (op === 'set') {
-        var BC = window.WeldBackupCore, chk = (BC && BC.checkStoreWrite) ? BC.checkStoreWrite(payload.key, payload.value) : { ok: true };   // refuses a vault record whose generator field names another owner
+        if (sbPk && (sbPk.kind === 'chat-index' || sbPk.kind === 'chat-copy') && !sbVaultChatsOn()) return resolve({ ok: false, code: 'vault-chats-off', reason: 'sending chat copies to the backup folder is off (Settings > Skybridge)' });
+        var chk = (BC && BC.checkStoreWrite) ? BC.checkStoreWrite(payload.key, payload.value) : { ok: true };   // refuses a vault record whose generator field names another owner
         if (!chk.ok) return resolve({ ok: false, code: chk.reason, reason: chk.reason });
+        var sbSize = 0; try { sbSize = JSON.stringify(payload.value === undefined ? null : payload.value).length; } catch (e) {}
+        if (sbSize > 2 * 1024 * 1024) return resolve({ ok: false, code: 'too-large', reason: 'value-over-2mb' });   // documented per-value limit
+        if (sbVault) {
+          if (!pt || !pt.ready()) return resolve({ ok: false, code: 'no-backup-folder', reason: pt ? pt.noFolder : 'Weld keeps no backups; choose a backup folder in Weld > Backups' });
+          return pt.set(gen, payload.key, payload.value).then(resolve, function () { resolve({ ok: false, code: 'folder-write-failed', reason: 'could not write to the backup folder' }); });
+        }
+        if (!autoSaveOn()) return resolve({ ok: false, code: 'autosave-off', reason: 'automatic saving into Weld storage is off (Settings > Skybridge)' });
         resolve(gset(sbStoreKey(gen, payload.key), payload.value) ? { ok: true } : { ok: false, code: 'quota', reason: 'storage-full' });
       } else if (op === 'list') {
         // gset() stores every key under the NS prefix (NS + ':' + key), so match the real stored name.
@@ -3094,6 +3665,9 @@
             if (typeof k === 'string' && k.indexOf(prefix) === 0) out.push(k.slice(base.length));
           }
         } catch (e) {}
+        var rk = (typeof folderFiles === 'function') ? folderFiles() : null; if (rk && rk.ready()) rk.keys().forEach(function (k) { var sp = sbStoreKey(gen, ''); if (k.indexOf(sp) === 0 && k.slice(sp.length).indexOf(String(payload.prefix || '')) === 0) out.push(k.slice(sp.length)); });
+        var lp = String(payload.prefix || ''), vb = 'weld:genvault:' + gen + '/';   // folder copies of this generator's vault keys join the list when the prefix can reach them
+        if (pt && pt.ready() && (vb.indexOf(lp) === 0 || lp.indexOf(vb) === 0)) return pt.list(gen, lp).then(function (keys) { keys.forEach(function (k) { if (out.indexOf(k) === -1) out.push(k); }); resolve({ ok: true, value: out }); }, function () { resolve({ ok: true, value: out }); });
         resolve({ ok: true, value: out });
       } else {
         resolve({ ok: false, reason: 'bad-op' });
@@ -3111,9 +3685,37 @@
     if (Date.now() - sbNoModelToastAt > 60000) { sbNoModelToastAt = Date.now(); try { toast('Skybridge: a generator asked for your AI model. ' + hint, 9000); } catch (e) {} }
     return { ok: false, reason: reason, code: 'no-own-model', hint: hint };   // reason strings are kept: existing generators match on them
   }
+  // Generators can call sb.ai in loops (agent swarms, retries, a probe on every reconnect). Run at most 2 bridge
+  // calls at once, queue up to 8 more, and allow 10 a minute to a cloud provider (local models skip the minute cap).
+  var SB_AI_LIMIT = { active: 0, max: 2, queue: [], maxQueue: 8, perMinute: 10, recent: [], toastAt: 0 };
+  function sbAiLimited(why) {
+    var L = SB_AI_LIMIT;
+    if (Date.now() - L.toastAt > 60000) { L.toastAt = Date.now(); try { toast('Skybridge: a generator is calling your AI model too fast (' + why + '). Extra calls were refused to protect your API key.', 9000); } catch (e) {} }
+    return { ok: false, code: 'rate-limited', reason: 'rate-limited' };
+  }
   function sbServiceAI(payload, emit) {
+    var L = SB_AI_LIMIT, cfg = aiConfig(), now = Date.now();
+    if (!cfg || cfg.provider === 'builtin' || !cfg.provider) return sbServiceAICall(cfg, payload, emit);
+    var local = cfg.provider === 'ollama' || cfg.provider === 'localai';
+    L.recent = L.recent.filter(function (t) { return now - t < 60000; });
+    if (!local && L.recent.length >= L.perMinute) return Promise.resolve(sbAiLimited(L.perMinute + ' per minute'));
+    if (L.active >= L.max && L.queue.length >= L.maxQueue) return Promise.resolve(sbAiLimited('too many at once'));
+    if (!local) L.recent.push(now);
     return new Promise(function (resolve) {
-      var cfg = aiConfig();
+      function start() {
+        L.active++;
+        var released = false;
+        function release(r) { if (released) return; released = true; L.active--; resolve(r); var next = L.queue.shift(); if (next) next(); }
+        // A throw, a rejection or a request that never calls back (aborted) must still free the slot.
+        setTimeout(function () { release({ ok: false, code: 'timeout', reason: 'timeout' }); }, 150000);
+        var call; try { call = sbServiceAICall(aiConfig(), payload, emit); } catch (e) { call = Promise.reject(e); }
+        call.then(release, function (e) { release({ ok: false, code: 'error', reason: String((e && e.message) || e).slice(0, 120) }); });
+      }
+      if (L.active < L.max) start(); else L.queue.push(start);
+    });
+  }
+  function sbServiceAICall(cfg, payload, emit) {
+    return new Promise(function (resolve) {
       if (!cfg || cfg.provider === 'builtin' || !cfg.provider) {
         return resolve(sbNoModel('no-own-model'));   // user hasn't set up their own model
       }
@@ -3840,6 +4442,7 @@
   // Narrow adapter shared by the Studio. Credentials stay inside aiConfig.
   window.weldStudioHost = {
     get: gget, set: gset, el: el, toast: toast, download: downloadBlobText,
+    storage: function () { var ff = folderFiles(); return 'Projects: ' + (ff ? ff.status() : 'saved in your backup folder (Weld > Backups)'); },
     // Binary download (PNG character cards). Mirrors downloadBlobText without text coercion.
     downloadBytes: function (filename, bytes, mime) {
       try {
@@ -3874,6 +4477,18 @@
   }
   window.weldProjectHost = {
     get: gget, set: gset, el: el, toast: toast, copy: copyText,
+    // GitHub access for the repo store (src/backup-ui.js): config and a promise-returning API call. The token only goes to api.github.com.
+    gh: {
+      config: function () { var c = ghCfg(); return { owner: c.owner, repo: c.repo, branch: c.branch, token: ghToken() }; },
+      api: function (method, path, body) { return new Promise(function (resolve) { ghApi(method, path, ghToken(), body || null, function (err, status, json) { resolve(err ? { status: 0, json: null, error: String(err.message || err) } : { status: status, json: json }); }); }); }
+    },
+    // Older Studio/Scrapbook copies still in Weld storage, for the one-time move into the backup folder (src/backup-ui.js).
+    legacy: {
+      owns: folderKey,
+      keys: function () { var out = []; try { (typeof GM_listValues === 'function' ? GM_listValues() : []).forEach(function (k) { if (typeof k === 'string' && k.indexOf(NS + ':') === 0) out.push(k.slice(NS.length + 1)); }); } catch (e) {} return out; },
+      get: graw,
+      del: function (key) { if (folderKey(key)) { try { GM_deleteValue(NS + ':' + key); } catch (e) {} } }
+    },
     slug: function () { return genName(); },
     isEdit: function () { return isEditMode(); },
     request: gmRequest,
@@ -3927,6 +4542,10 @@
       api: function (method, path, body, cb) { var t = ghToken(); if (!t) return cb(new Error('No GitHub token saved'), 0, null); ghApi(method, path, t, body, cb); },
       fetch: function (url, cb) { ghFetch(url, cb); }
     },
+    backup: {
+      collect: function (name, paths, live, quiet) { return ghCollectBackup(name, paths.dsl, paths.html, live.dsl, live.html || '', quiet, true); },
+      crypto: window.crypto
+    },
     // ---- used by the Backups tab: raw, exact-key access to what generators stored through Skybridge storage ----
     vault: (function () {
       var SBK = NS + ':sbk:';
@@ -3953,7 +4572,7 @@
           if (typeof gm !== 'string' || gm.indexOf(SBK) !== 0) return { ok: false, reason: 'bad-key' };
           try { GM_deleteValue(gm); return { ok: true }; } catch (e) { return { ok: false, reason: 'delete-failed' }; }
         },
-        // Used only by Backups > Load from folder, after the user reviews the plan. Same owner check as a generator write.
+        // Used only by Backups > Cleanup duplicates, to drop removed copies from an existing chat index. Same owner check as a generator write.
         write: function (caller, key, value) {
           var BC = window.WeldBackupCore;
           if (typeof caller !== 'string' || !/^[a-z0-9-]{1,64}$/.test(caller) || typeof key !== 'string' || key.indexOf('weld:genvault:') !== 0) return { ok: false, reason: 'bad-key' };
@@ -7521,7 +8140,7 @@
  *                     Scrapbook search box.
  *   🎲 Random favorite — jump to a random starred generator.
  *
- * Storage (all GM, all local): 'scrapbook' entries, 'genNotes' map,
+ * Storage: 'scrapbook' entries (a file in the backup folder; see folderKey), 'genNotes' map (GM),
  * 'libCfg' { nightlight }, 'guardLastSweep' timestamp, 'guardLastNag' day-stamp.
  * Exposes window.weldLibrary = { renderTab, saveCurrentOutput, speak, stopSpeak }.
  */
@@ -8001,6 +8620,9 @@
         persistNote.textContent = yes ? '\u2713 This origin\u2019s storage is marked persistent (the browser won\u2019t auto-evict it).' : '\u26a0 Storage is NOT marked persistent \u2014 the browser may evict it under disk pressure. Backups matter.';
       });
       bd.appendChild(persistNote);
+      if (navigator.storage.persist) bd.appendChild(el('div', { class: 'wlib-bar' }, [el('button', { class: 'wlib-mini', text: 'Ask browser to keep storage persistent', onclick: function () {
+        navigator.storage.persist().then(function (yes) { persistNote.textContent = yes ? '\u2713 This origin\u2019s storage is marked persistent (the browser won\u2019t auto-evict it).' : '\u26a0 The browser declined (it usually grants this for sites you use often or have bookmarked).'; toast(yes ? 'Storage marked persistent' : 'Browser declined'); }, function () { toast('Could not ask the browser'); });
+      } })]));
     }
     bd.appendChild(el('div', { class: 'wlib-bar', style: { marginTop: '8px' } }, [
       el('button', { class: 'wlib-mini', text: '\u29c9 Run sweep backup now', onclick: function () {
@@ -8624,6 +9246,7 @@
 
   /* ---- clipboard history --------------------------------------------------- */
   function recordCopy(text, slug) {
+    if (!window.weldCompanion.autoSaveOn()) return;   // automatic clipboard history is opt-in
     var list = gget('clipRing', []) || [];
     var next = core.clipPush(list, text, slug || currentSlug() || 'unknown', Date.now());
     if (next !== list) gset('clipRing', next);
@@ -8802,13 +9425,14 @@
   var HEARTBEAT = 30; // seconds
   setInterval(function () {
     try {
+      if (!window.weldCompanion.autoSaveOn()) return;   // automatic time tracking is opt-in
       if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
       var slug = currentSlug(); if (!slug) return;
       gset('timeTrack', core.trackAdd(gget('timeTrack', {}) || {}, slug, HEARTBEAT));
     } catch (e) {}
   }, HEARTBEAT * 1000);
   // prune old entries once per boot
-  setTimeout(function () { try { gset('timeTrack', core.trackPrune(gget('timeTrack', {}) || {}, 90)); } catch (e) {} }, 8000);
+  setTimeout(function () { try { if (!window.weldCompanion.autoSaveOn()) return; gset('timeTrack', core.trackPrune(gget('timeTrack', {}) || {}, 90)); } catch (e) {} }, 8000);
 
   function renderTimeCard(bd, setCount) {
     var agg = core.trackAggregate(gget('timeTrack', {}) || {}, new Date());
@@ -8958,9 +9582,15 @@
     if (local.endpoints) c.endpoints = local.endpoints;
     return c;
   }
+  // State files also carry the Studio/Scrapbook keys that now live in the backup folder.
+  function portableKeys() {
+    var keys = stateKeys(), ff = folderFiles();
+    if (ff) ff.keys().forEach(function (k) { if (keys.indexOf(k) === -1) keys.push(k); });
+    return keys;
+  }
   function exportState() {
     var data = {};
-    stateKeys().forEach(function (k) { if (stateIsSecret(k)) return; var v = gget(k, undefined); if (v !== undefined) data[k] = stateScrubOut(k, v); });
+    portableKeys().forEach(function (k) { if (stateIsSecret(k)) return; var v = gget(k, undefined); if (v !== undefined) data[k] = stateScrubOut(k, v); });
     var env = { meta: { type: 'weld-companion-state-v1', t: Date.now(), keys: Object.keys(data).length }, data: data };
     download('weld-companion-state.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(env, null, 1), 'application/json');
     toast('\u2713 Exported ' + env.meta.keys + ' keys');
@@ -8971,13 +9601,50 @@
       try { env = JSON.parse(txt); } catch (e) { toast('Not a JSON file'); return; }
       if (!env || !env.meta || env.meta.type !== 'weld-companion-state-v1' || !env.data) { toast('Not a Weld Companion state file'); return; }
       var current = {}, incoming = {};
-      stateKeys().forEach(function (k) { if (stateIsSecret(k)) return; var v = gget(k, undefined); if (v !== undefined) current[k] = v; });
+      portableKeys().forEach(function (k) { if (stateIsSecret(k)) return; var v = gget(k, undefined); if (v !== undefined) current[k] = v; });
       Object.keys(env.data).forEach(function (k) { if (!stateIsSecret(k)) incoming[k] = stateScrubIn(k, env.data[k], current[k]); });
       var merged = core.stateMerge(current, incoming, mode);
       Object.keys(merged).forEach(function (k) { gset(k, merged[k]); });
       toast('\u2713 Imported ' + Object.keys(env.data).length + ' keys (' + mode + ') \u2014 reopen the drawer to see everything');
       if (done) done();
     });
+  }
+  // Storage report / clear. Credentials and settings that hold them are never deleted in bulk and never put in a file.
+  var STATE_KEEP_ON_CLEAR = STATE_SECRET_KEYS.concat(['ai']);
+  function stateReport() {
+    var rows = [], total = 0;
+    stateKeys().forEach(function (k) {
+      var raw; try { raw = GM_getValue(NS + ':' + k, ''); } catch (e) { return; }
+      var n = typeof raw === 'string' ? raw.length : 0; total += n;
+      rows.push({ key: k, chars: n, secret: stateIsSecret(k) });
+    });
+    rows.sort(function (a, b) { return b.chars - a.chars; });
+    return { rows: rows, total: total };
+  }
+  function stateKB(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  function downloadStateReport() {
+    var r = stateReport();
+    var out = { meta: { type: 'weld-companion-storage-report-v1', t: Date.now(), keys: r.rows.length, totalChars: r.total }, keys: r.rows.map(function (x) { return { key: x.key, chars: x.chars }; }) };
+    download('weld-companion-storage-report.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(out, null, 1), 'application/json');
+    toast('✓ Storage report: ' + r.rows.length + ' keys, ' + stateKB(r.total));
+  }
+  function clearStateKeys(keys, label) {
+    var safe = keys.filter(function (k) { return STATE_KEEP_ON_CLEAR.indexOf(k) === -1; });
+    if (!safe.length) { toast('Nothing to clear'); return; }
+    var copy = {}; safe.forEach(function (k) { var v = gget(k, undefined); if (v !== undefined) copy[k] = stateScrubOut(k, v); });
+    download('weld-companion-cleared.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify({ meta: { type: 'weld-companion-state-v1', t: Date.now(), keys: Object.keys(copy).length }, data: copy }, null, 1), 'application/json');
+    setTimeout(function () { safe.forEach(gdel); toast('✓ Cleared ' + safe.length + ' key' + (safe.length === 1 ? '' : 's') + ' — reload the page'); }, 600);
+  }
+  function renderStorageTools(bd) {
+    var r = stateReport();
+    bd.appendChild(el('div', { class: 'wlib-note', style: { margin: '10px 0 6px' }, text: 'Storage: ' + r.rows.length + ' keys, ' + stateKB(r.total) + '. Largest: ' + (r.rows.slice(0, 4).map(function (x) { return x.key + ' ' + stateKB(x.chars); }).join(', ') || 'none') + '.' }));
+    var pick = el('select', { class: 'wlib-field', style: { flex: '1 1 160px' } }, r.rows.filter(function (x) { return STATE_KEEP_ON_CLEAR.indexOf(x.key) === -1; }).map(function (x) { return el('option', { value: x.key, text: x.key + ' (' + stateKB(x.chars) + ')' }); }));
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [
+      el('button', { class: 'wlib-mini', text: '⤓ Download storage report (sizes only)', onclick: downloadStateReport }),
+      el('button', { class: 'wlib-mini', text: '🗑 Clear all Weld data', onclick: function () { clearStateKeys(stateKeys(), 'all'); } })
+    ]));
+    bd.appendChild(el('div', { class: 'wlib-bar' }, [pick,
+      el('button', { class: 'wlib-mini', text: '🗑 Clear this key', onclick: function () { if (pick.value) clearStateKeys([pick.value], 'one'); } })]));
   }
   function renderPortabilityCard(bd) {
     bd.appendChild(el('div', { class: 'wlib-note', style: { marginBottom: '6px' }, text: 'Everything the Companion remembers \u2014 Scrapbook, clips, capsules, ratings, time log, notes, rules \u2014 in one portable file. Import on another browser to carry it over. \u201cMerge\u201d unions lists and sums time; \u201creplace\u201d makes the file win wholesale per key.' }));
@@ -8992,6 +9659,7 @@
       el('button', { class: 'wlib-mini', text: '\u2912 Import\u2026', onclick: function () { fileIn.click(); } }),
       fileIn
     ]));
+    try { renderStorageTools(bd); } catch (e) {}
   }
 
   /* ---- cross-everything search -------------------------------------------------------- */
@@ -10113,6 +10781,20 @@
       return { id: id(), text: v.trim() };
     });
   }
+  function memoriesText(s) {
+    const lines = ['# Memories: ' + text(s.name), '', '## Approved (' + s.memories.length + ')', ''];
+    s.memories.forEach(m => lines.push('- ' + text(m.text).replace(/\r?\n/g, '\n  ')));
+    if (s.proposals.length) {
+      lines.push('', '## Pending proposals, not used by the model (' + s.proposals.length + ')', '');
+      s.proposals.forEach(m => lines.push('- ' + text(m.text).replace(/\r?\n/g, '\n  ')));
+    }
+    return lines.join('\n') + '\n';
+  }
+  function clearMemories(s) {
+    const cleared = { memories: s.memories.length, proposals: s.proposals.length };
+    s.memories = []; s.proposals = [];
+    return cleared;
+  }
   function approve(s, proposalId, edited) {
     if (!s.proposals.some(m => m.id === proposalId)) throw new Error('Memory proposal no longer exists.');
     if (!text(edited).trim() || edited.length > 2000) throw new Error('Memory must contain 1–2000 characters.');
@@ -10518,7 +11200,7 @@
   }
 
   return { VERSION, templates, id, copy, project, character, loreEntry, session, validate, migrate, visible, audit, context, lorePreview, recordLore,
-    parseMemories, approve, addVariant, pickVariant, setVariantText, expand, unresolvedMacros, applyRegex, riskyPattern, bundle, importBundle,
+    parseMemories, memoriesText, clearMemories, approve, addVariant, pickVariant, setVariantText, expand, unresolvedMacros, applyRegex, riskyPattern, bundle, importBundle,
     characterFromAICC, characterToAICC, toV2Card, fromCard, toV2Book, fromV2Book, toWorldInfo, fromWorldInfo,
     pngReadCard, pngWriteCard, crc32, bytesToB64, b64ToBytes, toChatJsonl, fromChatJsonl, transcriptMarkdown, worldBible, stats, assist, sample, estTokens };
 });
@@ -11802,6 +12484,14 @@
             s.proposals.push(...suggestions); if (!save()) throw new Error('Memory proposals were not saved.');
           });
       })]);
+    row(parent, [button('Download memories (.md)', () => {
+      if (!s.memories.length && !s.proposals.length) throw new Error('This playthrough has no memories to download.');
+      download(s.name + '.memories.md', C.memoriesText(s));
+    }), button('Clear all memories', () => {
+      if (!s.memories.length && !s.proposals.length) throw new Error('This playthrough has no memories to clear.');
+      if (!window.confirm('Clear ' + s.memories.length + ' approved memories and ' + s.proposals.length + ' pending proposals from this playthrough? Download them first if you want a copy. Messages and world canon are not touched.')) return;
+      C.clearMemories(s); save(); draw();
+    })]);
     s.proposals.forEach(m => {
       area(parent, 'Proposed memory (not yet used)', m.text, value => { m.text = value; save(); });
       row(parent, [button('Approve', () => { C.approve(s, m.id, m.text); save(); draw(); }),
@@ -11982,7 +12672,7 @@
   }
   function welcome(body) {
     heading(body, 'Welcome to Studio');
-    note(body, 'Build characters, worlds and chatbot projects, test them with your own model, and move them to and from Tavern-style cards, lorebooks and chats. Everything is stored in this browser.');
+    note(body, 'Build characters, worlds and chatbot projects, test them with your own model, and move them to and from Tavern-style cards, lorebooks and chats. Projects are saved as files in your backup folder (Weld > Backups), never in Weld itself.');
     row(body, [button('Open the sample world', () => adopt(C.sample())), ...(Dad ? [importButton()] : []),
       button('Start from a Tavern card (PNG or JSON)', () => pickFile('.png,.json,image/png,application/json', 25000000, file => importCard(file).then(card => {
         const res = C.fromCard(card), np = C.project(res.character.name + ' world', 'character');
@@ -11994,7 +12684,7 @@
     parent.innerHTML = '';
     const body = E('div', { id: 'wc-studio-body' }); parent.appendChild(body);
     heading(body, 'Character & World Studio');
-    note(body, 'Local project storage · Model: ' + H.model());
+    note(body, (typeof H.storage === 'function' ? H.storage() : 'Local project storage') + ' · Model: ' + H.model());
     if (status) note(body, status);
     if (busy) row(body, [button('Stop generation', stop, true)]);
     const index = H.get(INDEX, []);
@@ -13134,10 +13824,15 @@
   function notice(message) { S.status = message; H.toast(message, 6000); }
   function draw() { const host = document.getElementById('wc-project-body'); if (host && host.isConnected && host.parentNode) render(host.parentNode); }
 
-  // ----------------------------------------------------------- local database
+  // ----------------------------------------------------------- session store
+  // Weld keeps no data of its own: generator copies and snapshots live in memory for this tab only (every store call
+  // below falls back to `memory` when there is no database). PERSIST stays false; Backups > Purge deletes the old
+  // weldCompanionProjects database that earlier versions filled.
+  const PERSIST = false;
   let dbPromise = null; const memory = { projects: new Map(), history: [] };
   function db() {
     if (dbPromise) return dbPromise;
+    if (!PERSIST) return (dbPromise = Promise.resolve(null));
     dbPromise = new Promise(resolve => {
       try {
         const open = indexedDB.open(DB_NAME, 1);
@@ -13560,7 +14255,7 @@
   function historySection(parent) {
     const list = S.history;
     if (!list) return note(parent, 'Loading…');
-    note(parent, 'Every time you analyze a generator and its source differs from the last copy, Weld keeps a snapshot here (newest ' + 20 + '). Snapshots stay in this browser.');
+    note(parent, 'Every time you analyze a generator and its source differs from the last copy, Weld keeps a snapshot here (newest ' + 20 + ') until you reload or close this tab. Nothing is stored; use Download to keep one.');
     if (S.diff) return diffView(parent);
     if (!list.length) return note(parent, 'No snapshots yet.');
     list.forEach((h, i) => {
@@ -13577,7 +14272,6 @@
       ]));
     });
     row(parent, [btn('Delete all snapshots', () => {
-      if (!window.confirm('Delete every saved snapshot of "' + S.slug + '" from this browser?')) return;
       store.clearSnapshots(S.slug).then(() => { S.history = []; draw(); });
     }, { mini: true })]);
   }
@@ -13633,9 +14327,8 @@
     input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { S.search = input.value; runSearch(); } });
     row(parent, [input, btn('Search', () => { S.search = input.value; runSearch(); }, { mini: true })]);
     if (!S.results) {
-      note(parent, 'Searches the lists and HTML panels saved in this browser by the Project tab.');
+      note(parent, 'Searches the lists and HTML panels of the generators you analyzed in this tab.');
       row(parent, [btn('Forget all saved generators', () => {
-        if (!window.confirm('Delete every generator copy the Project tab saved in this browser? Snapshots are kept.')) return;
         store.clearProjects().then(() => { notice('Saved copies deleted.'); draw(); });
       }, { mini: true })]);
       return;
@@ -14236,8 +14929,9 @@
   const GM_KEYS = { bridge: 'bridge', folder: 'folderSync', agents: 'agentHandoff', markers: 'devMarkers', baseline: 'baseline:' };
   const MARK_COLORS = { error: '#e5534b', warn: '#d29922', info: '#768390' };
 
-  const F = { supported: false, handle: null, name: '', perm: 'none', cfg: { autoMirror: false, watch: true, dslPath: '', htmlPath: '' },
-    plan: null, slug: '', error: '', busy: false, lastCheck: 0, notified: '', seeding: '', folders: null, bootDone: false };
+  const F = { supported: false, handle: null, name: '', perm: 'none', cfg: { autoMirror: false, watch: true, keepAccess: true, dslPath: '', htmlPath: '' },
+    plan: null, slug: '', error: '', busy: false, lastCheck: 0, notified: '', seeding: '', folders: null, bootDone: false, revision: null,
+    projectBusy: false, projectCheck: 0, projectSlug: '', projectStatus: '', projectError: '', projectCancel: 0 };
   const B = { cfg: { url: 'http://127.0.0.1:8765', token: '', auto: false, allowSample: false, allowPropose: true }, state: 'off', error: '', running: false, calls: 0, last: '', backoff: 0,
     cid: 'w' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36) };
   const S = { proposals: [], seq: 0, view: null, markers: false, markInfo: false, refactor: { name: '', to: '', usages: null, preview: null, error: '' },
@@ -14274,8 +14968,27 @@
 
   // ------------------------------------------------------------- folder sync
   const win = () => { try { return H.pageWindow ? H.pageWindow() : window; } catch (e) { return window; } };
-  function folderCfg() { const c = H.get(GM_KEYS.folder, {}) || {}; F.cfg = Object.assign({ autoMirror: false, watch: true, dslPath: '', htmlPath: '' }, c); return F.cfg; }
+  function folderCfg() { const c = H.get(GM_KEYS.folder, {}) || {}; F.cfg = Object.assign({ autoMirror: false, watch: true, keepAccess: true, dslPath: '', htmlPath: '', projectBackups: {}, showPanel: false }, c); F.cfg.autoMirror = false; F.cfg.projectBackups = {}; return F.cfg; }   // 1.90.0: the master folder is manual export only; Weld's data lives in the GitHub repo
   function saveFolderCfg() { H.set(GM_KEYS.folder, F.cfg); }
+  function folderBaseKey(slug) { return 'base:' + (F.revision ? F.revision + ':' : '') + slug; }
+  async function refreshMasterFolder() {
+    folderCfg();
+    const revision = F.cfg.revision || '';
+    if (F.revision === revision) return;
+    // Reuse the existing handle store so already-connected folders survive this update.
+    const h = await kvGet('handle');
+    F.handle = h && typeof h.queryPermission === 'function' ? h : null;
+    F.name = F.handle ? F.handle.name : '';
+    F.perm = F.handle ? await permission(F.handle, false) : 'none';
+    F.revision = revision; F.plan = null; F.folders = null; F.baseKey = ''; F.notified = ''; F.error = '';
+    if (S.view && S.view.kind === 'folder') S.view = null;
+    armRegrant(); draw();
+  }
+  function pauseFolderWrites() {
+    F.projectCancel++;
+    folderCfg(); F.cfg.autoMirror = false; F.cfg.projectBackups = {}; saveFolderCfg();
+    notice('Automatic Dev folder writes paused for all generators and open tabs.'); draw();
+  }
   async function dirFor(root, rel, create) {
     const segs = rel.split('/'), name = segs.pop(); let dir = root;
     for (const s of segs) dir = await dir.getDirectoryHandle(s, { create });
@@ -14293,15 +15006,21 @@
   }
   const paths = slug => D.folderPaths(slug, F.cfg);
   async function readPair(slug) {
-    const p = paths(slug), a = await fsRead(F.handle, p.dsl);
+    await refreshMasterFolder();
+    if (!F.handle || F.perm !== 'granted') return null;
+    const handle = F.handle, p = paths(slug), a = await fsRead(handle, p.dsl);
     if (!a) return null;
-    const b = await fsRead(F.handle, p.html);
+    const b = await fsRead(handle, p.html);
     return { dsl: norm(a.text), html: b ? norm(b.text) : null, mtime: Math.max(a.mtime, b ? b.mtime : 0) };
   }
-  async function writePair(slug, dsl, html) {
-    const p = paths(slug);
-    await fsWrite(F.handle, p.dsl, dsl);
-    if (html != null) await fsWrite(F.handle, p.html, html);
+  async function writePair(slug, dsl, html, expectedRevision) {
+    await refreshMasterFolder();
+    if (expectedRevision !== undefined && (F.revision !== expectedRevision || !F.cfg.autoMirror)) return false;
+    if (!F.handle || F.perm !== 'granted') throw new Error('Choose a master Dev folder and allow access first.');
+    const handle = F.handle, p = paths(slug);
+    await fsWrite(handle, p.dsl, dsl);
+    if (html != null) await fsWrite(handle, p.html, html);
+    return true;
   }
   async function permission(handle, ask) {
     try {
@@ -14315,12 +15034,38 @@
     try {
       const h = await win().showDirectoryPicker({ id: 'weld-folder-sync', mode: 'readwrite' });
       F.handle = h; F.name = h.name; F.perm = await permission(h, true); F.error = '';
-      await kvSet('handle', h); folderCfg(); F.plan = null; F.folders = null;
-      notice(F.perm === 'granted' ? 'Folder connected: ' + h.name : 'Folder chosen, but write permission was not granted.');
+      await kvSet('handle', h); folderCfg();
+      F.cfg.revision = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+      F.cfg.autoMirror = false; F.cfg.projectBackups = {}; saveFolderCfg(); F.revision = null;
+      await refreshMasterFolder();
+      notice(F.perm === 'granted' ? 'Master Dev folder connected for all generators: ' + h.name + '. Automatic writes are off.' : 'Folder chosen, but write permission was not granted.');
       await tick(true);
     } catch (e) { if (!(e && e.name === 'AbortError')) { F.error = e.message || String(e); } }
     draw();
   }
+  // Chrome drops a folder's permission when it restarts. requestPermission() needs a user gesture, so when
+  // "Keep access allowed" is on, the first click or key press anywhere on the page re-grants it without
+  // opening Weld. (Choose "Allow on every visit" in Chrome's prompt and Chrome stops forgetting it at all.)
+  let regrantArmed = false;
+  function armRegrant() {
+    if (regrantArmed || !F.handle || F.perm === 'granted' || !F.cfg.keepAccess || typeof document === 'undefined') return;
+    regrantArmed = true;
+    const go = async () => {
+      document.removeEventListener('pointerdown', go, true); document.removeEventListener('keydown', go, true); regrantArmed = false;
+      if (!F.handle || F.perm === 'granted' || !F.cfg.keepAccess) return;
+      F.perm = await permission(F.handle, true);
+      if (F.perm === 'granted') { F.error = ''; tick(true).catch(() => {}); }
+      draw();
+    };
+    document.addEventListener('pointerdown', go, true); document.addEventListener('keydown', go, true);
+  }
+  async function recheckAccess() {
+    if (!F.handle || !F.cfg.keepAccess) return;
+    const was = F.perm; F.perm = await permission(F.handle, false);
+    if (F.perm !== 'granted') armRegrant();
+    if (F.perm !== was) draw();
+  }
+  function setKeepAccess(v) { folderCfg(); F.cfg.keepAccess = !!v; saveFolderCfg(); if (v) recheckAccess(); }
   async function reconnectFolder() {
     if (!F.handle) return;
     F.perm = await permission(F.handle, true); F.error = F.perm === 'granted' ? '' : 'Permission was not granted.';
@@ -14329,49 +15074,59 @@
   }
   async function disconnectFolder() {
     F.handle = null; F.name = ''; F.perm = 'none'; F.plan = null; F.folders = null;
-    await kvDel('handle'); notice('Folder disconnected. Nothing in it was deleted.'); draw();
+    await kvDel('handle'); folderCfg(); F.cfg.autoMirror = false; F.cfg.projectBackups = {};
+    F.cfg.revision = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); saveFolderCfg(); F.revision = F.cfg.revision;
+    notice('Master Dev folder disconnected for all generators. Nothing in it was deleted.'); draw();
   }
   async function bootFolder() {
     if (F.bootDone) return; F.bootDone = true;
     F.supported = typeof win().showDirectoryPicker === 'function'; folderCfg();
-    try {
-      const h = await kvGet('handle');
-      if (h && typeof h.queryPermission === 'function') { F.handle = h; F.name = h.name; F.perm = await permission(h, false); }
-    } catch (e) {}
-    startWatch(); draw();
+    try { await refreshMasterFolder(); } catch (e) {}
+    // 1.92.0: the master-folder panel is off by default (GitHub holds the work). A folder connected earlier is disconnected once; nothing in it is deleted.
+    if (!F.cfg.showPanel && F.handle) { try { await disconnectFolder(); } catch (e) {} }
+    try { window.addEventListener('focus', () => { refreshMasterFolder().then(recheckAccess).catch(() => {}); }); } catch (e) {}
+    armRegrant(); startWatch(); draw();
   }
   let watchTimer = null;
   function startWatch() { if (watchTimer) return; watchTimer = setInterval(() => { tick(false).catch(() => {}); }, 2500); }
+  // Automatic writes to the master folder are limited to starred generators; the Mirror button works on any.
+  function isStarred(slug) { try { return (H.favorites() || []).indexOf(slug) !== -1; } catch (e) { return false; } }
   async function tick(force) {
-    if (!F.handle || F.perm !== 'granted' || F.busy || (!force && (!F.cfg.watch || (typeof document !== 'undefined' && document.hidden)))) return;
+    await refreshMasterFolder();
+    if (!F.handle || F.perm !== 'granted' || F.busy || (!force && ((!F.cfg.watch && !F.cfg.projectBackups[H.slug()]) || (typeof document !== 'undefined' && document.hidden)))) return;
     const slug = H.slug();
     if (!D.safeSlug(slug)) { F.plan = null; F.slug = ''; return; }
     F.busy = true;
     try {
       const live = H.isEdit() ? H.live() : null, editor = live && live.dsl != null ? { dsl: norm(live.dsl), html: live.html == null ? null : norm(live.html) } : null;
-      const disk = await readPair(slug), base = await kvGet('base:' + slug);
+      const revision = F.revision, disk = await readPair(slug), base = await kvGet(folderBaseKey(slug));
       let plan = D.syncPlan(editor, disk, base);
       if (plan.state === 'in-sync' && editor) {
         // both sides agree: remember this as the last sync point (only when it actually moved)
         const bk = slug + ':' + P.hash(D.normForCompare(editor.dsl)) + P.hash(D.normForCompare(editor.html || ''));
-        if (F.baseKey !== bk) { F.baseKey = bk; await kvSet('base:' + slug, { dsl: editor.dsl, html: editor.html }); }
-      } else if ((plan.state === 'editor-ahead' || plan.state === 'no-disk') && editor && F.cfg.autoMirror) {
-        await writePair(slug, editor.dsl, editor.html); await kvSet('base:' + slug, { dsl: editor.dsl, html: editor.html }); plan = { state: 'in-sync', mirrored: true };
+        if (F.baseKey !== bk) { F.baseKey = bk; await kvSet(folderBaseKey(slug), { dsl: editor.dsl, html: editor.html }); }
+      } else if ((plan.state === 'editor-ahead' || plan.state === 'no-disk') && editor && F.cfg.autoMirror && isStarred(slug)) {
+        if (await writePair(slug, editor.dsl, editor.html, revision)) {
+          await kvSet(folderBaseKey(slug), { dsl: editor.dsl, html: editor.html }); plan = { state: 'in-sync', mirrored: true };
+        }
       }
       const key = plan.state + ':' + (disk ? P.hash(D.normForCompare(disk.dsl)) + P.hash(D.normForCompare(disk.html || '')) : '-');
       if ((plan.state === 'disk-ahead' || plan.state === 'conflict') && F.notified !== key) { F.notified = key; H.toast('The folder copy of "' + slug + '" changed. Open Weld, then the Dev tab, to review it.', 7000); }
       const changed = !F.plan || F.plan.state !== plan.state || F.slug !== slug;
       F.plan = plan; F.slug = slug; F.lastCheck = Date.now(); F.error = '';
+      if (!document.hidden && H.isEdit() && F.cfg.projectBackups[slug] && !F.projectBusy &&
+          (F.projectSlug !== slug || Date.now() - F.projectCheck >= 60000)) await downloadProject(false);
       if (changed || force) draw();
     } catch (e) { F.error = (e && e.message) || String(e); }
     F.busy = false;
   }
   async function mirrorNow() {
+    await tick(true);
     const slug = H.slug(), live = H.isEdit() ? H.live() : null;
     if (!live || live.dsl == null) return notice('Open the generator\u2019s editor first.');
     if (F.plan && (F.plan.state === 'disk-ahead' || F.plan.state === 'conflict') && !window.confirm('The folder copy has changes that are not in the editor. Overwrite them with the editor?')) return;
     await writePair(slug, norm(live.dsl), live.html == null ? null : norm(live.html));
-    await kvSet('base:' + slug, { dsl: norm(live.dsl), html: live.html == null ? null : norm(live.html) });
+    await kvSet(folderBaseKey(slug), { dsl: norm(live.dsl), html: live.html == null ? null : norm(live.html) });
     notice('Wrote the editor to the folder.'); await tick(true);
   }
   async function applyFolder() {
@@ -14380,7 +15135,7 @@
     const disk = await readPair(slug); if (!disk) return notice('No folder copy of this generator yet.');
     if (!window.confirm('Replace the editor with the folder copy of "' + slug + '"?\n\nCtrl+Z undoes it, and you still press Save in Perchance.')) return;
     const ok = H.applyPane('dsl', disk.dsl) && (disk.html == null || H.applyPane('html', disk.html));
-    if (ok) { await kvSet('base:' + slug, { dsl: disk.dsl, html: disk.html }); notice('Applied the folder copy. Review it, then Save.'); } else notice('Could not write to the editor.');
+    if (ok) { await kvSet(folderBaseKey(slug), { dsl: disk.dsl, html: disk.html }); notice('Applied the folder copy. Review it, then Save.'); } else notice('Could not write to the editor.');
     S.view = null; await tick(true);
   }
   async function showFolderDiff() {
@@ -14390,8 +15145,8 @@
       panes: [['Lists panel', norm(live.dsl), disk.dsl], ['HTML panel', norm(live.html || ''), disk.html == null ? norm(live.html || '') : disk.html]] };
     draw();
   }
-  async function useFolderAsBase() { const disk = await readPair(H.slug()); if (disk) { await kvSet('base:' + H.slug(), disk); await tick(true); } }
-  async function useEditorAsBase() { const live = H.live(); if (live) { await kvSet('base:' + H.slug(), { dsl: norm(live.dsl), html: live.html == null ? null : norm(live.html) }); await tick(true); } }
+  async function useFolderAsBase() { const disk = await readPair(H.slug()); if (disk) { await kvSet(folderBaseKey(H.slug()), disk); await tick(true); } }
+  async function useEditorAsBase() { const live = H.live(); if (live) { await kvSet(folderBaseKey(H.slug()), { dsl: norm(live.dsl), html: live.html == null ? null : norm(live.html) }); await tick(true); } }
   async function listFolders() {
     if (!F.handle || F.perm !== 'granted') return;
     const out = [];
@@ -14409,6 +15164,48 @@
     const proj = await window.weldProject.fetchPublished(slug);
     await writePair(slug, norm(proj.dsl), proj.html == null ? null : norm(proj.html));
     return proj;
+  }
+  async function downloadProject(manual = true) {
+    if (F.projectBusy) return;
+    const slug = H.slug(), live = H.isEdit() ? H.live() : null;
+    if (!D.safeSlug(slug) || !live || live.dsl == null) return notice('Open this generator\u2019s editor first.');
+    if (!H.backup || !window.WeldLocalBackup) return notice('The project backup module is unavailable.');
+    if (!F.handle || F.perm !== 'granted') return notice('Choose the computer save folder and allow access first.');
+    if (manual && !window.confirm('Download all project files and readable cached assets/models for "' + slug + '" into its folder in ' + F.name + '?\n\nThis uses the current editor and selected draft. Existing matching files are replaced. Automatic updates are then enabled ONLY for this generator while its editor is visible. Private chat data, credentials, HTTP cache and other origins are excluded.')) return;
+    F.projectBusy = true; F.projectError = ''; F.projectSlug = slug; F.projectCheck = Date.now();
+    F.projectStatus = 'Reading project and cached assets\u2026'; draw();
+    const handle = F.handle, revision = F.revision, cancel = F.projectCancel;
+    const active = () => {
+      folderCfg();
+      return H.slug() === slug && H.isEdit() && F.handle === handle && F.projectCancel === cancel && (F.cfg.revision || '') === revision &&
+        (manual || (!document.hidden && !!F.cfg.projectBackups[slug]));
+    };
+    const run = async () => {
+      if (!active()) throw new Error('Local project download paused or location changed');
+      const backup = await H.backup.collect(slug, D.folderPaths(slug), live, !manual);
+      const result = await window.WeldLocalBackup.save({ root: handle, slug, backup, crypto: H.backup.crypto, overwrite: manual, active,
+        progress: (n, total) => { F.projectStatus = 'Saving project files and assets ' + n + '/' + total; draw(); } });
+      if (!active()) throw new Error('Local project download paused or location changed');
+      const p = paths(slug), canonical = D.folderPaths(slug);
+      if (p.dsl === canonical.dsl && p.html === canonical.html) await kvSet(folderBaseKey(slug), { dsl: norm(live.dsl), html: norm(live.html || '') });
+      F.projectStatus = 'Saved ' + result.files + ' files (' + (result.bytes / 1048576).toFixed(1) + ' MiB); ' + result.written + ' updated.' +
+        (result.unavailable.length ? ' Unavailable: ' + result.unavailable.join('; ') : '');
+      if (manual) notice('Downloaded ' + slug + '. Automatic project and asset updates are on for this generator only.');
+    };
+    try {
+      const locks = win().navigator && win().navigator.locks;
+      if (locks) await locks.request('weld-local-project:' + revision + ':' + slug, { ifAvailable: true }, lock => {
+        if (!lock) throw new Error('Another tab is saving this generator; try again shortly');
+        return run();
+      });
+      else await run();
+    } catch (e) { F.projectError = (e && e.message) || String(e); F.projectStatus = 'Project download stopped.'; if (manual) notice(F.projectError); }
+    finally { F.projectBusy = false; F.projectCheck = Date.now(); draw(); }
+  }
+  function pauseProject() {
+    F.projectCancel++;
+    folderCfg(); F.cfg.projectBackups = Object.assign({}, F.cfg.projectBackups); delete F.cfg.projectBackups[H.slug()]; saveFolderCfg();
+    notice('Automatic project and asset updates paused for this generator.'); draw();
   }
   async function seedStarred() {
     const names = H.favorites().filter(n => D.safeSlug(n));
@@ -14743,17 +15540,23 @@
     'unknown': ['The editor and the folder differ and Weld has no earlier sync point to tell which is newer.', '#d29922'],
     'no-editor': ['Open the generator\u2019s editor (#edit) to sync it.', '#768390']
   };
+  function hiddenFolderSection(parent) {
+    note(parent, 'The local master folder is switched off: your work lives in the GitHub repo (GitHub tab > Push). Turn this panel on only if you want a local folder copy again; you will have to choose the folder again.');
+    row(parent, [btn('Show folder sync', () => { folderCfg(); F.cfg.showPanel = true; saveFolderCfg(); draw(); }, { mini: true })]);
+  }
   function folderSection(parent) {
     if (!F.supported) { note(parent, 'This browser cannot give web pages a folder to work in. Use Chrome, Edge or another Chromium browser.', { color: '#d29922' }); return; }
-    note(parent, 'Mirrors the open generator to plain files in a folder you choose, so any editor or AI agent can work on them live. Changes from the folder are never applied automatically: you review a diff first.');
+    note(parent, 'Master Dev location — choose one folder for all generators in this browser profile. Each generator uses its own subfolder. Open tabs pick up changes within a few seconds. GitHub Push uses its separate owner/repo settings.');
+    row(parent, [btn('Pause automatic writes in all tabs', pauseFolderWrites, { mini: true })]);
     if (!F.handle) {
-      note(parent, 'Pick the folder once (for example D:\\projects\\perch_backups_folder_sync). The browser remembers it, and asks you to confirm access after you restart it.');
+      note(parent, 'Choose your master folder once using the folder picker. The browser remembers it for all generators and may ask you to confirm access after a restart.');
       row(parent, [btn('Choose folder\u2026', connectFolder, { accent: true })]);
       if (F.error) note(parent, F.error, { color: '#e5534b' });
       return;
     }
-    parent.appendChild(E('div', { style: { margin: '2px 0' }, text: 'Folder: ' + F.name + (F.perm === 'granted' ? '' : '  (access not confirmed)') }));
-    if (F.perm !== 'granted') { note(parent, 'The browser needs you to confirm access to this folder again.'); row(parent, [btn('Allow access', reconnectFolder, { accent: true }), btn('Disconnect folder', disconnectFolder, { mini: true })]); return; }
+    parent.appendChild(E('div', { style: { margin: '2px 0' }, text: 'Master Dev folder: ' + F.name + (F.perm === 'granted' ? '' : '  (access not confirmed)') }));
+    row(parent, [btn('Change master folder\u2026', connectFolder, { mini: true })]);
+    if (F.perm !== 'granted') { note(parent, 'The browser needs you to confirm access to this folder again.' + (F.cfg.keepAccess ? ' Your next click on the page will do it.' : '')); row(parent, [btn('Allow access', reconnectFolder, { accent: true }), btn('Disconnect folder', disconnectFolder, { mini: true })]); row(parent, [check('Keep access allowed (re-ask on my next click after a restart)', F.cfg.keepAccess, setKeepAccess, 'Chrome forgets folder access when it restarts. With this on, Weld re-requests it on your first click or key press.')]); return; }
     const slug = H.slug(), safe = D.safeSlug(slug);
     if (!safe) note(parent, 'Open a generator to sync it.');
     else {
@@ -14766,9 +15569,18 @@
       if (state === 'unknown') kids.push(btn('Treat folder as latest', useFolderAsBase, { mini: true }), btn('Treat editor as latest', useEditorAsBase, { mini: true }));
       kids.push(btn('Download published copy', async () => { await seedFromPublished(slug); notice('Wrote the published copy of ' + slug + ' to the folder.'); await tick(true); }, { mini: true, title: 'Fetch the saved version from Perchance and write it to the folder.' }));
       row(parent, kids);
+      row(parent, [btn('Download all files and assets (this generator)', () => downloadProject(true), { mini: true, disabled: !H.isEdit() || F.projectBusy })]);
+      note(parent, 'Saves this editor, its selected src files and readable cached assets/models to ' + slug + '/ in the master folder. Models are saved as complete files. Selecting it also enables automatic updates for this generator only.');
+      if (F.cfg.projectBackups[slug]) {
+        row(parent, [btn('Pause project and asset updates (this generator)', pauseProject, { mini: true })]);
+        note(parent, 'Project and asset updates are on for this generator. Checks run once a minute while its editor is visible and folder access is allowed.');
+      }
+      if (F.projectSlug === slug && F.projectStatus) note(parent, F.projectStatus);
+      if (F.projectSlug === slug && F.projectError) note(parent, F.projectError, { color: '#e5534b' });
     }
-    row(parent, [check('Write the editor to the folder automatically every few seconds', F.cfg.autoMirror, v => { F.cfg.autoMirror = v; saveFolderCfg(); tick(true); }, 'Local file writes only. The other direction always needs your review.'),
-      check('Watch the folder for changes', F.cfg.watch, v => { F.cfg.watch = v; saveFolderCfg(); })]);
+    row(parent, [check('Write editors to the master folder automatically (starred generators only)', F.cfg.autoMirror, v => { folderCfg(); F.cfg.autoMirror = v; saveFolderCfg(); tick(true); }, 'Local file writes only. The other direction always needs your review.'),
+      check('Watch the folder for changes', F.cfg.watch, v => { folderCfg(); F.cfg.watch = v; saveFolderCfg(); })]);
+    row(parent, [check('Keep access allowed (re-ask on my next click after a restart)', F.cfg.keepAccess, setKeepAccess, 'Chrome forgets folder access when it restarts. With this on, Weld re-requests it on your first click or key press. Pick "Allow on every visit" in Chrome\u2019s prompt to stop it forgetting at all.')]);
     note(parent, 'Files: ' + (safe ? paths(slug).dsl + ' and ' + paths(slug).html : '{name}/{name}-top-panel.txt and {name}/{name}-html-panel.html') + '. Checked ' + (F.lastCheck ? ago(F.lastCheck) : 'not yet') + '.');
     if (F.error) note(parent, F.error, { color: '#e5534b' });
     row(parent, [btn('Download all starred generators', seedStarred, { mini: true, disabled: !!F.seeding }), btn('List generators in folder', listFolders, { mini: true }), btn('Disconnect folder', disconnectFolder, { mini: true })]);
@@ -14882,7 +15694,8 @@
     if (!viewPanel(wrap)) {
       const pend = pendingCount();
       section(wrap, 'proposals', 'Agent proposals', pend ? pend + ' waiting' : S.proposals.length || '', proposalsSection, pend > 0);
-      section(wrap, 'folder', 'Folder sync', F.handle ? (F.plan && STATE_TEXT[F.plan.state] ? F.plan.state : F.name) : 'off', folderSection, true);
+      if (!F.cfg.showPanel) section(wrap, 'folder', 'Folder sync', 'off', hiddenFolderSection);
+      else section(wrap, 'folder', 'Folder sync', F.handle ? (F.plan && STATE_TEXT[F.plan.state] ? F.plan.state : F.name) : 'off', folderSection, true);
       section(wrap, 'bridge', 'Agent bridge (MCP)', B.state, bridgeSection);
       section(wrap, 'agents', 'GitHub agents', '', agentsSection);
       section(wrap, 'refactor', 'Find usages and rename', '', refactorSection);
@@ -14893,7 +15706,7 @@
   }
   setTimeout(boot, 1200);
   window.weldDev = {
-    render, boot, state: { F, B, S }, exec, tick, startBridge, stopBridge,
+    render, boot, state: { F, B, S }, exec, tick, startBridge, stopBridge, downloadProject,
     // test hooks
     _folder: { connectWith(handle) { F.handle = handle; F.name = handle.name || 'folder'; F.perm = 'granted'; F.supported = true; F.bootDone = true; folderCfg(); return kvSet('handle', handle); } }
   };
@@ -15896,6 +16709,193 @@ IMPORT (Tavern -> Dad-native)             EXPORT (Dad-native -> Tavern, lossy)
      is empty
   NO DAD SLOT (dropped on import): selective, probability, group*, sticky, cooldown, delay,
   role, book-level scan_depth, non-forge extensions.*
+`),
+    // ------------------------------------------------------------------ Websites and cross-cutting edge cases
+    pack('web-spec', 'Site Spec: the one model behind a generated website', String.raw`
+ONE JSON object is the source of truth. AI stages fill parts of it, editable fields edit parts of it,
+the preview and the export render only from it. Adapt names to the generator; keep it versioned.
+
+{ "v": 1, "mode": "single" | "multi",
+  "brief": { "idea": "", "audience": "", "goal": "", "tone": "", "language": "en", "inferred": ["tone"] },
+  "brand": { "name": "", "tagline": "",
+             "palette": { "bg": "#ffffff", "text": "#111111", "accent": "#0a6c5a", "muted": "#667085" },
+             "fonts": { "heading": "serif-system", "body": "sans-system" } },
+  "pages": [ { "id": "p1", "slug": "home", "title": "", "navLabel": "",
+               "seo": { "title": "", "description": "" },
+               "sections": [ { "id": "s1", "type": "hero", "fields": { "heading": "", "text": "", "cta": "" },
+                               "image": { "prompt": "", "alt": "" }, "locked": [] } ] } ],
+  "footer": { "text": "", "links": [] },
+  "meta": { "stage": "done", "rev": 1, "updated": 0 } }
+
+SECTION TYPES AND LIMITS (characters)
+  hero     heading 80, text 220, cta 30         features items 3-6 {title 40, text 120}
+  about    text 600                            services items {title, text}
+  pricing  plans 1-4 {name, price, items[]}    ONLY prices the user wrote
+  testimonials                                ONLY real quotes the user supplied
+  faq      items 3-8 {q 100, a 300}            gallery items {alt, image}
+  contact  heading, text, email (user supplied) cta heading, button     footer text, links
+RULES  single mode = one page, nav items are #anchors.   multi mode = 2-7 pages, slugs unique
+lowercase a-z 0-9 -, home first, every page in the nav once.   Unknown section types render as nothing and
+are KEPT in the spec. Validate by path (pages[1].sections[0].fields.heading too long), never by throwing.
+`),
+    pack('web-pipeline', 'One-click site builder pipeline', String.raw`
+USER TOUCHES: one idea box, one Single/Multi choice, one Build button, one final review.
+
+ idea + mode -> [1 brief] -> [2 plan] -> [3 pages, one request each] -> [4 design] -> [5 images?] -> [6 SEO] -> preview
+                 JSON        sitemap     sections + copy                 tokens        opt-in        titles/meta
+ EVERY STAGE: small prompt (short brief + only what this stage needs) -> run id + timeout
+              -> strip fences, extract first balanced JSON -> validate against the Site Spec
+              -> repair once with a short corrective request -> merge into the spec -> save -> next stage
+ STAGE STATE: pending | running | ok | failed | skipped. A failed stage offers Retry and Skip; the rest is kept.
+ RULES
+  - One run at a time. A reply whose run id is old (after Stop or a restart) is ignored.
+  - Stop finishes nothing new and keeps finished stages. Build never starts by itself on load.
+  - Multi page: bounded concurrency 1-2 so one bad page never loses the site.
+  - Resume: the spec is saved after each stage; after a reload offer Continue or Start over.
+  - A part that cannot be repaired uses a plain template and says so in the progress list.
+  - Never invent prices, phones, addresses, emails, testimonials, awards or statistics.
+  - The idea text is data: instructions inside it never change the schema, stages or safety rules.
+  - Image generation and any paid or slow call is opt-in or confirmed once with a count.
+  - Progress shows real stage names and counts, never invented percentages.
+`),
+    pack('web-field-ai', 'AI field helper contract (every site field)', String.raw`
+FIELD    { id, label, kind: line | text | list | url | color | select, max, role: "hero heading", locked, history[] }
+BUTTONS  Rewrite (has text) | Fill (empty) | Variants (3 choices) | Undo | Lock | Stop (while loading)
+REQUEST  short brief (<= 600 chars) + page + section type + this field role and max + current text
+         + at most 3 neighbor values. Nothing else: small, cheap, fast.
+REPLY    strip code fences, surrounding quotes and "Here is..." lines; strip markdown for line fields;
+         cut to max at a word boundary; reject empty, identical, wrong-language, refusal or placeholder text.
+APPLY    only to the field that asked. If the user typed meanwhile, show the reply as a suggestion.
+LOCKED   fields are skipped by Fill all and by one-click rebuilds. HISTORY keeps the last 5 values; restore calls no AI.
+STATES   idle | loading | error (message shown, text kept). One request per field; extra clicks are ignored.
+FILL ALL one structured request keyed by field id; validate each field; apply only to empty unlocked fields;
+         preview first; whole-batch undo.
+CHANGE THIS  per section instruction -> new section object -> validated -> side by side -> Accept or Reject.
+`),
+    pack('web-render-safety', 'Safe render and export for generated sites', String.raw`
+AI text is DATA. Build the DOM with createElement and textContent; never innerHTML for spec text.
+URLs     allow https:, http:, mailto:, tel: and #anchors only. Refuse javascript:, file:, and data: except own images.
+COLORS   #rgb or #rrggbb only.   FONTS  pick from a fixed list of system stacks.   SIZES  numeric and clamped.
+CODE     no AI-written script, inline event attribute or style text: the renderer owns all CSS and behavior.
+PREVIEW  iframe with srcdoc and sandbox (no allow-same-origin); escape the closing script tag in embedded JSON;
+         cap the document size; rebuild debounced (about 300 ms), not on every keystroke.
+EXPORT   the same renderer writes ONE self-contained html (single) or one file per page + shared style.css
+         (multi) with relative .html links that work from disk. Add doctype, lang, charset, viewport, title, description.
+IMAGES   https urls or small data urls under a cap; alt text always (empty alt only for decoration).
+SLUGS    lowercase a-z 0-9 -, unique, never empty, not reserved (index, style, assets); filenames come from slugs.
+`),
+    pack('web-edges', 'Edge cases checklist for AI-built sites', String.raw`
+INPUT   empty idea, one word, 5,000+ characters, non-English, right-to-left, emoji, pasted HTML, hostile "ignore the
+        rules" text, an idea naming a real brand or person (no implied endorsement), mode switched mid-run.
+REPLY   not JSON, JSON in fences, truncated JSON, extra keys, missing sections, wrong types, over the limit,
+        wrong language, lorem ipsum or [Company Name] filler, refusal, duplicate slugs.
+RUN     double click, Stop mid-stage, tab closed or reloaded mid-run, offline, rate limit, a stage that never
+        returns (timeout), two tabs building at once, a late reply after Stop (ignore by run id).
+DATA    spec near the storage cap (images as urls, not base64), corrupt saved spec, older spec version (migrate
+        additively), imported spec from someone else (validate, never trust).
+OUTPUT  very long words, missing images, 1 page vs 12 pages, empty sections, long nav on a phone, dark mode, print,
+        keyboard only, reduced motion, export opened from disk.
+SANDBOX clipboard, downloads, popups and storage may each be blocked in the generator frame: offer a fallback
+        (selectable text box, Weld Skybridge download or clipboard, memory-only mode with a visible warning).
+`),
+    pack('weld-limits', 'Perchance and Weld limits that bite', String.raw`
+- The native helper input is believed to take roughly 6k tokens. A skill prompt plus your details must stay
+  small; split big work into slices and finish one before starting the next.
+- Weld caps generator writes at about 2 MB. Keep images and large JSON out of the lists and HTML panels.
+- Weld storage values over 2 MB make Tampermonkey slow; Skybridge storage refuses them (reason value-over-2mb).
+- A generator runs in a sandboxed frame: localStorage may be missing or partitioned; clipboard, downloads and
+  window.open may be blocked. Wrap each use in try/catch and show a fallback.
+- Perchance lists and HTML are not plain JavaScript: bracket and brace text can be templating. Confirm with the
+  live preview and perchanceErrors before trusting an edit; many bracket patterns are harmless.
+- Plugin calls are async and can be slow, fail or answer late: use a run id, a timeout and Stop; do not stack requests.
+- Weld proposes edits and the user accepts a diff: never assume an edit was applied.
+- Both panels, and every imported plugin generator, must be saved again after a change for it to take effect.
+`),
+    // ------------------------------------------------------------------ AI image prompts
+    pack('img-anatomy', 'PROMPT ANATOMY and STRUCTURED PROMPT shape for image models', String.raw`
+Image prompts that work well in public prompt collections share one order. Use it as a checklist, not a rule:
+
+  1 SUBJECT    who or what, how many, age range, pose, expression, outfit, props
+  2 IDENTITY   edits only: "keep the face exactly as in Image 1", repeated once more at the end
+  3 SCENE      place, era, weather, time of day, background elements
+  4 LIGHT      key, fill, rim; hard or soft; flash, golden hour, window; colour temperature
+  5 CAMERA     lens (35mm wide, 85mm portrait, fisheye), aperture, angle, framing, depth of field
+  6 STYLE      photoreal, flat vector, 3D isometric, clay, film grain, magazine cover
+  7 TEXT       exact words in quotes, language, font feel, position, outline or shadow for contrast
+  8 LAYOUT     aspect ratio, left and right split, margins, safe area, number of panels
+  9 AVOID      a short list: warped face, extra limbs, watermark, blur, muted colours
+
+Plain forms: one paragraph, or labelled sentences ("Crucial Fit Details: ...", "Text: ...").
+Multi-step jobs use tags: <role>, <rules>, <step 1 - analyse>, <step 2 - shots>, <output format>.
+
+STRUCTURED PROMPT (JSON) shape:
+{
+  "subject": { "description": "", "expression": "", "face": { "preserve_original": true } },
+  "accessories": { },
+  "photography": { "camera_style": "", "lighting": "", "angle": "", "shot_type": "", "texture": "" },
+  "background": { "setting": "", "elements": [] },
+  "negative_prompt": ""
+}
+Not every model reads JSON better than prose. Check what the plugin accepts, and keep a flattened text
+fallback. Put each constraint in its own key or sentence and never leave empty keys in the sent version.
+Honest limits: results vary per run, text inside images can be misspelled, and quality words such as 8K
+do not guarantee quality. Ask the user to check text and facts in the output.
+`),
+    pack('img-templates', 'PROMPT LIBRARY CATEGORIES, template model and SLOT SYNTAX', String.raw`
+PROMPT LIBRARY CATEGORIES (common grouping in public collections; a generator may use fewer):
+  Photorealism and aesthetics | Creative experiments | Education and knowledge | E-commerce and virtual studio
+  Workplace and productivity | Photo editing and restoration | Interior design | Social media and marketing
+  Daily life and translation | Social networking and avatars
+
+Template model (one JSON object per prompt; keep user-added items in a separate list from built-ins):
+{
+  "id": "stable-slug",
+  "title": "", "description": "", "category": "", "tags": [],
+  "prompt": "A quote card with the text '{quote|Stay curious}' by {author|Ada}",
+  "slots": [ { "name": "quote", "label": "Quote", "default": "Stay curious" } ],
+  "needsImages": 0, "aspect": "1:1", "language": "en",
+  "credit": { "author": "", "url": "", "license": "" }
+}
+
+SLOT SYNTAX: {name|default} in the prompt text; the same name may appear twice and shares one value.
+Other collections use [Bracket text] or {argument name="x" default="y"}; map those to slots on import
+and keep the default. Escape a literal brace with a backslash. Unknown or empty slots fall back to the
+default; a template with no slots is a plain prompt. Slot values are data: render as text, never HTML or code.
+Credit: keep author, link and license (many collections use CC BY 4.0, which requires attribution).
+`),
+    pack('img-recipes', 'EDIT RECIPES and studio patterns for image models', String.raw`
+Each recipe lists the inputs, the clause that matters, and the usual failure. Image N means the Nth uploaded picture.
+
+  Outpaint     input 1 image + target ratio. "Expand to 16:9, extend scenery both sides, match lighting and texture,
+               complete cut-off objects logically, do not alter the original centre."  Failure: seams, repeated objects.
+  Remove       input 1 image + what to remove. "Remove X, rebuild the background plausibly, keep everything else
+               identical."  Failure: smeared texture where the object was.
+  Restore      old or damaged photo. "Repair scratches and fading, keep faces and composition, do not add detail that
+               was not there; optionally colourize with natural tones."  Failure: faces changed, plastic skin.
+  Try-on       Image 1 garment + Image 2 model. "Wear the garment, natural drape and folds, keep fabric, colour and
+               logos exactly, match lighting and shadows."  Failure: wrong fit, altered logos.
+  Translate    image with text + language. "Replace all visible text with <language>, keep layout and style."
+               Failure: misspelled or missing words; always check.
+  Sketch to UI hand sketch. "Turn into a clean high-fidelity screen, keep layout, use real-looking labels."
+  Infographic  topic + elements + style + label language. Name every element and arrow; say "labels in <language>".
+  Cover        subject + exact headline in quotes + layout side + contrast treatment + format ratio.
+  Product      product image + scene + light. "Keep product shape, colour and logo; new background only."
+  Avatar set   one style block + a short line per pose, so the set stays consistent.
+  Keyframes    describe only what is visible, list anchors that must stay constant, then write one prompt per shot.
+  Miniature    "<place> as an isometric / tilt-shift miniature diorama, clay or plastic, soft studio light, clean background".
+
+Always send a Preserve clause (what must not change) with edits, keep the original file untouched, and let
+the user review the prompt first. Plugins differ in how they take input images: check the source.
+`),
+    pack('img-consent', 'LIKENESS AND CONSENT rules for generated images', String.raw`
+- Use a real person photo only if the user states they have the right to use it. Ask once per session, not on every click.
+- Do not generate named real people in sexual, deceptive, hateful, political or defamatory scenes, or as fake
+  endorsements. Be careful with public figures and never present generated images as real photographs or news.
+- Treat subjects who may be minors with extra care: no sexualised or identity-changing edits.
+- Keep reference images on the user device; do not log, upload or store them beyond the action the user took.
+- Label AI output where it could be mistaken for a photo (caption, filename or metadata) and let the user edit the label.
+- Respect licences: keep credit for imported prompts; do not bundle third-party images or prompts without permission.
+- A filter is never complete: say so, and keep the user in control of every send.
 `)
   ];
 
@@ -15919,6 +16919,14 @@ entries, warning: 3 assets not used" -> user confirms -> saved as a NEW characte
 extensions kept in a retained blob.
 Bad result: executing HTML in description, overwriting an existing "Mara Quill" silently, or
 failing the whole import because one lore entry has an unknown field.`,
+    'card-batch-import': String.raw`
+Request: "Import these 40 cards I dropped in."
+Good result: queue of 40 -> each parsed on its own (PNG ccv3 preferred over chara, JSON V2/V3)
+-> preview list: 36 ok, 2 "duplicate of Mara Quill (same name and content hash)", 1 "not a
+card: no chara/ccv3 chunk", 1 "JSON parse error at byte 812" -> user unticks the duplicates
+-> one confirm -> per-card result list, unknown extensions kept on every imported card.
+Bad result: stopping at file 7 because it is corrupt, importing duplicates silently, or
+merging two different characters that only share a name.`,
     'card-field-map': String.raw`
 Good result is a table like:
   app field        | card field            | status  | note
@@ -16249,13 +17257,42 @@ Request: "why was my oldest summary dropped". Trace the layers in order: fixed c
 (world block, character lore, summaries, recalled memories, pins, ledger) each under its own cap, then recent
 chat. Only recent chat may yield. Check that summaries keep the oldest foundation and the newest, that a
 restated sentence appears once, that the model window comes from getMetaObject and not a constant, and that
-the diagnostics preview calls the same builders as the real prompt.`
+the diagnostics preview calls the same builders as the real prompt.`,
+    'site-one-click-builder': String.raw`
+Request: "Add a one-click website builder to my bakery generator."
+Good result: a new Builder page with ONE textarea ("Describe your site"), a Single/Multi radio, a Build button.
+Build runs stage 1 (brief JSON) -> 2 (plan: home, menu, about, contact) -> 3 (one request per page) -> 4 (tokens)
+-> 6 (SEO). A progress list shows "Brief ok, Plan ok, Page 2 of 4 running"; Stop and Retry work. Each result
+sits in a field with Rewrite / Fill. The contact page leaves phone and address EMPTY because the idea gave none.
+Preview shows the site; Export downloads index.html + menu.html + style.css. Nothing says "published".
+Bad result: one giant request that returns the whole site, invented opening hours and 5-star reviews, a build
+that starts on page load, or a Stop button that lets the old run overwrite the new one.`,
+    'site-ai-fields': String.raw`
+Request: "Put AI help in every field on the page."
+Good result: next to "Hero heading" (has text) a Rewrite button; next to empty "Meta description" a Fill button.
+Fill sends: brief (400 chars), page "home", section "seo", role "meta description", max 155, neighbors (title,
+hero heading). Reply '"Fresh sourdough baked daily in Ames."' becomes: Fresh sourdough baked daily in Ames.
+(quotes stripped, 155 max). The old value goes to history; Undo restores it with no AI call. Locked fields skipped.
+Bad result: sending the whole page for every field, replacing text the user typed during loading.`,
+    'site-pipeline-resilience': String.raw`
+Request: "Sometimes the build breaks halfway."
+Good result: reply 'Sure! json {"pages":[{"slug":"home"' (truncated) -> extraction fails -> ONE short repair request
+with the broken text -> still invalid -> that page uses the plain template, progress says "Page 1: used default
+layout (AI reply was cut off)"; pages 2-4 still build. Reload offers Continue from stage 3.
+Bad result: throwing away finished stages, retrying forever, or applying a reply from a stopped run.`,
+    'ai-json-contract': String.raw`
+Request: "The model sometimes wraps JSON in text."
+Good result: parseAiJson(text) strips fences, finds the first balanced {...}, JSON.parse in try/catch, then
+validates {title:string<=80, items:array 3-6}. Invalid -> one corrective request -> else a clear message and the
+user's current values untouched. The reply is never used as HTML.
+Bad result: JSON.parse(reply) with no catch, or eval/innerHTML on the reply.`
   };
 
   // Which packs each preset receives (preset id -> pack ids, in display order).
   const links = {
     'card-spec-export': ['st-layout', 'st-card-v2', 'st-card-png', 'st-card-v3'],
     'card-spec-import': ['st-layout', 'st-card-v2', 'st-card-v3', 'st-card-png'],
+    'card-batch-import': ['st-card-v2', 'st-card-v3', 'st-card-png'],
     'card-field-map': ['st-card-v2', 'st-card-v3', 'st-lore'],
     'card-validator': ['st-card-v2', 'st-lore'],
     'token-diet': ['st-prompt-order', 'st-card-v2'],
@@ -16272,6 +17309,25 @@ the diagnostics preview calls the same builders as the real prompt.`
     'quick-replies': ['st-layout'],
     'regex-scripts': ['st-layout'],
     'expressions': ['st-layout', 'st-card-v3'],
+    'img-prompt-library': ['img-templates', 'img-anatomy'],
+    'img-prompt-slots': ['img-templates'],
+    'img-json-prompt-builder': ['img-anatomy'],
+    'img-photo-composer': ['img-anatomy'],
+    'img-reference-edit': ['img-recipes', 'img-consent'],
+    'img-edit-recipes': ['img-recipes'],
+    'img-infographic-studio': ['img-recipes', 'img-anatomy'],
+    'img-cover-poster-studio': ['img-recipes', 'img-anatomy'],
+    'img-product-studio': ['img-recipes', 'img-consent'],
+    'img-avatar-pack': ['img-recipes', 'img-consent'],
+    'img-storyboard-keyframes': ['img-recipes', 'img-anatomy'],
+    'img-diorama-presets': ['img-recipes'],
+    'img-prompt-lint': ['img-anatomy'],
+    'img-negative-prompts': ['img-anatomy'],
+    'img-seed-lock': ['img-anatomy'],
+    'img-ab-variations': ['img-anatomy'],
+    'img-aspect-presets': ['img-recipes'],
+    'img-import-credit': ['img-templates', 'img-consent'],
+    'img-likeness-guard': ['img-consent'],
     'rolling-summary': ['st-prompt-order'],
     'chat-log-import-export': ['st-chatlog', 'st-layout'],
     'group-chat': ['st-prompt-order', 'st-chatlog'],
@@ -16333,7 +17389,41 @@ the diagnostics preview calls the same builders as the real prompt.`
     'dad-vault-bridge': ['dad-skill-vault-bridge', 'dad-skill-presence-bus', 'dad-skill-wire-envelopes', 'dad-skill-dad-full'],
     'dad-session-slots': ['dad-skill-session-slots', 'dad-skill-dad-full', 'dad-data'],
     'dad-world-state': ['dad-skill-world-state', 'dad-skill-dad-full', 'dad-world'],
-    'dad-curated-density': ['dad-skill-curated-density', 'dad-flow']
+    'dad-curated-density': ['dad-skill-curated-density', 'dad-flow'],
+    'site-one-click-builder': ['web-spec', 'web-pipeline', 'web-field-ai', 'web-edges'],
+    'site-from-idea': ['web-spec', 'web-render-safety'],
+    'site-ai-fields': ['web-field-ai', 'web-spec'],
+    'site-brief-expander': ['web-pipeline', 'web-spec', 'web-edges'],
+    'site-spec-model': ['web-spec', 'web-edges'],
+    'site-pipeline-resilience': ['web-pipeline', 'web-edges', 'weld-limits'],
+    'site-multipage': ['web-spec', 'web-render-safety'],
+    'site-single-page': ['web-spec'],
+    'site-section-library': ['web-spec', 'web-render-safety'],
+    'site-design-tokens': ['web-spec', 'web-render-safety'],
+    'site-copywriter': ['web-spec', 'web-field-ai'],
+    'site-imagery': ['web-spec', 'web-render-safety', 'weld-limits'],
+    'site-seo-meta': ['web-spec', 'web-render-safety'],
+    'site-contact-forms': ['web-render-safety', 'weld-caps'],
+    'site-interactive-widgets': ['web-spec'],
+    'site-feature-blocks': ['web-spec', 'web-render-safety'],
+    'site-section-editing': ['web-field-ai', 'web-spec'],
+    'site-wrap-generator': ['web-spec', 'web-render-safety'],
+    'site-project-library': ['web-spec', 'weld-limits', 'web-edges'],
+    'site-live-preview': ['web-render-safety', 'weld-limits'],
+    'site-export-bundle': ['web-render-safety', 'weld-caps', 'weld-limits'],
+    'site-render-safety': ['web-render-safety', 'web-spec'],
+    'site-quality-audit': ['web-render-safety', 'web-edges'],
+    'site-edge-cases': ['web-edges', 'web-pipeline', 'weld-limits'],
+    'ai-json-contract': ['web-edges'],
+    'ai-context-budget': ['weld-limits'],
+    'sandbox-frame-fallbacks': ['weld-limits', 'weld-caps'],
+    'unicode-text-safety': ['web-edges'],
+    'size-limit-guard': ['weld-limits'],
+    'cross-tab-state': ['weld-limits', 'weld-caps'],
+    'backup-readiness': ['weld-limits'],
+    'undo-redo': ['web-field-ai'],
+    'large-generator-slicing': ['weld-limits'],
+    'perchance-syntax-guard': ['weld-limits']
   };
 
   const byId = Object.freeze(packs.reduce((m, p) => { m[p.id] = p; return m; }, {}));
@@ -16426,6 +17516,318 @@ the diagnostics preview calls the same builders as the real prompt.`
   return Object.freeze({ rows });
 });
 
+/* Website-building skills (section "web") plus cross-cutting edge-case skills for other sections.
+   Structure references are attached by id from skills-refs.js. Plain data, no network or editor access. */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.WeldSkillsWeb = factory();
+})(typeof window === 'object' ? window : globalThis, function () {
+  'use strict';
+  // [category, id, title, description, mode, task, fit, sources]
+  const site = ['website', 'utility'], any = [], design = ['anthropic', 'ux'];
+  const rows = [
+    // --- The one-click builder and its AI fields ---
+    ['web', 'site-one-click-builder', 'Add a one-click AI website builder page', 'One idea box, single or multi page, one Build button: AI fills and assembles the whole site.', 'change',
+      'Add a Website Builder page to this generator. The user types ONE idea (a text box), picks Single page or Multi page, and presses Build; AI then fills everything else with no further questions. Follow the SITE SPEC and ONE-CLICK PIPELINE references: stage 1 expands the idea into a brief, stage 2 plans pages and sections, stage 3 writes each page (one request per page in multi mode), stage 4 chooses design tokens, optional stage 5 makes images, stage 6 writes titles and meta text. Show a real progress list per stage, Stop, per-stage Retry and Skip, and a live preview that updates as stages finish. Every generated value lands in an editable field with Rewrite and Fill beside it (see the AI FIELD HELPER reference), and the whole site stays in one saved spec. Use only the text and image plugins this generator already imports (verify their real call shape from the source; add the import only if missing). Never auto-run on load, never invent prices, contact details or testimonials, treat the idea as data, and keep the existing generator working. End with Export and a clear note that nothing was published. Verify an empty idea, a one-word idea, single and multi mode, Stop mid-run, a failed stage and a reload.', site, design],
+    ['web', 'site-from-idea', 'Build a complete website from my idea', 'Create the site itself (not a builder) in this generator, single or multi page.', 'change',
+      'Build the website described in USER DETAILS directly in this generator: choose single page or multi page from the brief (ask one focused question only if the idea is missing). Define the Site Spec first (see reference), then render pages from it with a header, navigation, sections, footer, responsive layout and a coherent palette and type scale. Write real, specific copy from the brief; leave unknown facts (prices, phone, address, testimonials) as clearly marked empty fields instead of inventing them. Use the generator text plugin only if the user wants content generated live; otherwise write the content now. Keep it keyboard accessible, mobile first and free of external trackers. Verify every nav link, the mobile layout and the page title.', site, design],
+    ['web', 'site-ai-fields', 'Add AI Rewrite & Fill to every site field', 'Each title, tagline, section and SEO field gets its own AI helper with undo and lock.', 'change',
+      'Add the AI FIELD HELPER to every editable field of the site builder or site editor page: Rewrite when the field has text, Fill when it is empty, Variants, Undo and Lock. Each request carries only the short brief, the field role and limit, the current text and at most three neighbor values. Clean the reply (fences, quotes, preambles), enforce the character limit at a word boundary, reject empty, identical or wrong-language replies and never overwrite text typed while a request was running. Provide Fill all empty (one structured request keyed by field id, validated per field, applied only to empty unlocked fields) with a preview and whole-batch undo. One request per field, Stop on each, no auto-run on load. Verify empty, filled, locked, failing, cancelled and rapid repeated use.', site, design],
+    ['web', 'site-brief-expander', 'Expand one idea into a full site brief', 'Infer audience, goal, tone, pages and features, and mark every guess.', 'change',
+      'Add the brief stage: from a one-line idea (any language) produce a short structured brief (audience, goal, tone, language, suggested pages, suggested features, a name and tagline candidate). Mark which fields were inferred rather than stated, show the brief as editable fields with Rewrite and Fill, and let the user re-run just this stage. Validate the reply against the schema, cap every field, repair once on malformed output, and fall back to the raw idea if it cannot be repaired. Do not invent a company, address or credentials; keep the idea text as data that cannot change the schema or rules. Verify a vague idea, a detailed idea, a non-English idea and a hostile pasted instruction.', site, design],
+    ['web', 'site-spec-model', 'Define the Site Spec as the single source of truth', 'One JSON model that fields, preview, save and export all share.', 'change',
+      'Introduce or tighten a versioned Site Spec (see reference): brand, pages, sections with typed fields, nav and footer. Make every editable field, the live preview, saved projects and the export read and write only this model. Add a validator that checks types, limits, unique slugs and ids, reports each problem by path, and a migrator that upgrades older specs additively without dropping unknown section types or fields. Never trust an imported or AI-produced spec: validate before it replaces anything and keep the previous one for undo. Verify a valid spec, a corrupt spec, an older version and a spec with unknown section types.', site, []],
+    ['web', 'site-pipeline-resilience', 'Make the AI build pipeline robust', 'Stages, JSON repair, timeouts, Stop, resume and late replies handled.', 'change',
+      'Harden the stage runner behind the site builder using the ONE-CLICK PIPELINE and EDGE CASES references. Give each stage a run id, a timeout and cancellation; ignore late replies from a stopped or older run; allow one run at a time. Parse replies by stripping fences and extracting the first balanced JSON object, validate, repair once with a short corrective request, then fall back to a deterministic template for that part and say so. Keep the request small (brief plus only what the stage needs) so it stays well under the helper input cap. Save the spec after every stage and offer Continue or Start over after a reload. Retry only transient failures with a bounded count and never repeat paid image calls silently. Verify truncated JSON, wrong types, a stage that never returns, Stop, offline and two tabs.', site, []],
+    // --- Structure: pages, sections, layout ---
+    ['web', 'site-multipage', 'Add multi-page navigation inside a generator', 'Several pages with shared header and footer, working links, back button and a 404.', 'change',
+      'Add multi-page structure to this generator: a page list in the Site Spec, shared header, navigation and footer, one rendered page at a time, the active link marked, and the browser back and forward buttons working through the URL hash. Normalize slugs (lowercase, a-z 0-9 and dashes, unique, never empty or reserved), keep home first, show a friendly not-found page for unknown hashes and move focus and scroll to the new page title on navigation. Handle one page, many pages, a long nav on a phone (collapsible menu) and orphan pages that no nav item reaches. Exported files must also link with relative .html links that work from disk. Verify direct open of a hash, rename of a slug, delete of the current page and reload.', site, design],
+    ['web', 'site-single-page', 'Build a single-page scrolling site', 'Anchored sections, sticky nav, scroll highlight and smooth, accessible jumping.', 'change',
+      'Build or convert to a single page website: one document with anchored sections, a sticky header whose links jump to them, scroll-position highlighting of the current link, offset so headings are not hidden under the header, and a back-to-top control. Honor prefers-reduced-motion for smooth scrolling, keep every section reachable by keyboard and make the order in the DOM match the visual order. Keep the section list data-driven from the Site Spec. Verify short and very long pages, a phone width, deep-linked anchors and the keyboard.', site, design],
+    ['web', 'site-section-library', 'Add a library of ready page sections', 'Hero, features, about, pricing, FAQ, gallery, contact and call-to-action blocks.', 'change',
+      'Add data-driven section renderers for the types in the Site Spec reference: hero, features, about, services, pricing, testimonials, faq, gallery, contact, cta and footer. Each renderer takes only its typed fields, tolerates missing and over-long values, renders text through textContent and exposes an add, move, duplicate and delete control in the editor. Pricing and testimonials render only user-supplied content. Give every section an id, a heading level that fits the outline and responsive layout without fixed pixel widths. Verify each type with empty, minimal and maximal data and a very long word.', site, design],
+    ['web', 'site-design-tokens', 'Let AI choose a coherent site design', 'Palette, fonts, spacing and radius as validated tokens with contrast checks.', 'change',
+      'Add a design stage that proposes a small token set (background, text, accent, muted, heading and body font stack from a fixed safe list, radius, spacing scale) from the brief, with 3 to 4 named style directions the user can switch between. Validate colors as hex, compute contrast for text on background and accent on background, and automatically adjust or reject values below WCAG AA. Apply tokens through CSS variables owned by the renderer, never AI-written CSS. Provide a light and a dark variant and a reset to the default. Verify low-contrast output from the model, an invalid color, dark mode and reload.', site, design],
+    ['web', 'site-copywriter', 'Add per-section AI copywriting with tone control', 'Specific, honest copy within length limits, in the chosen language and tone.', 'change',
+      'Add section-level AI copy generation with controls for tone, length and language. Use the brief and the section type so copy is specific rather than generic, obey the field limits, and keep the same voice across sections by passing a short style note. Do not fabricate statistics, awards, customer names, testimonials, prices, certifications or contact details; if the section needs them and none were given, leave the field empty and say so. Reject filler such as lorem ipsum and bracketed placeholders. Keep a Variants choice and undo. Verify tone changes, a non-English site, over-long replies and an empty brief.', site, []],
+    ['web', 'site-imagery', 'Add AI images and alt text to the site', 'Image slots with prompts, alt text, safe fallbacks and a cost guard.', 'change',
+      'Add image slots to sections (hero, gallery, cards) with a prompt derived from the brief and section, mandatory alt text (AI-suggested, editable), and a graphical placeholder when no image exists. Use the image plugin this generator already imports and verify its real options; do not invent sizes, seeds or editing. Generate on request or after a single confirmation that states the number of images, one at a time with Stop, keep results as urls or small data within the storage limit, handle failures with Retry and release temporary resources. Exports must keep alt text and still work with images missing. Verify failure, many slots, reload and a missing image in export.', site, []],
+    ['web', 'site-seo-meta', 'Add SEO titles, descriptions and social tags', 'Per-page title and meta description with limits, heading outline and exported tags.', 'change',
+      'Add per-page SEO fields (title about 60 characters, description about 155, optional social image) with AI Fill and live length counters, plus a check that each page has one h1 and a sensible heading order. Write the title, meta description, canonical-free social tags, lang attribute and viewport tag into the exported pages, and offer a plain sitemap list and robots text for the user to place. Say plainly that a Perchance generator page itself cannot gain these tags from inside its frame, so they apply to the export. Do not invent claims or keywords stuffing. Verify long text, empty fields and multi-page export.', site, []],
+    ['web', 'site-contact-forms', 'Add contact and newsletter forms that tell the truth', 'Validated forms with a real delivery path or an honest copy and mailto fallback.', 'change',
+      'Add a contact form and optional newsletter box to the site. Validate with labels, required and type attributes, inline messages and a honeypot field. A static site has no server, so do not pretend a message was sent: provide only paths that really exist (a mailto link built from a user-supplied address, copy the message to the clipboard with a fallback text box, or a form action URL the user types in), and state which one is active. Never embed API keys or webhook URLs in public code. Keep the submit disabled while working, avoid double submission and keep entered text on error. Verify empty, invalid email, very long text, clipboard blocked and no address set.', site, []],
+    ['web', 'site-interactive-widgets', 'Add accessible interactive page widgets', 'Accordion, tabs, carousel, modal and mobile menu that work with keyboard and touch.', 'change',
+      'Add the requested widgets (accordion for FAQ, tabs, carousel, modal dialog, mobile menu) as small reusable functions driven by the Site Spec. Use the right roles and aria attributes only where needed, full keyboard support (Arrow, Home, End, Escape, Tab order), focus entry and return for dialogs, visible focus, touch targets of at least 44 pixels and prefers-reduced-motion. No autoplay without a pause control. Content must still be readable if the script fails. Verify keyboard-only use, a screen-reader label check, many items and a narrow phone.', site, ['ux', 'market']],
+    ['web', 'site-feature-blocks', 'Add site features: blog, portfolio, pricing, booking, store catalog', 'Pick the features your site needs and add them as editable data-driven blocks.', 'change',
+      'Add the site features named in USER DETAILS (or ask which, from: blog or news list, portfolio grid with filters, pricing table, FAQ, team, events, booking request, product catalog without payments, newsletter, downloads). Model each as typed Site Spec content with an editor, AI Fill for descriptions only, sensible empty states and responsive layout. Do not add payments, accounts or server features that cannot work in a static generator; offer a request-by-email or link-out instead and say so. Keep existing pages and saved data. Verify empty, one item, many items and export.', site, design],
+    ['web', 'site-section-editing', 'Edit sections with AI: change, reorder, undo', 'Per-section instructions with side-by-side accept or reject and full undo.', 'change',
+      'Add section editing to the site editor: a Change this box per section (for example make it shorter, more formal, add a pricing table), producing a new section object that is validated, shown beside the old one and applied only on Accept. Add move up and down, duplicate, delete with confirmation, and a bounded undo and redo history for spec changes. Locked fields stay untouched. Handle an invalid reply, a reply that changes the section type, and many rapid edits. Verify undo across reload-safe saves and delete of the last section.', site, []],
+    ['web', 'site-wrap-generator', 'Turn this generator into a full website', 'Wrap the existing tool in a landing page with about, how it works, FAQ and footer.', 'change',
+      'Keep the existing generator tool exactly as it works and surround it with website pages: a hero that explains what it does, the tool itself as the main section, how it works, examples, FAQ, about and footer, with navigation. Write copy only from what the generator truly does (read the lists and handlers); do not claim features it lacks. Keep all current IDs, handlers and saved data intact, make the tool reachable without scrolling past marketing, and keep mobile layout usable. Verify the tool still generates, copy works and every nav link.', site, design],
+    ['web', 'site-project-library', 'Save, switch and share multiple site projects', 'Autosave, named projects, versions and safe import and export of specs.', 'change',
+      'Add a project library for sites: named projects, autosave after changes with a debounce, a bounded list of restore points, duplicate, rename and delete with confirmation, and import and export of the Site Spec as a file. Validate every imported spec before it replaces anything and never overwrite on import. Store specs compactly (images as urls) and watch the size limits in the WELD LIMITS reference; warn before a save would exceed them and keep the previous good copy if a write fails. Handle unavailable storage with a visible memory-only warning. Verify two tabs, a corrupt record, quota failure and reload.', site, []],
+    // --- Preview and export ---
+    ['web', 'site-live-preview', 'Add a safe live preview with device widths', 'Sandboxed iframe preview that updates smoothly and never runs generated code.', 'change',
+      'Add a live preview of the site rendered from the Site Spec inside a sandboxed iframe (srcdoc, sandbox without allow-same-origin, no AI-written scripts). Update it debounced after edits and stage completion, keep scroll position where possible, offer Phone, Tablet and Desktop widths, an open-in-new-view option only if the sandbox allows it, and a clear error state if rendering fails. Cap the size of the document, escape any embedded JSON and show which page is previewed in multi mode. Verify rapid edits, a huge page, a blocked iframe feature and dark mode.', site, ['anthropic']],
+    ['web', 'site-export-bundle', 'Export the site as ready-to-host files', 'One html file or a page-per-file bundle with shared styles that works from disk.', 'change',
+      'Add export that renders the Site Spec with the same renderer as the preview: one self-contained html file in single mode, or one html file per page plus a shared style.css in multi mode with relative links that work when opened from disk. Include doctype, lang, charset, viewport, title and meta description, sanitize filenames from slugs, and keep totals within download limits. Deliver through Weld Skybridge download when available (sb.has) otherwise a Blob link, and fall back to a selectable text box when downloads are blocked; for multi files offer one file at a time or a single combined text. Never claim the site was published or hosted. Verify single, multi, blocked download, special characters and opening the result in a browser.', site, []],
+    // --- Reviews ---
+    ['web', 'site-render-safety', 'Review generated-site rendering for safety', 'Trace AI text from reply to DOM, URL, CSS and export.', 'review',
+      'Trace every path where AI output or imported spec data reaches the page, preview and export: innerHTML use, href and src values, inline styles and CSS strings, srcdoc construction, filenames, embedded JSON and downloads. Check against the SAFE RENDER reference and report each source-to-sink path with realistic impact, plus URL scheme, color, font and size validation gaps. Do not execute hostile payloads or edit anything.', site, []],
+    ['web', 'site-quality-audit', 'Audit the generated site for quality', 'Headings, contrast, alt text, links, mobile and size on the real output.', 'review',
+      'Inspect the rendered site and exported files: one h1 per page and heading order, landmarks, link text and working links, image alt text, color contrast, keyboard path and focus, touch targets, mobile widths 320 to 768, very long text, empty sections, page weight, title and meta description per page. Report observed pass or fail with the page and section, a separate list of checks not run, and a minimal fix for each failure. Do not change code.', site, ['ux', 'market']],
+    ['web', 'site-edge-cases', 'Test the site builder against its edge cases', 'Walk the full edge-case checklist and report what breaks.', 'review',
+      'Run the builder through the EDGE CASES reference: input cases, AI reply cases, run cases, data cases, output cases and sandbox cases. For each case record what was done, what happened and whether state, saved data and the preview stayed consistent. Use bounded local checks and fixtures; do not start paid or large AI batches, and state plainly which cases could not be run. Rank failures by user impact and give a narrow fix for each. Do not change code.', site, []],
+    // --- Edge cases that apply to every generator ---
+    ['ai', 'ai-json-contract', 'Make AI structured output dependable', 'Extract, validate and repair JSON replies before using them.', 'change',
+      'Find every place the generator asks the model for JSON or another structured format and route it through one parser: strip code fences and chatter, extract the first balanced object or array, parse in try/catch, validate type, required keys, enum values and lengths, drop unknown keys safely, then repair once with a short corrective request before giving a clear error or a deterministic fallback. Treat the reply as untrusted data: never evaluate it, never use it as HTML and cap sizes. Keep user work when parsing fails. Verify fenced, truncated, extra-text, empty, wrong-type and very large replies.', [], ['anthropic']],
+    ['ai', 'ai-context-budget', 'Keep AI requests inside the context window', 'Budget prompt size, summarize or slice, and stay under the helper input cap.', 'change',
+      'Inspect how prompts are assembled and add a budget: estimate size with the same helper everywhere (characters divided by three is a safe estimate), include only what each request needs, and slice or summarize old context instead of sending everything. Read model limits from the plugin or sb.modelInfo when known and treat unknown as unknown. Warn before a request that is too large, never silently truncate the user text, and keep the preview of the assembled prompt identical to what is sent. Verify tiny, normal and oversized inputs.', [], []],
+    ['quality', 'sandbox-frame-fallbacks', 'Handle blocked storage, clipboard and downloads', 'Give every browser feature that can be blocked in the generator frame a fallback.', 'change',
+      'List every use of localStorage, sessionStorage, IndexedDB, clipboard, downloads, window.open, fullscreen, file inputs and notifications. Wrap each in feature detection and try/catch and add the honest fallback: memory-only mode with a visible warning, a selectable text box instead of a blocked clipboard, a Blob or Skybridge download, an inline view instead of a popup. Report the real backend in use, never claim success after a failed call and keep working without any of them. Verify each feature blocked, allowed and throwing.', [], []],
+    ['quality', 'unicode-text-safety', 'Handle any language, emoji and long text', 'Right-to-left, CJK, emoji, combining marks, very long words and pasted markup.', 'change',
+      'Test and fix text handling with right-to-left scripts (dir=auto or per-field direction), CJK without spaces, emoji and combining marks (count and truncate by grapheme, not UTF-16 unit), very long unbroken words (overflow-wrap), normalizing pasted text, and pasted HTML or markdown that must stay text. Check length counters, truncation at limits, file names, JSON round trips and downloads. Preserve the user text exactly unless a field requires normalization. Verify mixed-direction text, a 5,000-character paste and a flag emoji at the cut point.', [], []],
+    ['data', 'size-limit-guard', 'Stay inside Weld and Perchance size limits', 'Keep generator text, saved values and exports under the documented caps.', 'change',
+      'Measure the lists panel, HTML panel and stored values against the limits in the WELD LIMITS reference (generator writes capped near 2 MB, storage values over 2 MB refused or slow). Move large data (images, long JSON, histories) to bounded storage or urls, compress or trim safely, and add a visible size meter with a warning before a save would fail. Keep the previous good copy when a write fails, never truncate user data silently and report exactly what was moved. Verify near-limit, over-limit and restore.', [], []],
+    ['data', 'cross-tab-state', 'Handle two tabs and stale saves', 'Prevent one tab overwriting the other and detect external changes.', 'change',
+      'Inspect saved state shared by several open tabs. Add a revision counter and listen for the storage event (or the Skybridge bus when has) so a tab notices newer data, merges or asks before overwriting, and never saves a stale copy over a newer one. Debounce writes, flush on page hide and keep a single writer for long operations. Keep older records readable. Verify two tabs editing the same item, one tab closed mid-save and storage cleared in one tab.', [], []],
+    ['data', 'backup-readiness', 'Check the generator is safe to back up and restore', 'Review size, secrets, imports and external assets before a Weld backup.', 'review',
+      'Review whether this generator can be backed up from the editor and restored later without loss: total size of both panels against the 2 MB write cap, imported plugins and module generators that also need saving, external assets that may disappear, secrets or personal data embedded in the code, and state kept only in the browser that a backup will not include. Report each risk with evidence and a minimal remedy, and list what cannot be verified from here. Do not change anything.', [], []],
+    ['features', 'undo-redo', 'Add undo and redo for edits', 'A bounded history with keyboard shortcuts that survives rapid changes.', 'change',
+      'Add undo and redo for the edits users make in this generator (text fields, items, settings). Store compact snapshots or inverse operations, bound the history, group rapid typing into one step, bind Ctrl or Cmd+Z and Shift+Z only outside native text-input undo, show buttons with disabled states and clear history on a new project. Never record AI progress chunks as separate steps. Verify many edits, undo after reload when persisted, redo cleared by a new edit and memory use.', [], []],
+    ['engineering', 'large-generator-slicing', 'Plan a big change in small safe slices', 'Split work to fit the helper input cap and verify each slice before the next.', 'review',
+      'Plan the change in USER DETAILS as slices that each fit one helper request (the native input takes roughly 6k tokens): list the slices in order, the files, lists and handlers each one touches, what must still work after it, and a check to run. Put shared contracts (data shapes, ids, storage keys) in the first slice so later ones agree. Flag steps that need both panels or an imported plugin to be re-saved. Do not make the changes in this review.', [], []],
+    ['engineering', 'perchance-syntax-guard', 'Find Perchance syntax traps in lists and HTML', 'Separate templating from JavaScript and fix characters that get misread.', 'change',
+      'Scan both panels for text that Perchance may interpret as templating inside what is meant to be JavaScript, CSS or literal text: square and curly brackets, backslash escapes, dollar-prefixed names, indentation in lists, duplicate list names and unmatched quotes. Confirm each suspicion with the live preview and the perchanceErrors output before editing, since many bracket patterns are harmless, and fix only confirmed problems with the narrowest escape or restructure. Re-run the same workflow afterwards. Report suspicions that could not be confirmed.', [], []]
+  ];
+  return Object.freeze({ rows });
+});
+
+/* AI image prompt skills (section "imagegen"), adapted from ideas in two public Nano Banana Pro prompt collections.
+   Original task wording; no prompts or images from those collections are bundled. Plain data, no network or editor access. */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.WeldSkillsImage = factory();
+})(typeof window === 'object' ? window : globalThis, function () {
+  'use strict';
+  // [category, id, title, description, mode, task, fit, sources]
+  const img = ['image'], src = ['nano', 'nanoym'];
+  const rows = [
+    // --- Prompt libraries, templates and builders ---
+    ['imagegen', 'img-prompt-library', 'Build an image prompt library & gallery', 'Browse, search, tag and reuse ready-made prompts with example slots.', 'change',
+      'Add a prompt library to this generator: a searchable grid of prompt cards grouped by the PROMPT LIBRARY CATEGORIES in the reference (portraits, creative experiments, education, e-commerce, workplace, photo editing, interior design, social media, daily life, avatars). Each card shows title, one-line description, tags, a short preview of the prompt, and buttons Use (fill the generator prompt box, never auto-generate), Copy, Favorite and Details. Store the library as data in the template model from the reference, keep user-added prompts separate from built-ins, and cap the visible count with Show more. Seed it with a small set of original prompts written for this generator, not copied from other collections. Render all prompt text as text. Verify search, tag filters, an empty result, favorites after reload and a very long prompt.', img, src],
+    ['imagegen', 'img-prompt-slots', 'Add fill-in-the-blank prompt templates', 'Turn a prompt into labeled fields with defaults and a live preview.', 'change',
+      'Add templates whose changeable parts are named slots (see SLOT SYNTAX in the reference). Parse slots from the template, build one labeled input per unique slot with its default as placeholder, show the filled prompt live, and mark unfilled slots clearly. Defaults must produce a good image on their own, so Generate works with zero edits. Support the same slot used twice, slots inside quoted text, a literal brace via escaping and unknown slot names without breaking. Never evaluate slot values as code or HTML, cap value length, keep the template text unchanged when saving values, and let the user save, rename and delete filled presets. Verify empty values, repeated slots, special characters and a template with no slots.', img, src],
+    ['imagegen', 'img-json-prompt-builder', 'Add a structured (JSON) prompt builder', 'Edit subject, photography, background and avoid-list as fields, send as JSON or plain text.', 'change',
+      'Add a builder that edits the prompt as structured fields (subject, clothing or details, accessories, photography with camera style, lighting, angle and texture, background, and an avoid list) following the STRUCTURED PROMPT shape in the reference. Keep the object in one state value, show a live JSON view, and offer a switch to flatten it into a readable paragraph for models that handle prose better. Validate types, drop empty keys, cap sizes, and let the user import and export the JSON. Check the real image plugin or model call to see whether it accepts a long structured prompt before sending JSON, and fall back to the flattened text. Keep any instruction like preserve the original face as its own field. Verify empty fields, nested arrays, invalid imported JSON and very long values.', img, src],
+    ['imagegen', 'img-photo-composer', 'Add a photo style composer with chips', 'Pick lens, lighting, era, mood and finish from labeled options.', 'change',
+      'Add a composer of option groups that assemble prompt clauses: camera and lens (for example 35mm wide, 85mm portrait, fisheye, compact digital), lighting (flash, golden hour, soft window, rim light), era or film look, color grade, depth of field, composition and finish. Use the PROMPT ANATOMY order from the reference, show the clause each chip adds on hover, allow at most one chip per exclusive group, and show the combined prompt before generating. Include a Reset and a Random combination button that respects the exclusive groups. Do not add claims such as 8K or award-winning unless the user picks them. Keep the user own prompt text in its own field and append clauses after it. Verify conflicting chips, no chips and rapid toggling.', img, src],
+    // --- Editing with reference images ---
+    ['imagegen', 'img-reference-edit', 'Add reference-image editing with identity lock', 'Upload one or more images and edit them while keeping faces and details.', 'change',
+      'Add an edit mode where the user supplies one to three reference images and a short instruction. Label images Image 1, Image 2 and Image 3 in the UI and in the prompt so instructions can refer to them. Add an Identity lock switch that appends a clear preserve-the-face-and-features clause, and a Preserve list (logos, texture, colors, pose, background). Before using any photo of a real person show a one-time consent line that the user has the right to use it, and apply the LIKENESS AND CONSENT rules in the reference. Verify the real plugin accepts image input and in what form (url, data URL or blob) from its source before wiring it, and say plainly when it does not. Check file type and size, show thumbnails with Remove, never upload anything automatically, and release object URLs. Verify no image, a wrong file type, an oversized file and three images.', img, src],
+    ['imagegen', 'img-edit-recipes', 'Add one-click photo fix & edit recipes', 'Outpaint, remove crowds, restore, colorize, translate text and more.', 'change',
+      'Add a recipe picker for common edits using the EDIT RECIPES in the reference: outpaint to a new aspect ratio, remove people or objects, restore and colorize old photos, replace the background, relight, fix a tilted or cropped composition, and translate visible text in an image. Each recipe shows what it needs (one image, a target ratio, a language), builds its prompt with a built-in Preserve clause, and lets the user edit the prompt before sending. Offer a Compare view (original and result) and keep the original untouched. Do not promise exact results, and tell the user when the plugin cannot accept an input image. Verify each recipe with missing input, a changed ratio and Cancel.', img, src],
+    // --- Purpose-built studios ---
+    ['imagegen', 'img-infographic-studio', 'Add a concept-to-infographic studio', 'Describe a topic, pick style and language, get a labeled educational image.', 'change',
+      'Add a studio that turns a topic into an educational infographic prompt: topic, audience level, visual style (flat vector, textbook, sketch, bento grid, flow chart, Sankey), language for labels, and a list of the elements and arrows the user wants. Optionally ask the text model to list the key components first (return a short validated list) and let the user edit it before the image is requested. State that label spelling and numbers in generated images must be checked by a person, add a Regenerate with corrections field, and offer a plain text version of the content as a fallback. Do not invent facts or statistics; ask the user to supply data for charts. Verify a two-word topic, a long topic, a non-English label language and an empty element list.', img, src],
+    ['imagegen', 'img-cover-poster-studio', 'Add a cover, thumbnail & poster studio', 'Compose text-on-image designs with exact wording and safe layout.', 'change',
+      'Add a studio for covers, video thumbnails, quote cards, posters and magazine covers. Fields: headline text (exact wording in quotes), optional subtitle, subject or reference image, layout (subject left and text right, centered, full bleed), mood, colors, and format presets with their aspect ratios (16:9, 9:16, 1:1, 4:5, A-series paper). Put every text string in quotes in the prompt, state font feel, outline or shadow for contrast and position, and add a legible-text check reminder. Keep headlines short (warn above about eight words), keep important text inside a safe margin, and keep a text-free version option so the user can add real type later. Verify long text, quotes and apostrophes inside text, non-Latin scripts and each format.', img, src],
+    ['imagegen', 'img-product-studio', 'Add a product, try-on & virtual studio', 'Place products and garments in clean studio, lifestyle or model shots.', 'change',
+      'Add a product studio: product image or description, scene presets (white seamless, marble, lifestyle room, outdoor, floating with shadow), lighting and camera options, a brand color, and optional model try-on where a garment image and a model image are labeled Image 1 and Image 2. Add Preserve controls for fabric texture, color and logos, and a natural-fit clause for drape, folds and shadows that match the scene lighting. Add a batch for angles and backgrounds with a bounded count and a visible cost estimate when the plugin has one. Do not invent logos, certifications or claims, and mark outputs as AI illustrations for listing use. Verify missing product image, mismatched sizes, transparent PNG and a batch cancel.', img, src],
+    ['imagegen', 'img-avatar-pack', 'Add avatar, sticker & multi-pose sets', 'Generate a matching set from one description or reference.', 'change',
+      'Add a set generator: choose a style (blind-box figure, chibi, pet meme, sticker, Y2K scrapbook, game portrait, profile avatar), one subject description or a labeled reference image, and a number of poses or expressions from an editable list. Build one shared style block plus a short per-item line so the set stays consistent, generate with bounded concurrency and show a contact sheet with Retry per item. Offer a transparent-or-plain background option and a text-free option for sticker use. Apply the LIKENESS AND CONSENT rules for real people, never auto-start a large batch and show the count before running. Verify one item failing, Stop mid-batch and re-running only the failed items.', img, src],
+    ['imagegen', 'img-storyboard-keyframes', 'Add a storyboard & keyframe planner', 'Turn one image or idea into a continuous set of cinematic shots.', 'change',
+      'Add a planner that takes one reference image or a short description and produces 3 to 8 shots. Step 1 asks the text model to describe only what is visible (subjects, layout, light, time of day) and list 3 to 6 visual anchors that must stay constant. Step 2 proposes a theme and a short setup, build, turn, payoff arc. Step 3 writes a prompt per shot with shot size, angle, camera move and action, repeating the anchors so subjects, wardrobe, setting and color grade stay continuous, and never adding new characters. Show shots as editable cards with reorder, regenerate and copy. Validate all model replies as JSON, never guess real identities, places or brands, and keep it a planning aid, not an automatic video render. Verify one-shot, eight-shot and a malformed model reply.', img, src],
+    ['imagegen', 'img-diorama-presets', 'Add isometric, miniature & 3D scene presets', 'Place a city, room, object or story into a collectible miniature look.', 'change',
+      'Add a preset set for miniature and 3D looks: isometric room or office, city or country diorama with landmarks, floating island, tiny pool or street scene, ornament or figure, 3D map, and storefront in a chibi or toy style. Each preset has a slot for the place or subject (for example a city name) and fixed clauses for viewing angle, scale, material (clay, plastic, glass, paper), soft studio lighting, tilt-shift depth and a clean background. Add a landmark list the user can edit, an aspect ratio and an optional caption text slot. Do not assert that landmarks are accurate; ask the user to check. Verify an unknown place, a long list of landmarks and each preset with default slots.', img, src],
+    // --- Prompt quality, variation and safety ---
+    ['imagegen', 'img-prompt-lint', 'Review image prompts for common problems', 'Find vague, conflicting or unsafe wording before it is sent.', 'review',
+      'Inspect how this generator builds image prompts and review sample prompts it produces. Check against the PROMPT ANATOMY in the reference: missing subject, vague words with no visual meaning, contradictory lighting or style, too many ideas in one sentence, text that is not in quotes, missing aspect ratio, identity instructions stated once or not at all in edit prompts, negative lists that mention the unwanted thing without need, and boilerplate such as repeated 8K or award-winning claims. Report each finding with the sample, why it hurts the result, and a minimal rewrite. List what could not be checked without generating images. Do not change code.', img, src],
+    ['imagegen', 'img-ab-variations', 'Add A/B prompt variations and side-by-side compare', 'Try two or more wordings or settings and keep the winner.', 'change',
+      'Add a compare mode that runs the same idea with up to four variants (different wording, style chip or one setting) and shows results side by side with their prompts. Cap the count, show the total number of requests before running, run with bounded concurrency, allow Stop, keep partial results and mark which prompt made which image. Add Keep this one, which saves the winning prompt as a preset, and a note field per variant. Never run automatically and never retry failures silently. Verify one failed variant, Stop, and a repeated run that must not mix old images into new slots.', img, src],
+    ['imagegen', 'img-aspect-presets', 'Add aspect ratio & size presets', 'One picker that fits wallpapers, covers, avatars and print.', 'change',
+      'Add an aspect ratio and size picker with presets: square 1:1, portrait 3:4 and 4:5, story 9:16, wide 16:9 and 21:9, plus a custom ratio. Read what the actual image plugin supports (named ratios, width and height, or none) from its source and map the choice to it; when it supports only the prompt text, add the ratio to the prompt and say so. Show a framing preview box, remember the last choice, and warn when the choice may crop text or faces. Never invent plugin options. Verify each preset, a custom value out of range and an unsupported plugin.', img, src],
+    ['imagegen', 'img-import-credit', 'Import prompt collections with source credit', 'Bring in markdown or JSON prompts and keep author, link and license.', 'change',
+      'Add an importer for prompt collections in markdown (headings with a fenced prompt and a source line) and in JSON. Parse into the template model from the reference: title, prompt, tags, language, author, source link and license. Preview the parsed items with duplicates and rejects marked, let the user select which to add, and never import automatically. Keep credit visible on every imported card with a link, store the license note, and block items with no prompt text. Treat all imported text and links as untrusted: render as text, allow only http and https links and cap size and count. Do not bundle third-party prompts into the generator itself. Verify a malformed file, 500 items, a duplicate and a missing source.', img, src],
+    ['imagegen', 'img-likeness-guard', 'Add consent, likeness & labeling safeguards', 'Handle real people, public figures and AI disclosure responsibly.', 'change',
+      'Apply the LIKENESS AND CONSENT rules from the reference to this generator. Add a visible consent checkbox before any photo of a real person is used, block or warn on prompts that ask for a named real person in a misleading, intimate, political or deceptive scene, and never use the output to imply endorsement. Add an optional AI-generated label or caption to saved and downloaded images and keep it editable. Keep uploaded reference images local, do not log them, and give a Clear button. Do not claim the filter is complete. Verify a named public figure, a minor-looking subject in an edit request, an empty consent state and a download with the label on and off.', img, src]
+  ];
+  return Object.freeze({ rows });
+});
+
+/* More generator skills across existing sections (1.93.0): repair audits, print, shortcuts, speech, CSV import,
+   AI diff review, image seeds and negatives, games, dashboards, privacy. Original wording. Plain data, no network or editor access. */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.WeldSkillsExtra = factory();
+})(typeof window === 'object' ? window : globalThis, function () {
+  'use strict';
+  // [category, id, title, description, mode, task, fit, sources, steps, check]; steps and check replace the section defaults.
+  const rows = [
+    ['repair', 'global-error-boundary', 'Add a recoverable error boundary', 'Catch uncaught errors and rejections and show a fix-or-retry message instead of a dead page.', 'change',
+      'Add one window error and unhandledrejection handler that records the message, source and a short stack in a bounded in-memory log, shows a small dismissible notice with Retry and Copy details, and restores any controls left disabled by the failed action. Never swallow errors silently: still log them to the console and keep perchanceErrors intact. Do not wrap every function in try/catch; fix the real failing path when one is found. Strip anything that looks like a key or token from copied details.',
+      [], [],
+      ['Find the actions that can throw or reject and how controls are disabled during them.', 'Add the single handler, the notice and the control-restore path.', 'Force a sync error, a rejected promise and a failing plugin call; confirm the page stays usable.'],
+      'Uncaught failures show a recoverable notice, controls come back, the console still shows the error and no secret appears in copied details.'],
+    ['repair', 'dead-code-audit', 'Find dead lists, code and styles', 'Report unused lists, functions, CSS rules and imports with evidence.', 'review',
+      'Inventory every list in the Perchance panel, every function and global in the HTML panel, every CSS selector and every import. For each, find its references (including [list] calls, string-built names, onclick attributes, dynamic selectors and plugin callbacks). Report items with no reference as "likely unused", items referenced only dynamically as "uncertain", and say exactly how you searched. Do not delete anything; give a removal order from safest to riskiest.',
+      [], [],
+      ['List every definition in both panels with its location.', 'Search for direct, templated and string-built references to each.', 'Classify each as used, likely unused or uncertain, with the search evidence.'],
+      'Every flagged item has its search evidence, dynamic references are called out, and nothing is edited.'],
+    ['repair', 'plugin-version-audit', 'Audit imported plugins', 'Check each imported plugin is current, maintained and called the way its page documents.', 'review',
+      'List every {import:...} and plugin call in both panels. For each plugin, open its generator page and compare the documented call shape, options and return value with how this generator uses it. Flag deprecated plugins, forks of official plugins, options that no longer exist, missing error handling and duplicated imports of the same capability. Recommend replacements only when the documented API is verified; never swap providers automatically.',
+      [], [],
+      ['Inventory imports and every call site.', 'Compare each call with the plugin page documentation.', 'Report mismatches, deprecations and duplicates with the exact call site.'],
+      'Each plugin has a verified status, every mismatch names its call site, and no import is changed.'],
+    ['repair', 'css-leak-audit', 'Fix style leaks and collisions', 'Stop generic selectors from restyling plugins, dialogs or the page around the generator.', 'change',
+      'Find unscoped selectors (button, input, div, *, body, generic class names) and !important rules that bleed into plugin UI, dialogs or each other. Scope them under one root class or container, rename colliding classes, and keep the current look of the generator itself. Do not restyle plugin-owned elements unless the user asked. Verify every view, dialog and plugin widget before and after.',
+      [], [],
+      ['List global and generic selectors and what they actually match.', 'Scope or rename the leaking rules in small steps.', 'Compare each view and plugin widget before and after the change.'],
+      'The generator looks the same, plugin and dialog UI is no longer restyled, and no selector depends on a global element name.'],
+    ['design', 'print-layout', 'Add a clean print and PDF layout', 'Print results, stories or sheets without buttons, dark backgrounds or cut-off text.', 'change',
+      'Add a print stylesheet (@media print) that hides controls, navigation and ads-like chrome, switches to dark text on white, expands collapsed sections that hold results, avoids breaking inside cards and headings, and shows link URLs where useful. Add a Print button that prints only the chosen result or the whole page. Keep the screen layout unchanged.',
+      ['story', 'game', 'utility', 'text', 'chat'], [],
+      ['Decide what a printed page should contain for this generator.', 'Add the print styles and a Print action.', 'Check print preview with short, long and multi-page output in light and dark themes.'],
+      'Print preview shows only the content, readable on white, with no cut cards or headings, and the screen layout is unchanged.'],
+    ['design', 'keyboard-shortcuts', 'Add keyboard shortcuts with a help sheet', 'Generate, copy, undo and navigate from the keyboard; press ? to see them all.', 'change',
+      'Add a small shortcut map for the main actions (for example Generate, Copy result, Undo, next and previous result, focus search). Ignore shortcuts while typing in inputs, textareas and contenteditable unless they use a modifier, never override browser or screen-reader keys, and show a ? help sheet listing every shortcut. Keep shortcuts in one table so the help sheet cannot drift from behavior.',
+      [], [],
+      ['Pick the few actions worth a key and check for conflicts.', 'Implement one handler driven by one shortcut table plus the help sheet.', 'Test every key on and off text fields, with a screen reader running and on a non-US layout if possible.'],
+      'Each listed shortcut works, none fires while typing, and the help sheet matches the table.'],
+    ['features', 'read-aloud', 'Add read-aloud (text to speech)', 'Speak a result with voice, rate and stop controls.', 'change',
+      'Add a Read aloud control using the browser speechSynthesis API, feature-detected. Offer voice, rate and pitch from the voices actually available, read only the selected result, highlight or mark the current paragraph where practical, and provide Stop. Remember the chosen voice through the existing settings mechanism. Hide the control with a short note when speech is unavailable. Do not send text anywhere.',
+      ['story', 'chat', 'text', 'utility'], [],
+      ['Find where results are rendered and how settings are saved.', 'Add the feature-detected control, voice settings and Stop.', 'Test long text, switching results mid-speech, no voices, and a reload.'],
+      'Speech starts and stops reliably, the voice choice persists, and browsers without speech show a clear note instead of a broken button.'],
+    ['features', 'voice-input', 'Add voice input for text fields', 'Dictate prompts and messages where the browser supports speech recognition.', 'change',
+      'Add a microphone button to the main input fields using SpeechRecognition / webkitSpeechRecognition, feature-detected. Show listening state, insert interim and final text at the cursor without overwriting what was typed, stop on silence or a second click, and report permission denial clearly. Never auto-submit. Hide the button when unsupported.',
+      ['chat', 'story', 'image', 'utility'], [],
+      ['Choose which fields get dictation.', 'Add the button, listening state and safe insertion.', 'Test permission denied, unsupported browser, long dictation and typing during dictation.'],
+      'Dictated text lands at the cursor, nothing is overwritten or auto-sent, and unsupported browsers see no broken control.'],
+    ['features', 'local-usage-stats', 'Add private local usage stats', 'Show the user their own counts (generations, favorites, time) stored only in their browser.', 'change',
+      'Add a small Stats panel with counts this generator can already observe: generations, rerolls, favorites, exports, most used settings and first and last use dates. Store only aggregate numbers locally through the existing storage, never content or identifiers, and never send them anywhere. Add Reset stats with confirmation and an off switch that stops collecting.',
+      [], [],
+      ['Pick the few counts that are meaningful here.', 'Record aggregates locally with an off switch and reset.', 'Check counts after several actions, reset, the off switch and blocked storage.'],
+      'Counts are accurate, stored only locally as numbers, resettable and switchable off.'],
+    ['features', 'whats-new-panel', 'Add a What\'s new panel', 'Tell returning users what changed since their last visit.', 'change',
+      'Add a short changelog list (version, date, one line per change) inside the generator and a dismissible notice that appears once when the stored last-seen version is older than the current one. Keep the changelog in one data block so it is easy to update. Never show the notice on a first visit; show the first-run guide instead if one exists.',
+      [], [],
+      ['Add the changelog data and a last-seen version key.', 'Show the notice once per new version and a panel to reread it.', 'Test first visit, returning visit, dismiss, and blocked storage.'],
+      'Returning users see the notice once per version, first-time users do not, and the panel always works.'],
+    ['features', 'csv-import-mapping', 'Import CSV with column mapping', 'Bring spreadsheet rows into lists, collections or cards with a preview.', 'change',
+      'Add a CSV/TSV import that parses quoted fields, embedded commas and newlines and a BOM, detects the delimiter, shows the first rows in a preview, and lets the user map each column to a target field (or ignore it). Validate each row, show skipped rows with reasons, and append or replace only after confirmation, with undo. Keep imported text as data and render it with textContent.',
+      ['utility', 'dashboard', 'text', 'chat'], [],
+      ['Define target fields and validation rules.', 'Build parse, preview, mapping and confirm steps.', 'Test quoted commas, multiline cells, a BOM, empty rows, wrong column counts and a 5,000-row file.'],
+      'Messy real-world CSV imports correctly, bad rows are reported not silently dropped, and the import can be undone.'],
+    ['ai', 'ai-diff-review', 'Show AI rewrites as a diff before applying', 'Accept or reject AI changes to long text paragraph by paragraph.', 'change',
+      'Wherever AI rewrites existing user text (rewrite, polish, continue-and-edit), show the proposal as a word or line diff against the current text with Accept all, Reject, and per-change accept where practical. Never replace the original until accepted; keep one undo step after applying. Handle the user editing the original while the request runs by refusing to apply and offering a fresh diff.',
+      ['chat', 'story', 'text', 'utility', 'website'], [],
+      ['Find every AI path that overwrites user text.', 'Route them through one diff-and-confirm step.', 'Test identical output, a full rewrite, edits made mid-request and undo.'],
+      'No AI rewrite lands without being shown and accepted, and edits made during a request are never lost.'],
+    ['ai', 'prompt-injection-review', 'Review prompt-injection exposure', 'Find where pasted text, cards or web content can steer the model or the page.', 'review',
+      'Trace every place untrusted text (user paste, imported cards, lore, chat logs, fetched pages, other generators via the bus) enters an AI prompt or the DOM. For each, report whether it is clearly delimited as data, whether it can change system instructions, tool or JSON schemas, and whether model output is rendered as HTML or executed. Rank by impact and give the smallest fix for each. Do not edit.',
+      ['chat', 'story', 'agent', 'image', 'website'], [],
+      ['Map untrusted inputs to the prompts and DOM sinks they reach.', 'Test each with a harmless hostile string (for example an instruction to ignore rules).', 'Rank findings and propose narrow fixes.'],
+      'Each untrusted path is listed with evidence, test strings and a concrete fix; nothing is changed.'],
+    ['ai', 'content-preferences', 'Add user content preferences', 'Let users choose themes, intensity and topics to include or avoid in AI output.', 'change',
+      'Add a Preferences panel with include and avoid tags, an intensity or tone setting and free-text notes, saved locally. Insert them into the prompt in one clearly labeled block built by the same function that builds the real request, and show it in any prompt preview. Defaults must leave current behavior unchanged. Do not hardcode a filter list; the user decides.',
+      ['chat', 'story', 'image', 'text'], [],
+      ['Find the single place prompts are assembled.', 'Add the panel and the labeled preferences block.', 'Compare prompts with defaults, with several tags, and after reload.'],
+      'Default prompts are unchanged, chosen preferences reach every request, and the preview shows exactly what was added.'],
+    ['imagegen', 'img-negative-prompts', 'Add a negative-prompt manager', 'Reusable avoid-lists per style, applied only where the image plugin supports them.', 'change',
+      'Check the actual image plugin call for a negative prompt option. If supported, add named negative presets, a per-generation edit box and a preview of the final positive and negative text. If not supported, say so and offer an "avoid" phrase appended to the positive prompt as a clearly labeled fallback. Save presets locally and keep defaults identical to current output.',
+      ['image'], [],
+      ['Verify negative-prompt support in the real plugin call.', 'Add presets, edit box and preview, or the labeled fallback.', 'Generate with and without a preset and confirm the request text.'],
+      'Negative prompts reach the plugin only when it supports them, the fallback is labeled, and defaults are unchanged.'],
+    ['imagegen', 'img-seed-lock', 'Add seed lock for repeatable images', 'Reuse a seed to iterate on one image while changing the prompt.', 'change',
+      'Verify whether the image plugin accepts and returns a seed. If it does, show the seed for each image, add Lock seed and Copy seed, save the seed with gallery items and use it in rerolls when locked. If it does not, explain that and hide the controls. Never claim identical results across model changes.',
+      ['image'], [],
+      ['Confirm seed input and output in the real plugin.', 'Add seed display, lock and storage with gallery items.', 'Regenerate with a locked seed, an unlocked seed and a changed prompt.'],
+      'Locked seeds are reused and stored with images, and unsupported plugins show no fake seed controls.'],
+    ['data', 'storage-quota-meter', 'Show storage use and clean-up options', 'Display how much saved data there is and let users trim it safely.', 'change',
+      'Measure the size of what this generator saves (localStorage keys it owns, IndexedDB stores, and navigator.storage.estimate where available). Show a small meter with totals by kind (history, images, chats, settings), the largest items, and clean-up actions (delete oldest N, delete images only) that export first or confirm. Never touch keys the generator does not own.',
+      [], [],
+      ['Inventory owned keys and stores and how to size them.', 'Add the meter, breakdown and confirmed clean-up actions.', 'Test near-quota data, blocked storage and clean-up then reload.'],
+      'The meter matches real saved size, clean-up removes only owned data after confirmation, and other keys are untouched.'],
+    ['performance', 'perf-profile-report', 'Profile and report slow paths', 'Measure real timings for load, generate and render and name the slowest code.', 'review',
+      'Add temporary performance.now marks (or describe DevTools Performance steps) around load, first render, generate, AI wait and result render. Run each path several times with realistic data and report median and worst timings, the functions or list evaluations that dominate, and long tasks over 50 ms. Separate network and model wait from local work. Recommend fixes ranked by measured gain; do not change behavior.',
+      [], [],
+      ['Pick the user paths to measure and the data size.', 'Collect repeated timings and long-task evidence.', 'Report medians, worst cases and the top culprits with suggested fixes.'],
+      'Every claim has a measured number, network wait is separated from local work, and no behavior is changed.'],
+    ['engineering', 'split-into-imports', 'Split a huge generator into imported sub-generators', 'Move big lists or modules into separate Perchance generators and import them.', 'change',
+      'Identify large self-contained parts (word lists, data tables, a plugin-like module) that can live in their own generator and be pulled in with {import:...}. Propose names, move one part at a time, keep every list name and call working through the import, and note that imported generators must be public and saved. Measure size before and after. Do not move parts with heavy shared state.',
+      [], [],
+      ['Measure panel sizes and pick self-contained parts.', 'Move one part, wire the import and confirm every reference.', 'Reload, generate across all features and compare output with the original.'],
+      'The main generator is smaller, every moved list resolves through the import, and output is unchanged.'],
+    ['engineering', 'in-app-changelog-doc', 'Write a maintainer guide inside the generator', 'A hidden help list explaining structure, storage keys and how to extend it.', 'change',
+      'Add a maintainer section (a comment block or a hidden doc list, not shown to users) that explains the panel layout, main lists and functions, storage keys and their shapes, imports and why they are needed, and how to add a new option end to end. Write it from the real source; mark anything uncertain. Do not change behavior.',
+      [], [],
+      ['Read both panels and note structure, keys and imports.', 'Write the guide next to the code it describes.', 'Check every name in the guide exists in the source.'],
+      'Every name in the guide exists, storage keys are documented with shapes, and behavior is unchanged.'],
+    ['text', 'syllable-names', 'Build a syllable-based name generator', 'Pronounceable names from onset, vowel and coda lists with per-culture styles.', 'change',
+      'Add name generation from weighted onset, nucleus and coda lists with syllable-count weights, per-style sets (for example elvish, harsh, soft), banned clusters and a repeat filter. Keep it in plain Perchance lists where possible, show several names per roll and let users favorite them. Avoid generating real slurs by filtering a short blocklist the user can edit.',
+      ['text', 'story', 'game'], [],
+      ['Design the syllable lists and weights per style.', 'Assemble names with cluster and repeat rules.', 'Roll several hundred names per style and review pronounceability and repeats.'],
+      'Names are pronounceable, styles feel distinct, banned clusters never appear and repeats are rare.'],
+    ['text', 'list-hygiene', 'Clean up lists: duplicates, typos and weights', 'Find duplicate entries, near-duplicates, stray whitespace and odd weights.', 'review',
+      'Scan every Perchance list for exact duplicates, case or punctuation near-duplicates, trailing spaces, mixed quote styles, broken {curly} or [square] syntax, weights that are zero or wildly out of scale, and entries that will produce bad grammar with their usual articles. Report each by list and line with a suggested fix. Do not edit; respect Perchance syntax.',
+      ['text', 'story', 'game'], [],
+      ['Read every list with its weights and syntax.', 'Check duplicates, near-duplicates, syntax and weights.', 'Report findings by list and line with suggested fixes.'],
+      'Each finding names list and line, Perchance syntax is not mistaken for errors, and nothing is changed.'],
+    ['story', 'story-timeline', 'Add a story timeline and chronology checker', 'Track events in order and flag contradictions in dates and ages.', 'change',
+      'Add a timeline of events (date or relative order, characters involved, location, short note) that the story or world can reference. Detect simple contradictions: a character in two places at once, ages that do not add up, events before their causes. Show the timeline as a sortable list, keep it editable and saved, and offer it as compact context for AI continuations within a size limit.',
+      ['story', 'chat'], [],
+      ['Define the event shape and how events are added.', 'Add the timeline view, saving and contradiction checks.', 'Test out-of-order entries, a known contradiction and a long timeline in AI context.'],
+      'Events stay ordered and saved, known contradictions are flagged, and AI context stays within its limit.'],
+    ['story', 'story-ebook-export', 'Export a story as a book', 'Clean HTML or EPUB with title page, chapters and contents.', 'change',
+      'Add Export as book: a title page, author line, table of contents and one chapter per section, as a single self-contained HTML file, and EPUB if it can be built in the browser without external services. Escape all text, keep paragraphs and italics, strip UI-only content and name the file from the title safely. Open the export to verify it before calling it done.',
+      ['story', 'chat'], [],
+      ['Decide how chapters map from the current story data.', 'Build the HTML (and EPUB if feasible) exporter.', 'Open the exported file, check contents links, special characters and a long story.'],
+      'The exported book opens offline with working contents, correct chapters and no UI leftovers.'],
+    ['games', 'dice-notation', 'Add a dice roller with standard notation', 'Parse 2d6+3, 4d6kh3, advantage and show each die.', 'change',
+      'Add a dice roller that parses NdM, modifiers, keep highest/lowest (kh/kl), drop, exploding dice and advantage/disadvantage, with clear errors for bad input and sane limits on dice count and sides. Show each die, kept and dropped, and the total; keep a short roll history. Use one random source so seeded rerolls stay reproducible if the generator has them.',
+      ['game', 'story', 'chat'], [],
+      ['Write the notation grammar and limits.', 'Implement the parser, roller, display and history.', 'Test valid and invalid expressions, huge numbers and repeated seeded rolls.'],
+      'Standard notation rolls correctly, bad input gets a clear message, and limits prevent runaway rolls.'],
+    ['games', 'inventory-quests', 'Add inventory and quest log', 'Items with counts and quests with steps, saved with the game state.', 'change',
+      'Add an inventory (items with name, count, tags, optional description) and a quest log (quests with steps, status and rewards) stored inside the existing game state and save slots. Provide add, use, drop and complete actions that the game logic or AI narration can call through one function each, so state changes are validated. Show both in compact panels.',
+      ['game', 'story', 'chat'], [],
+      ['Fit inventory and quests into the existing state shape.', 'Add validated actions and the two panels.', 'Test save and load, using the last item, completing a quest twice and a malformed save.'],
+      'Items and quests change only through validated actions, persist with saves and survive reloads.'],
+    ['games', 'dialogue-trees', 'Add branching NPC dialogue trees', 'Authored conversations with conditions, choices and consequences.', 'change',
+      'Add a data-driven dialogue tree format (nodes with speaker, text, choices, conditions on state, and effects) and a player that renders choices, applies effects and handles dead ends. Validate the tree on load: missing targets, unreachable nodes and loops without exits. Keep text as data and render with textContent. Optionally let AI fill a node text but never change structure without review.',
+      ['game', 'story'], [],
+      ['Define the node format and how state is read and changed.', 'Build the validator and the dialogue player.', 'Run a tree with conditions, a missing target, an unreachable node and a loop.'],
+      'Dialogues play correctly with conditions and effects, and broken trees are reported on load instead of failing mid-play.'],
+    ['dashboards', 'dashboard-alerts', 'Add threshold alerts', 'Notify when a value crosses a level, with cooldowns and a log.', 'change',
+      'Add user-defined alerts (series, condition above/below/crosses, level, cooldown) evaluated on each fresh data point only, never on stale or missing data. Show triggered alerts in a log with time and value, and use browser notifications or Weld notify only after the user enables them. Persist alert rules, not values. These are informational alerts, not trading advice.',
+      ['dashboard'], [],
+      ['Define rule shape and when evaluation happens.', 'Add rule editor, evaluator with cooldown, log and opt-in notifications.', 'Test crossing up and down, stale data, rapid flapping and reload.'],
+      'Alerts fire once per crossing within cooldown, never on stale data, and notifications are opt-in.'],
+    ['dashboards', 'dashboard-watchlist', 'Add editable watchlists', 'Named symbol lists with order, notes and import/export.', 'change',
+      'Add named watchlists the user can create, rename, reorder (drag and keyboard) and delete with confirmation. Validate symbols against the configured provider format, keep notes per symbol, and export or import lists as JSON with validation. Switching lists should not refetch more than the visible symbols need.',
+      ['dashboard'], [],
+      ['Fit watchlists into workspace state.', 'Add CRUD, reorder, notes and import/export.', 'Test invalid symbols, duplicate names, reorder by keyboard and a malformed import.'],
+      'Watchlists persist and reorder correctly, invalid symbols are rejected, and imports are validated.'],
+    ['cards', 'card-batch-import', 'Batch import many character cards', 'Drop a folder of PNG and JSON cards, preview, dedupe and import.', 'change',
+      'Extend card import to accept many files at once: parse each (PNG chara/ccv3 chunks and JSON V2/V3), show a preview list with name, avatar, spec version and problems, detect duplicates by name plus content hash, and import selected cards in one confirmed step with a per-card result. One bad file must never stop the batch. Keep unknown fields.',
+      ['chat'], [],
+      ['Reuse the single-card parser and add a batch queue.', 'Build preview, duplicate detection and confirmed import.', 'Import a mix of valid, corrupt, duplicate and V3 cards.'],
+      'Every file gets a result, bad files do not stop the batch, duplicates are flagged and unknown fields survive.'],
+    ['assist', 'prompt-history-recall', 'Recall recent prompts and inputs', 'Up-arrow or a dropdown brings back what you typed before.', 'change',
+      'Keep a bounded, deduplicated history of submitted prompts per input field, saved locally. Pressing Up in an empty field (or a small history button) cycles back through it; selecting an entry fills the field without submitting. Provide Clear history and an off switch. Never store fields marked as secrets.',
+      ['chat', 'image', 'story', 'utility'], [],
+      ['Choose which fields get history and the size limit.', 'Add storage, recall keys and the dropdown.', 'Test cycling, editing a recalled entry, clearing and blocked storage.'],
+      'Past inputs come back on request without auto-sending, history is bounded and clearable, and secret fields are never stored.'],
+    ['rework', 'privacy-audit', 'Audit what leaves the browser', 'List every network request, tracker and third-party embed and what data it carries.', 'review',
+      'List every outbound request the generator can make: plugin calls, fetches, images, fonts, iframes, analytics or tracking scripts and social embeds. For each, say what triggers it, which host it reaches and what user data it carries (prompt text, chats, identifiers). Flag anything that sends user content to a host the user would not expect, and propose local or opt-in alternatives. Do not edit.',
+      [], [],
+      ['Inventory scripts, embeds, fetches and plugin calls.', 'Trigger each user path and note requests and payloads.', 'Report each destination, trigger and data with a recommendation.'],
+      'Every outbound destination is listed with its trigger and data, unexpected sharing is flagged, and nothing is changed.']
+  ];
+  return Object.freeze({ rows });
+});
+
 /* Generator skill catalog and prompt composition. No network or editor mutations. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -16437,14 +17839,17 @@ the diagnostics preview calls the same builders as the real prompt.`
   const host = typeof window === 'object' ? window : globalThis;
   const Refs = viaRequire ? require('./skills-refs.js') : (host.WeldSkillsRefs || { packs: [], byId: {}, links: {}, examples: {} });
   const Dad = viaRequire ? require('./skills-dad.js') : (host.WeldSkillsDad || { rows: [] });
+  const Web = viaRequire ? require('./skills-web.js') : (host.WeldSkillsWeb || { rows: [] });
+  const ImagePrompts = viaRequire ? require('./skills-image.js') : (host.WeldSkillsImage || { rows: [] });
+  const Extra = viaRequire ? require('./skills-extra.js') : (host.WeldSkillsExtra || { rows: [] });
   const categories = [
     ['dashboards', 'Dashboards & live data'],
     ['agents', 'Prompts, models & plugins'],
     ['repair', 'Debug & repair'], ['design', 'Design & modernize'],
-    ['features', 'Add features'], ['ai', 'AI & media'],
+    ['features', 'Add features'], ['ai', 'AI & media'], ['imagegen', 'Image prompts & studios'],
     ['data', 'Data & persistence'], ['performance', 'Performance & reliability'],
     ['quality', 'Accessibility & quality'], ['engineering', 'Code & planning'],
-    ['create', 'Create a generator'], ['text', 'Text & randomness'],
+    ['create', 'Create a generator'], ['web', 'Websites & site builders'], ['text', 'Text & randomness'],
     ['story', 'Stories & worlds'], ['games', 'Games & interaction'],
     ['cards', 'SillyTavern, Chub & character cards'], ['dad', 'Dad-Chat projects'], ['rework', 'Rebrand, simplify & privacy'],
     ['assist', 'AI input helpers & toolkit']
@@ -16560,7 +17965,9 @@ the diagnostics preview calls the same builders as the real prompt.`
     "Prat011/awesome-llm-skills": "35e1ea23b6c5f50c420d5591973aa8ad4f2931ff",
     "affaan-m/ECC": "ef648e01899ba3e8dc6371642deaaf64b4477775",
     "anthropics/skills": "8a1541c4a3ffa5a20a5a91de0dcf3f0bab1d1ef4",
-    "nextlevelbuilder/ui-ux-pro-max-skill": "477bcb28c9812b385cb51a4605ddf30d7b2266e2"
+    "nextlevelbuilder/ui-ux-pro-max-skill": "477bcb28c9812b385cb51a4605ddf30d7b2266e2",
+    "ZeroLu/awesome-nanobanana-pro": "475f02bf67b2cd26d5d9c76ba145b47cb4500700",
+    "YouMind-OpenLab/awesome-nano-banana-pro-prompts": "99bf468962de7df08166543ce67dad25f41e27fb"
 });
   const sources = Object.freeze([
     ['superpowers', 'Superpowers', 'obra/superpowers', 'skills/systematic-debugging/SKILL.md'],
@@ -16573,7 +17980,9 @@ the diagnostics preview calls the same builders as the real prompt.`
     ['llm', 'Awesome LLM Skills', 'Prat011/awesome-llm-skills', 'algorithmic-art/SKILL.md'],
     ['ecc', 'ECC', 'affaan-m/ECC', '.agents/skills/frontend-patterns/SKILL.md'],
     ['anthropic', 'Anthropic skills', 'anthropics/skills', 'skills/frontend-design/SKILL.md'],
-    ['ux', 'UI UX Pro Max', 'nextlevelbuilder/ui-ux-pro-max-skill', '.claude/skills/ui-ux-pro-max/SKILL.md']
+    ['ux', 'UI UX Pro Max', 'nextlevelbuilder/ui-ux-pro-max-skill', '.claude/skills/ui-ux-pro-max/SKILL.md'],
+    ['nano', 'Awesome Nano Banana Pro (prompt collection)', 'ZeroLu/awesome-nanobanana-pro', 'README.md'],
+    ['nanoym', 'Awesome Nano Banana Pro Prompts (YouMind)', 'YouMind-OpenLab/awesome-nano-banana-pro-prompts', 'README.md']
   ].map(([id, title, repo, path]) => Object.freeze({ id, title, url: 'https://github.com/' + repo + '/blob/' + sourceRevisions[repo] + '/' + path, path })).concat([
     Object.freeze({ id: 'binance', title: 'Binance market data docs', url: 'https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints', path: '' }),
     Object.freeze({ id: 'binance-streams', title: 'Binance stream docs', url: 'https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams', path: '' }),
@@ -16587,7 +17996,8 @@ the diagnostics preview calls the same builders as the real prompt.`
   ]));
   const types = Object.freeze([
     ['dashboard', 'Dashboards & applications'], ['agent', 'Prompt studios & plugins'], ['text', 'Random & text'], ['image', 'AI images & galleries'], ['chat', 'Chat, characters & memory'],
-    ['story', 'Stories & worlds'], ['game', 'Games & RPGs'], ['art', 'Procedural art'], ['utility', 'Tools & utilities']
+    ['story', 'Stories & worlds'], ['game', 'Games & RPGs'], ['art', 'Procedural art'], ['utility', 'Tools & utilities'],
+    ['website', 'Websites & site builders']
   ].map(([id, title]) => Object.freeze({ id, title })));
   const guides = {
     dashboards: ['Build a dependable application', 'Map real sources, data contracts, units, timestamps and the current application state.', 'Validate data at each boundary and keep UI, calculations and network lifecycle separate.', 'Check normal data, gaps, stale feeds, failures, symbol changes and saved layouts.', 'Displayed values have traceable sources and timestamps; stale or missing data is never presented as live.'],
@@ -16601,6 +18011,8 @@ the diagnostics preview calls the same builders as the real prompt.`
     quality: ['Verify real use', 'Inspect the real user journey and its failure boundaries.', 'Prioritize concrete accessibility, input and compatibility barriers.', 'Check keyboard, special characters, empty/error states and intended browsers.', 'Observed passes and failures are listed separately from untested coverage.'],
     engineering: ['Plan & maintain', 'Map both panels, contracts, imports and persisted state.', 'Identify a bounded improvement with explicit acceptance criteria.', 'Compare changed behavior against the existing workflows and contracts.', 'Deliver actionable evidence and next steps without unrelated refactoring.'],
     create: ['Build a working foundation', 'Use the brief to define audience, output and the smallest usable workflow.', 'Implement complete paired lists/HTML code with supported imports and clear state.', 'Run first load, generation, controls, errors and a narrow-screen check.', 'A usable generator runs in preview; unfinished wiring and placeholder behavior are unacceptable.'],
+    imagegen: ['Make image prompts dependable', 'Read the real image plugin call and input options first; keep the prompt text, settings and reference images as separate pieces of state.', 'Assemble prompts in one visible function, keep user text intact, ask before using real-person photos and never invent plugin options.', 'Check empty, long, special-character, failed and repeated requests, and read generated text in images with your own eyes.', 'The user sees and can edit the exact prompt, nothing generates or uploads without an action, and failures keep earlier work.'],
+    web: ['Build a site that works without surprises', 'Read the brief and the current generator; define one Site Spec that fields, preview, save and export all share.', 'Fill it in small validated AI stages, keep every field editable, and render only through the safe renderer.', 'Check an empty and a vague idea, single and multi page, Stop, a failed stage, reload, mobile width and export opened from disk.', 'The site builds from one idea, every value is editable, nothing is invented or published, and a failed stage never loses finished work.'],
     text: ['Control generated output', 'Inspect list structure, weights, evaluation timing and shared selections.', 'Preserve intended probabilities while improving valid combinations.', 'Sample bounded local outputs and exercise reroll/lock behavior.', 'Outputs satisfy the stated constraints; statistical claims include sample size and limits.'],
     story: ['Keep the world coherent', 'Map characters, facts, narrative state and the current content structure.', 'Make story rules explicit and retain established lore and saved progress.', 'Walk representative scenes, branches, restarts and resumed sessions.', 'No missing branches, contradictory tracked facts or lost progress in tested paths.'],
     games: ['Make interaction playable', 'Identify the rules, win/loss states and actual game loop.', 'Keep transitions, probabilities, controls and saved state consistent.', 'Play start-to-finish and test restart, invalid actions and boundaries.', 'Progress remains reachable and no tested path soft-locks or duplicates rewards.'],
@@ -16877,11 +18289,11 @@ the diagnostics preview calls the same builders as the real prompt.`
     'prompt-quality': ['image', 'chat', 'story', 'text'], 'prompt-presets': ['image', 'chat', 'story', 'text'],
     'ai-resilience': ['image', 'chat', 'story'], 'output-variety': ['text', 'story', 'game']
   };
-  const presets = Object.freeze(rows.concat(additions, Dad.rows).map(([category, id, title, description, mode, task, fit, origin]) =>
+  const presets = Object.freeze(rows.concat(additions, Dad.rows, Web.rows, ImagePrompts.rows, Extra.rows).map(([category, id, title, description, mode, task, fit, origin, ownSteps, ownCheck]) =>
     Object.freeze({ category, id, title, description, mode, task,
       types: Object.freeze(fit || specialized[id] || []), sources: Object.freeze(origin || []),
       refs: Object.freeze((Refs.links[id] || []).filter(r => Refs.byId[r])), example: Refs.examples[id] || '',
-      steps: sections.find(c => c.id === category).steps, check: guides[category][4] })));
+      steps: ownSteps ? Object.freeze(ownSteps.slice()) : sections.find(c => c.id === category).steps, check: ownCheck || guides[category][4] })));
   const get = id => presets.find(p => p.id === id) || null;
   function search(query, category, favorites, filters) {
     const f = filters || {};
@@ -17123,6 +18535,217 @@ the diagnostics preview calls the same builders as the real prompt.`
 /* END GENERATED SKILLS */
 
 /* BEGIN GENERATED BACKUP */
+/* Repo store: Weld's work data (Studio projects, Scrapbook, notes, pins, favorites ...) lives as JSON files in the
+   GitHub repo at <repo>/_weld-data/, not in browser storage. Every write carries the file's last-seen sha, so GitHub
+   refuses it when another computer changed the file first; the write is then merged (three-way, so a deletion made
+   here or there is kept) and retried. Nothing is ever resurrected from an old local copy: legacy copies are only
+   imported for keys the repo does not have, and otherwise filed under _weld-data/legacy/. */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.WeldRepoStore = factory();
+})(typeof window === 'object' ? window : globalThis, function () {
+  'use strict';
+  const DIR = '_weld-data';
+  const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  function hash8(t) { let h = 5381; t = String(t); for (let i = 0; i < t.length; i++) h = ((h * 33) ^ t.charCodeAt(i)) >>> 0; return ('00000000' + h.toString(16)).slice(-8); }
+  const fileName = key => String(key).replace(/[^a-zA-Z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) + '-' + hash8(key) + '.json';
+  function canon(v) {
+    if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+    if (isObj(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+    return JSON.stringify(v === undefined ? null : v);
+  }
+  const same = (a, b) => canon(a) === canon(b);
+  const stampOf = x => { if (!isObj(x)) return 0; for (const k of ['revision', 'updatedAt', 'savedAt', 'modified', 't']) if (typeof x[k] === 'number') return x[k]; return 0; };
+  const idList = a => Array.isArray(a) && a.every(x => isObj(x) && x.id !== undefined && x.id !== null);
+
+  // Three-way merge of one key. base = what this computer last synced, mine = its edit, theirs = what the repo holds now.
+  // -> { value, losers: [values that were not kept] }
+  function merge(key, base, mine, theirs) {
+    const losers = [];
+    function rec(b, m, t, top) {
+      if (same(m, t)) return m;
+      if (same(m, b)) return t;               // only the repo changed
+      if (same(t, b)) return m;               // only this computer changed
+      if (idList(m) && idList(t) && (b === undefined || b === null || idList(b))) {
+        const bm = new Map((b || []).map(x => [x.id, x])), mm = new Map(m.map(x => [x.id, x])), tm = new Map(t.map(x => [x.id, x]));
+        const out = [];
+        t.forEach(tx => {
+          const bx = bm.get(tx.id), mx = mm.get(tx.id);
+          if (mx === undefined) { if (bx === undefined || !same(tx, bx)) out.push(tx); return; }   // gone here: drop only if the repo did not edit it
+          const mineChanged = bx === undefined || !same(mx, bx), theirsChanged = bx === undefined || !same(tx, bx);
+          if (!mineChanged) out.push(tx); else if (!theirsChanged) out.push(mx);
+          else if (same(mx, tx)) out.push(tx);
+          else if (stampOf(mx) > stampOf(tx)) { losers.push(tx); out.push(mx); } else { losers.push(mx); out.push(tx); }
+        });
+        m.forEach(mx => { if (!tm.has(mx.id)) { const bx = bm.get(mx.id); if (bx === undefined || !same(mx, bx)) out.push(mx); } });   // added here; or edited here but deleted in the repo
+        if (out.every(x => typeof x.t === 'number')) out.sort((x, y) => y.t - x.t);
+        return out;
+      }
+      if (isObj(m) && isObj(t) && !(typeof m.revision === 'number' && typeof t.revision === 'number')) {
+        const bb = isObj(b) ? b : {}, out = {};
+        new Set(Object.keys(m).concat(Object.keys(t), Object.keys(bb))).forEach(k => {
+          const v = rec(bb[k], m[k], t[k], false);
+          if (v !== undefined) out[k] = v;
+        });
+        return out;
+      }
+      if (m === undefined) return same(t, b) ? undefined : t;
+      if (t === undefined) return same(m, b) ? undefined : m;
+      if (stampOf(m) > stampOf(t)) { losers.push(t); return m; }
+      losers.push(m); return t;                // a tie goes to the repo: the other computer saved first
+    }
+    const value = rec(base, mine, theirs, true);
+    return { value, losers };
+  }
+
+  function create(opt) {
+    const API = opt.api, cfg = opt.config, toast = opt.toast || (() => {}), DELAY = opt.delay == null ? 1500 : opt.delay;
+    const enc = opt.encode || (s => (typeof Buffer !== 'undefined' ? Buffer.from(s, 'utf8').toString('base64') : btoa(unescape(encodeURIComponent(s)))));
+    const dec = opt.decode || (b => (typeof Buffer !== 'undefined' ? Buffer.from(b, 'base64').toString('utf8') : decodeURIComponent(escape(atob(b)))));
+    const S = { cache: new Map(), base: new Map(), sha: new Map(), pending: new Map(), names: new Map(), loaded: false, loading: null, timer: null, flushing: null, error: '', conflicts: 0, listeners: [], verified: '', truncated: false };
+    const changed = () => S.listeners.forEach(f => { try { f(); } catch (e) { } });
+    const ident = x => x.owner + '/' + x.repo + '@' + String(x.branch || 'main');
+    const c0 = () => { const x = cfg(); return x && x.token && x.owner && x.repo ? x : null; };
+    // Writes need a repo that passed the private check. If the configured repo, branch or token changes, everything read
+    // from the old one is dropped (including queued edits) so it can never be written to the new one.
+    function reset() { S.cache.clear(); S.base.clear(); S.sha.clear(); S.pending.clear(); S.names.clear(); S.loaded = false; S.verified = ''; S.truncated = false; if (S.timer) { clearTimeout(S.timer); S.timer = null; } }
+    const c = () => { const x = c0(); if (x && S.verified && S.verified !== ident(x)) reset(); return x; };
+    const base = x => '/repos/' + encodeURIComponent(x.owner) + '/' + encodeURIComponent(x.repo);
+    const q = x => '?ref=' + encodeURIComponent(String(x.branch || 'main').replace(/^refs\/heads\//, ''));
+    const fpath = (x, sub, name) => base(x) + '/contents/' + DIR + (sub ? '/' + sub : '') + '/' + name;
+    const docText = (key, raw) => '{"format":"weld-data","v":1,"key":' + JSON.stringify(key) + ',"savedAt":' + Date.now() + ',"value":' + raw + '}';
+
+    async function readFile(x, entry) {   // -> { sha, doc } | null
+      let r = await API('GET', fpath(x, '', entry.name) + q(x));
+      if (r.status === 404) return null;
+      if (r.status !== 200 || !r.json) throw new Error('GitHub answered ' + r.status + ' reading ' + entry.name);
+      let text = r.json.content ? dec(String(r.json.content).replace(/\s/g, '')) : null;
+      if (text === null) { const b = await API('GET', base(x) + '/git/blobs/' + r.json.sha); if (b.status !== 200 || !b.json) throw new Error('GitHub answered ' + b.status + ' reading ' + entry.name); text = dec(String(b.json.content).replace(/\s/g, '')); }
+      let doc = null; try { doc = JSON.parse(text); } catch (e) { }
+      return { sha: r.json.sha, doc };
+    }
+    // Read every file whose sha changed (all the first time); files gone from the repo are dropped unless edited here.
+    async function load() {
+      const x = c(); if (!x) return false;
+      if (S.loading) return S.loading;
+      S.loading = (async () => {
+        let any = false;
+        try {
+          if (S.verified && S.verified !== ident(x)) reset();
+          const meta = await API('GET', base(x));   // personal notes and chats are only stored in a private repo
+          if (meta.status === 200 && meta.json && meta.json.private !== true) { reset(); throw new Error(x.owner + '/' + x.repo + ' is a public repo, so nothing is stored in it. Use a private repo in Weld > GitHub'); }
+          const r = await API('GET', base(x) + '/contents/' + DIR + q(x));
+          let list = [];
+          if (r.status === 200 && Array.isArray(r.json)) list = r.json.filter(e => e.type === 'file' && /\.json$/.test(e.name));
+          else if (r.status !== 404) throw new Error('GitHub answered ' + r.status + ' listing ' + DIR + (r.status === 401 || r.status === 403 ? ' (check the token has Contents access to this repo)' : ''));
+          const truncated = S.truncated = r.status === 200 && Array.isArray(r.json) && r.json.length >= 1000;   // the directory listing is cut off at 1000 entries
+          const seen = new Set();
+          for (const e of list) {
+            const known = S.names.get(e.name);
+            if (known && S.sha.get(known) === e.sha) { seen.add(known); continue; }
+            const f = await readFile(x, e);
+            if (!f || !f.doc || f.doc.format !== 'weld-data' || typeof f.doc.key !== 'string' || fileName(f.doc.key) !== e.name) continue;
+            const key = f.doc.key; seen.add(key);
+            S.names.set(e.name, key); S.sha.set(key, f.sha);
+            if (S.pending.has(key)) continue;   // an edit made here is merged when it is written
+            const raw = JSON.stringify(f.doc.value === undefined ? null : f.doc.value);
+            S.cache.set(key, raw); S.base.set(key, raw); any = true;
+          }
+          if (!truncated) Array.from(S.sha.keys()).forEach(k => { if (!seen.has(k) && !S.pending.has(k)) { S.sha.delete(k); S.cache.delete(k); S.base.delete(k); S.names.delete(fileName(k)); any = true; } });
+          const first = !S.loaded; S.loaded = true; S.verified = ident(x); S.error = '';
+          if (first) any = true;
+        } catch (e) { S.error = 'Could not read Weld data from GitHub: ' + ((e && e.message) || e); }
+        S.loading = null;
+        if (any) changed();
+        return S.loaded;
+      })();
+      return S.loading;
+    }
+    function get(key, dflt) {
+      if (!S.cache.has(key)) return dflt;
+      const raw = S.cache.get(key); if (raw === null) return dflt;
+      try { return JSON.parse(raw); } catch (e) { return dflt; }
+    }
+    function set(key, value) {
+      if (!c() || !S.loaded || S.verified !== ident(c())) return false;
+      let raw = null;
+      if (value !== null && value !== undefined) { try { raw = JSON.stringify(value); } catch (e) { return false; } if (raw === undefined) return false; }
+      S.cache.set(key, raw); S.pending.set(key, raw);
+      if (!S.timer) S.timer = setTimeout(() => { S.timer = null; flush().catch(() => { }); }, DELAY);
+      return true;
+    }
+    async function writeConflict(x, key, value, why) {
+      try {
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15), name = fileName(key).replace(/\.json$/, '') + '-' + why + '-' + stamp + '.json';
+        await API('PUT', fpath(x, 'conflicts', name), { message: 'Weld: keep a version that lost a merge (' + key + ')', content: enc(docText(key, JSON.stringify(value === undefined ? null : value))), branch: String(x.branch || 'main') });
+      } catch (e) { }
+    }
+    async function writeKey(x, key, raw) {
+      const name = fileName(key);
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const sha = S.sha.get(key);
+        let r;
+        if (raw === null) { if (!sha) { S.cache.delete(key); return; } r = await API('DELETE', fpath(x, '', name), { message: 'Weld: delete ' + key, sha, branch: String(x.branch || 'main') }); }
+        else r = await API('PUT', fpath(x, '', name), { message: 'Weld: update ' + key, content: enc(docText(key, raw)), sha: sha || undefined, branch: String(x.branch || 'main') });
+        if (r.status === 200 || r.status === 201) {
+          if (raw === null) { S.sha.delete(key); S.cache.delete(key); S.base.delete(key); S.names.delete(name); } else { S.sha.set(key, r.json && r.json.content && r.json.content.sha); S.base.set(key, raw); S.names.set(name, key); }
+          return;
+        }
+        if (r.status === 409 || r.status === 422 || (r.status === 404 && raw === null)) {   // the repo changed under us, or the file is new/gone
+          const f = await readFile(x, { name });
+          if (!f) { S.sha.delete(key); S.base.delete(key); if (raw === null) { S.cache.delete(key); return; } continue; }   // gone in the repo: write ours as a new file
+          if (!f.doc || f.doc.key !== key) throw new Error('the file name for ' + key + ' is taken by another key; nothing was overwritten');
+          const theirsRaw = JSON.stringify(f.doc && f.doc.value !== undefined ? f.doc.value : null), baseRaw = S.base.get(key);
+          S.sha.set(key, f.sha);
+          if (raw === null) { if (theirsRaw === baseRaw) continue; S.conflicts++; raw = theirsRaw; S.cache.set(key, raw); S.base.set(key, raw); toast('A file you deleted was changed on another computer, so it was kept.', 9000); changed(); return; }
+          const m = merge(key, baseRaw === undefined ? undefined : JSON.parse(baseRaw), JSON.parse(raw), JSON.parse(theirsRaw));
+          for (const l of m.losers) await writeConflict(x, key, l, 'merged');
+          raw = JSON.stringify(m.value === undefined ? null : m.value); S.cache.set(key, raw); S.base.set(key, theirsRaw);
+          S.conflicts++; toast('This was also changed on another computer. Both sets of changes were merged' + (m.losers.length ? ' (the version that lost is under _weld-data/conflicts).' : '.'), 9000); changed();
+          if (raw === theirsRaw) { return; }
+          continue;
+        }
+        const e = new Error('GitHub answered ' + r.status + (r.json && r.json.message ? ' ' + r.json.message : '') + ' saving ' + key); e.status = r.status; throw e;
+      }
+      throw new Error('Could not save ' + key + ': it kept changing on GitHub. Try again.');
+    }
+    async function flush() {
+      if (S.flushing) { await S.flushing; if (S.pending.size && !S.timer) return flush(); return; }
+      S.flushing = (async () => {
+        const x = c(); if (!x || !S.loaded || S.verified !== ident(x)) return;
+        const batch = Array.from(S.pending.entries()); S.pending.clear();
+        for (const [key, raw] of batch) {
+          try { await writeKey(x, key, raw); S.error = ''; }
+          catch (e) { if (!S.pending.has(key)) S.pending.set(key, S.cache.has(key) ? S.cache.get(key) : raw); S.error = 'Could not save to GitHub: ' + ((e && e.message) || e) + '. Weld retries on the next save.'; try { toast(S.error, 9000); } catch (z) { } }
+        }
+      })();
+      try { await S.flushing; } finally { S.flushing = null; }
+    }
+    // Legacy copies (browser storage, the old backup folder): the repo wins. A copy of a key the repo lacks is imported;
+    // otherwise it is filed under _weld-data/legacy/ so nothing is lost and nothing comes back. -> 'moved' | 'filed' | null (not safe to remove yet)
+    async function importLegacy(key, value, source) {
+      const x = c(); if (!x || !S.loaded || S.verified !== ident(x)) return null;
+      try {
+        if (!S.cache.has(key) || S.cache.get(key) === null) { set(key, value); await flush(); return S.pending.has(key) ? null : 'moved'; }
+        const raw = JSON.stringify(value);
+        if (raw === S.cache.get(key)) return 'moved';
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15), name = fileName(key).replace(/\.json$/, '') + '-' + source + '-' + stamp + '.json';
+        const r = await API('PUT', fpath(x, 'legacy', name), { message: 'Weld: keep an older local copy of ' + key, content: enc(docText(key, raw)), branch: String(x.branch || 'main') });
+        return r.status === 200 || r.status === 201 ? 'filed' : null;
+      } catch (e) { return null; }
+    }
+    function status() {
+      if (!c()) return 'Saved in your GitHub repo. Set owner, repo and token in Weld > GitHub to load and save.';
+      const x = c();
+      if (S.error) return S.error;
+      return S.loaded ? 'Saved in GitHub: ' + x.owner + '/' + x.repo + '/' + DIR : 'Loading from GitHub...';
+    }
+    return { get, set, load, flush, importLegacy, status, ready: () => !!c() && S.loaded, configured: () => !!c(), keys: () => Array.from(S.cache.keys()).filter(k => S.cache.get(k) !== null),
+      pending: () => S.pending.size, truncated: () => S.truncated, onChange: f => { S.listeners.push(f); }, _state: S };
+  }
+  return { create, merge, fileName, DIR, canon };
+});
+
 /* Backup Manager core: read-only inventory, record inspection and export bundles for generator backup copies.
    The companion is a storekeeper, not an owner: nothing here rewrites, moves or repairs a record. */
 (function (root, factory) {
@@ -17515,15 +19138,16 @@ the diagnostics preview calls the same builders as the real prompt.`
     inspect, buildInventory, fmtBytes, fmtDate, exportRecord, exportBundle, isVaultUpdate, validateEnvelope, presenceTracker, checkStoreWrite, hash8, backupTarget, entryFor, planImport, findDuplicates, duplicateReport, refToKey, canonical };
 });
 
-/* Backups tab: manage, examine, extract and maintain generator backup copies held in companion storage.
-   Read-only except the exact-key Delete action. Record contents are never logged or sent anywhere. */
+/* Backups tab: Weld keeps no backups of its own. Generator vault saves pass straight through to the backup folder
+   (a drive or cloud-synced folder); this tab shows, exports, deletes and purges anything older still held in browser
+   storage. Record contents are never logged or sent anywhere. */
 (function () {
   'use strict';
   if (window.top !== window) return;
   const C = window.WeldBackupCore, H = window.weldProjectHost;
-  if (!C || !H) return;
+  if (!C || !H || !window.WeldRepoStore) return;
   const E = H.el;
-  const S = { pick: '', rows: null, inv: null, error: '', selected: null, inspected: null, pendingDelete: null, secrets: null, msg: '', stamp: 0 };
+  const S = { pick: '', rows: null, inv: null, error: '', selected: null, inspected: null, secrets: null, msg: '', stamp: 0, openGens: new Set(), busy: false };
   let host = null, unsub = null;
   const note = t => E('div', { class: 'wc-section-note', text: t });
   const small = { fontSize: '12px', opacity: '.75' };
@@ -17558,7 +19182,6 @@ the diagnostics preview calls the same builders as the real prompt.`
     });
     S.rows = rows; S.inv = C.buildInventory(rows);
     if (S.selected && !rows.some(r => r.gmKey === S.selected)) { S.selected = null; S.inspected = null; }
-    S.pendingDelete = null;
   }
   function full(gmKey) {   // fresh read of a single record for inspect / export
     const row = (S.rows || []).find(r => r.gmKey === gmKey); if (!row) return null;
@@ -17571,7 +19194,7 @@ the diagnostics preview calls the same builders as the real prompt.`
     const rec = row && full(row.gmKey); return rec && !rec.parseError && !rec.stale ? rec.value : undefined;
   }
   function inspectRow(gmKey) {
-    const rec = full(gmKey); S.selected = gmKey; S.pendingDelete = null; S.secrets = null;
+    const rec = full(gmKey); S.selected = gmKey; S.secrets = null;
     if (!rec) { S.inspected = null; return; }
     const keys = (S.rows || []).map(r => r.key), gen = C.parseKey(rec.key).gen;
     S.inspected = rec.unreadable ? { rec, report: { meta: [['Key', rec.key]], anomalies: ['The value could not be read.'], chat: null } }
@@ -17587,12 +19210,15 @@ the diagnostics preview calls the same builders as the real prompt.`
     if (!recs.length) { say('Nothing to export.', true); return; }
     saveFile(C.exportBundle(label, recs, stamp()));
   }
+  // One click, no confirmation. Only that exact key is removed; the open sections and scroll position stay put.
   function runDelete(gmKey) {
     const row = (S.rows || []).find(r => r.gmKey === gmKey);
     if (!row) { say('That key no longer exists.', true); return; }
     let res; try { res = V().remove(gmKey); } catch (e) { res = { ok: false, reason: 'error' }; }
-    say(res && res.ok ? 'Deleted ' + row.key + '. Only that key was removed.' : 'Delete failed: ' + ((res && res.reason) || 'unknown') + '.', !(res && res.ok));
-    S.selected = null; S.inspected = null; load();
+    const ok = !!(res && res.ok), t = ok ? 'Deleted ' + (C.parseKey(row.key).sub || row.key) + '.' : 'Delete failed: ' + ((res && res.reason) || 'unknown') + '.';
+    say(t, !ok); try { H.toast(t); } catch (e) {}
+    if (S.selected === gmKey) { S.selected = null; S.inspected = null; }
+    load();
   }
   function scanSecrets() {
     const hits = [];
@@ -17617,20 +19243,8 @@ the diagnostics preview calls the same builders as the real prompt.`
       btn('Inspect', () => { inspectRow(r.gmKey); rerender(); }, { 'aria-label': 'Inspect ' + r.key }),
       btn('Download', () => { const rec = full(r.gmKey); if (rec) saveFile(C.exportRecord(rec, stamp())); rerender(); }, { 'aria-label': 'Download ' + r.key })
     ]);
-    if (canDelete) line.appendChild(btn('Delete', () => { S.pendingDelete = r.gmKey; rerender(); }, { 'aria-label': 'Delete ' + r.key }));
+    if (canDelete) line.appendChild(btn('Delete', () => { runDelete(r.gmKey); rerender(); }, { 'aria-label': 'Delete ' + r.key }));
     return line;
-  }
-  function confirmBar(rerender) {
-    const row = (S.rows || []).find(r => r.gmKey === S.pendingDelete); if (!row) return null;
-    const p = C.parseKey(row.key);
-    return E('div', { role: 'alertdialog', 'aria-label': 'Confirm delete', style: { border: '1px solid #c0392b', borderRadius: '8px', padding: '10px', margin: '8px 0' } }, [
-      E('div', { text: 'Delete ' + (p.gen ? 'generator "' + p.gen + '"' : 'record') + ' key ' + row.key + '? This removes only that one key and cannot be undone.' }),
-      E('div', { style: Object.assign({ marginTop: '4px' }, small), text: 'If this is a chat copy, its generator\'s chat index is not edited. Index cleanup is the generator\'s job.' }),
-      E('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } }, [
-        btn('Confirm delete', () => runDelete(row.gmKey)),
-        btn('Cancel', () => { S.pendingDelete = null; rerender(); })
-      ])
-    ]);
   }
   function inspector(rerender) {
     const i = S.inspected; if (!i) return note('Select Inspect on a record to see its details.');
@@ -17682,8 +19296,8 @@ the diagnostics preview calls the same builders as the real prompt.`
   // ------------------------------------------------------------- backup folder (any drive or cloud-sync folder)
   // The user picks a folder with the browser's folder picker (Chrome/Edge). Records are copied there as JSON files.
   // Files are only ever ADDED: a changed record gets a new file, an unchanged one is skipped, nothing is overwritten or deleted.
-  const AUTO_KEY = 'backupFolderAuto';
-  const F = { supported: false, handle: null, name: '', perm: 'none', auto: false, busy: false, error: '', last: null };
+  const AUTO_KEY = 'backupFolderAuto', KEEP_KEY = 'backupFolderKeep';
+  const F = { supported: false, handle: null, name: '', perm: 'none', auto: false, keep: true, busy: false, error: '', last: null };
   const memKv = new Map();
   let dbp = null;
   function kvdb() {
@@ -17719,37 +19333,67 @@ the diagnostics preview calls the same builders as the real prompt.`
       const h = await pageWin().showDirectoryPicker({ id: 'weld-backup-folder', mode: 'readwrite' });
       F.handle = h; F.name = h.name; F.perm = await permission(h, true); F.error = F.perm === 'granted' ? '' : 'Folder chosen, but write permission was not granted.';
       await kvSet('handle', h); say(F.perm === 'granted' ? 'Backup folder set: ' + h.name : F.error, F.perm !== 'granted');
+      fkReset(); afterGrant();
     } catch (e) { if (!(e && e.name === 'AbortError')) F.error = (e && e.message) || String(e); }
     draw();
   }
   async function allowFolder() {
     if (!F.handle) return;
-    F.perm = await permission(F.handle, true); F.error = F.perm === 'granted' ? '' : 'Permission was not granted.'; draw();
+    F.perm = await permission(F.handle, true); F.error = F.perm === 'granted' ? '' : 'Permission was not granted.'; afterGrant(); draw();
   }
   async function forgetFolder() {
-    F.handle = null; F.name = ''; F.perm = 'none'; await kvDel('handle'); say('Backup folder disconnected. Nothing in it was deleted.'); draw();
+    if (FK.pending.size) await fkFlush().catch(() => {});
+    F.handle = null; F.name = ''; F.perm = 'none'; await kvDel('handle'); fkReset(); say('Backup folder disconnected. Nothing in it was deleted.'); draw();
   }
-  function setAuto(on) { F.auto = !!on; H.set(AUTO_KEY, F.auto); if (F.auto) scheduleSync(300); draw(); }
+  // Chrome drops folder permission on restart; requestPermission() needs a user gesture, so with "Keep access
+  // allowed" on, the first click or key press anywhere re-grants it (no need to open Weld's panel).
+  let regrantArmed = false;
+  function armRegrant() {
+    if (regrantArmed || !F.handle || F.perm === 'granted' || !F.keep || typeof document === 'undefined') return;
+    regrantArmed = true;
+    const go = async () => {
+      document.removeEventListener('pointerdown', go, true); document.removeEventListener('keydown', go, true); regrantArmed = false;
+      if (!F.handle || F.perm === 'granted' || !F.keep) return;
+      F.perm = await permission(F.handle, true); if (F.perm === 'granted') F.error = '';
+      if (F.perm === 'granted' && F.auto) scheduleSync(500);
+      afterGrant();
+      if (host) draw();
+    };
+    document.addEventListener('pointerdown', go, true); document.addEventListener('keydown', go, true);
+  }
+  async function recheckAccess() {
+    if (!F.handle || !F.keep) return;
+    const was = F.perm; F.perm = await permission(F.handle, false);
+    if (F.perm !== 'granted') armRegrant(); else afterGrant();   // also refreshes data files changed in another tab
+    if (F.perm !== was && host) draw();
+  }
+  function setKeep(on) { F.keep = !!on; H.set(KEEP_KEY, F.keep); if (F.keep) recheckAccess(); draw(); }
+  function setAuto(on) { F.auto = false; H.set(AUTO_KEY, false); if (on) say('Automatic folder saving was removed in 1.90.0: your data lives in your GitHub repo. Use Save all to folder now for a manual copy.', true); draw(); }
   async function dirAt(root, segs, create) { let d = root; for (const s of segs) d = await d.getDirectoryHandle(s, { create }); return d; }
   async function exists(dir, name) {
     try { await dir.getFileHandle(name); return true; } catch (e) { if (e && (e.name === 'NotFoundError' || e.name === 'TypeMismatchError')) return false; throw e; }
   }
   // Copy every readable, non-stale record into the folder. Records holding plaintext secret-shaped values are held back.
-  async function syncToFolder(manual) {
+  // onlyStarred: automatic saves cover starred generators only; manual and pre-restore saves cover everything.
+  async function syncToFolder(manual, onlyStarred) {
     if (F.busy) return; if (!F.handle || F.perm !== 'granted') { if (manual) { F.error = 'Choose a backup folder and allow access first.'; draw(); } return; }
-    F.busy = true; const res = { at: Date.now(), written: 0, skipped: 0, held: [], failed: 0 };
+    F.busy = true; const res = { at: Date.now(), written: 0, skipped: 0, held: [], failed: 0, saved: [] };   // saved: keys provably in the folder
     try {
       load();
+      let stars = null; if (onlyStarred) { try { stars = H.favorites() || []; } catch (e) { stars = []; } }
       for (const row of (S.rows || [])) {
+        if (stars && stars.indexOf(C.parseKey(row.key).gen || row.caller) === -1) { res.skipped++; continue; }
         const rec = full(row.gmKey);
         if (!rec || rec.unreadable || rec.parseError) { res.failed++; continue; }
         if (rec.stale) { res.skipped++; continue; }
         if (C.parseKey(rec.key).kind === 'chat-copy' && rec.value && C.secretScan(rec.value.data).length) { res.held.push(rec.key); continue; }
         try {
           const t = C.backupTarget(rec), dir = await dirAt(F.handle, t.dir, true);
-          if (await exists(dir, t.name)) { res.skipped++; continue; }
+          if (await exists(dir, t.name)) { res.skipped++; res.saved.push(row.gmKey); continue; }
+          // Reads return the newest-written chat index, so an old index from browser storage must never be stamped as new.
+          if (C.parseKey(rec.key).kind === 'chat-index' && (await ptNames(dir)).some(n => /^index-/.test(n))) { res.skipped++; continue; }
           const w = await (await dir.getFileHandle(t.name, { create: true })).createWritable();
-          await w.write(JSON.stringify({ format: 'weld-backup-record', v: 1, exportedAt: Date.now(), record: C.entryFor(rec) }, null, 2)); await w.close(); res.written++;
+          await w.write(JSON.stringify({ format: 'weld-backup-record', v: 1, exportedAt: Date.now(), record: C.entryFor(rec) }, null, 2)); await w.close(); res.written++; res.saved.push(row.gmKey);
         } catch (e) { res.failed++; if (e && e.name === 'NotAllowedError') { F.perm = 'prompt'; break; } }
       }
       F.last = res; F.error = '';
@@ -17757,62 +19401,138 @@ the diagnostics preview calls the same builders as the real prompt.`
     } catch (e) { F.error = 'Save to folder failed: ' + ((e && e.message) || e); }
     F.busy = false; if (manual || host) draw();
   }
-  // ---- load from folder: the other direction. Reads weld-backup files already in the folder (for example saved by
-  // Weld on another computer into a shared Google Drive folder), shows what would change, and writes only after Apply.
-  const L = { busy: false, plan: null, files: 0, unreadable: 0, msg: '' };
-  async function readJsonFiles(dir, depth, out) {
-    for await (const entry of dir.entries()) {
-      const name = entry[0], h = entry[1];
-      if (out.length + L.unreadable > 5000) return;
-      if (h.kind === 'directory') { if (depth < 5) await readJsonFiles(h, depth + 1, out); continue; }
-      if (!/\.json$/i.test(name)) continue;
-      try { const f = await h.getFile(); if (f.size > 64 * 1048576) { L.unreadable++; continue; } out.push(JSON.parse(await f.text())); } catch (e) { L.unreadable++; }
+  // ---- pass-through vault: a generator's vault save (source copy, chat index, chat copy) is written straight into the
+  // backup folder and never kept in Weld storage; reads come back from the folder. Files are only ever added, except a
+  // chat index file, which is re-stamped when the same list is saved again so the newest list wins.
+  const NO_FOLDER = 'Weld keeps no backups. Choose a backup folder in Weld > Backups (a drive or a cloud-synced folder) and allow access to receive vault saves.';
+  const VAULT_KINDS = ['snapshot', 'chat-index', 'chat-copy'];
+  const ptReady = () => !!(F.handle && F.perm === 'granted');   // the manual-export folder
+  const vaultReady = () => RP.ready();   // the GitHub repo: where vault saves go
+  async function ptDoc(dir, name) {
+    try { const doc = JSON.parse(await (await (await dir.getFileHandle(name)).getFile()).text()); return doc && doc.format === 'weld-backup-record' && doc.record ? doc : null; } catch (e) { return null; }
+  }
+  async function ptNames(dir) {
+    const out = []; if (!dir) return out;
+    try { for await (const entry of dir.entries()) if (entry[1].kind === 'file' && /\.json$/i.test(entry[0])) out.push(entry[0]); } catch (e) {}
+    return out;
+  }
+  async function ptDir(gen, sub) { try { return await dirAt(F.handle, [gen, sub], false); } catch (e) { return null; } }
+  // A folder file is trusted for a generator only if that generator stored it and the record names no other owner.
+  // (The folder also holds older copies from browser storage, where one generator may have written another's key.)
+  const ownDoc = (doc, key, caller) => !!(doc && doc.record.key === key && doc.record.storedBy === caller && doc.record.stale !== true && C.checkStoreWrite(key, doc.record.value).ok);
+  // Disk guard: the folder never rotates files out, so a generator gets a write budget and a per-folder file cap.
+  const PT_RATE_MAX = 30, PT_RATE_MS = 10 * 60000, PT_MAX_FILES = 500, ptWrites = new Map();
+  function ptBudget(caller, now) {
+    const recent = (ptWrites.get(caller) || []).filter(t => now - t < PT_RATE_MS);
+    ptWrites.set(caller, recent);
+    if (recent.length >= PT_RATE_MAX) return false;
+    recent.push(now); return true;
+  }
+  async function ptSet(caller, key, value) {
+    if (!ptReady()) return { ok: false, code: 'no-backup-folder', reason: NO_FOLDER };
+    const p = C.parseKey(key);
+    if (!p.gen || p.gen !== caller || VAULT_KINDS.indexOf(p.kind) === -1) return { ok: false, code: 'bad-key', reason: 'bad-key' };
+    if (value === null || value === undefined) return { ok: true, where: 'folder', note: 'the backup folder only gains files; nothing was deleted from it' };
+    if (C.checkStoreWrite(key, value).ok !== true) return { ok: false, code: 'owner-mismatch', reason: 'owner-mismatch' };
+    if (p.kind === 'chat-copy' && C.secretScan(value && value.data).length) return { ok: false, code: 'secret-shaped', reason: 'this chat copy holds a plaintext secret-shaped value, so it was not written to the backup folder' };
+    const rec = { key, caller, size: 0, stale: false, value };
+    try { rec.size = JSON.stringify(value).length; } catch (e) {}
+    try {
+      const t = C.backupTarget(rec), dir = await dirAt(F.handle, t.dir, true);
+      const there = await exists(dir, t.name);
+      let oldText = null;
+      if (there && p.kind === 'chat-copy') {
+        // Same chat copy id saved again: if the content changed, the new one must win (reads return this file), so the
+        // previous version is kept under chat/_history first. Identical content is a no-op.
+        try { oldText = await (await (await dir.getFileHandle(t.name)).getFile()).text(); } catch (e) { oldText = null; }
+        let oldDoc = null; try { oldDoc = JSON.parse(oldText); } catch (e) {}
+        if (oldDoc && oldDoc.record && C.canonical(oldDoc.record.value) === C.canonical(value)) return { ok: true, where: 'folder' };
+      } else if (p.kind !== 'chat-index' && there) return { ok: true, where: 'folder' };
+      if (!ptBudget(caller, Date.now())) return { ok: false, code: 'rate-limited', reason: 'too many vault saves from this generator; try again in a few minutes' };
+      if (oldText !== null) {
+        const hdir = await dirAt(F.handle, [p.gen, 'chat', '_history'], true), stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+        if ((await ptNames(hdir)).length >= PT_MAX_FILES) return { ok: false, code: 'folder-full', reason: 'this generator already has ' + PT_MAX_FILES + ' files in its chat history folder; move or delete some there first' };
+        if (!await fkWriteVerified(hdir, t.name.replace(/\.json$/, '') + '-' + stamp + '-' + C.hash8(oldText).slice(0, 4) + '.json', oldText)) return { ok: false, code: 'folder-write-failed', reason: 'could not keep the previous version, so the chat copy was not replaced' };
+      }
+      if (!there && (await ptNames(dir)).length >= PT_MAX_FILES) return { ok: false, code: 'folder-full', reason: 'this generator already has ' + PT_MAX_FILES + ' files in its backup folder; move or delete some there first' };
+      const w = await (await dir.getFileHandle(t.name, { create: true })).createWritable();
+      await w.write(JSON.stringify({ format: 'weld-backup-record', v: 1, exportedAt: Date.now(), record: C.entryFor(rec) }, null, 2)); await w.close();
+      if (host) scheduleDraw();
+      return { ok: true, where: 'folder' };
+    } catch (e) {
+      if (e && e.name === 'NotAllowedError') { F.perm = 'prompt'; armRegrant(); }
+      return { ok: false, code: 'folder-write-failed', reason: 'could not write to the backup folder' };
     }
   }
-  async function scanFolder() {
-    if (L.busy) return;
-    if (!F.handle || F.perm !== 'granted') { F.error = 'Choose a backup folder and allow access first.'; draw(); return; }
-    L.busy = true; L.plan = null; L.unreadable = 0; L.msg = ''; draw();
+  // -> the stored value, or undefined when the folder has no copy of that key
+  async function ptGet(caller, key) {
+    if (!ptReady()) return undefined;
+    const p = C.parseKey(key); if (!p.gen || p.gen !== caller || VAULT_KINDS.indexOf(p.kind) === -1) return undefined;
+    if (p.kind === 'chat-copy') {
+      const dir = await ptDir(p.gen, 'chat'), doc = dir && await ptDoc(dir, C.backupTarget({ key, value: null }).name);
+      return ownDoc(doc, key, caller) ? doc.record.value : undefined;
+    }
+    const dir = await ptDir(p.gen, p.kind === 'snapshot' ? 'snapshot' : 'chat'), re = p.kind === 'snapshot' ? /^snapshot-/ : /^index-/;
+    let best = null;
+    for (const name of (await ptNames(dir)).filter(n => re.test(n))) {
+      const doc = await ptDoc(dir, name); if (!ownDoc(doc, key, caller)) continue;
+      const v = doc.record.value, score = [p.kind === 'snapshot' && v && typeof v.at === 'number' ? v.at : 0, Number(doc.exportedAt) || 0];
+      if (!best || score[0] > best.score[0] || (score[0] === best.score[0] && score[1] > best.score[1])) best = { score, value: v };
+    }
+    return best ? best.value : undefined;
+  }
+  async function ptList(caller, prefix) {
+    if (!ptReady() || !C.GEN_RE.test(String(caller || ''))) return [];
+    const base = 'weld:genvault:' + caller + '/', out = [];
+    if ((await ptNames(await ptDir(caller, 'snapshot'))).some(n => /^snapshot-/.test(n))) out.push(base + 'snapshot');
+    const chat = await ptNames(await ptDir(caller, 'chat'));
+    if (chat.some(n => /^index-/.test(n))) out.push(base + 'chat/index');
+    chat.filter(n => /^snap-/.test(n)).sort().forEach(n => out.push(base + 'chat/' + n.slice(0, -5)));
+    return out.filter(k => k.indexOf(String(prefix || '')) === 0);
+  }
+  let drawTimer = null;
+  function scheduleDraw() { if (drawTimer) return; drawTimer = setTimeout(() => { drawTimer = null; if (host) draw(); }, 400); }
+
+  // ---- purge: remove every backup Weld still holds in browser storage, in one click with no confirmation: vault keys
+  // (including legacy dadchat:vault keys) and the Project tab's saved generator copies and snapshots. What is not yet
+  // on disk goes there first: into the backup folder when one is connected (secret-shaped chat copies, which never go
+  // to a folder, are downloaded instead), otherwise as one downloaded file. Small operational link records are kept.
+  const PROJECT_DB = 'weldCompanionProjects';
+  function dropProjectDb() {
+    return new Promise(resolve => {
+      try {
+        const idb = pageWin().indexedDB || indexedDB, r = idb.deleteDatabase(PROJECT_DB);
+        r.onsuccess = () => resolve('ok'); r.onerror = () => resolve('failed'); r.onblocked = () => resolve('blocked');
+      } catch (e) { resolve('unavailable'); }
+    });
+  }
+  async function purgeAll() {
+    if (S.busy) return;
+    S.busy = true; draw();
+    let gone = 0, bad = 0, keptNote = '';
     try {
+      let saved = new Set();
+      if (ptReady()) {
+        while (F.busy) await new Promise(r => setTimeout(r, 100));   // an automatic save is running: let it finish, then save everything
+        F.last = null; await syncToFolder(false); if (F.last && F.last.saved) saved = new Set(F.last.saved);
+      }
       load();
-      const byId = new Map(), keys = new Set();
-      (S.rows || []).forEach(r => { byId.set(r.caller + '\u0000' + r.key, r); keys.add(r.key); });
-      const docs = []; await readJsonFiles(F.handle, 0, docs); L.files = docs.length;
-      L.plan = C.planImport(docs, {
-        has: k => keys.has(k),
-        get: (c, k) => { const r = byId.get(c + '\u0000' + k); if (!r) return undefined; if (r.stale || r.parseError) return null; const rec = full(r.gmKey); return rec && !rec.unreadable && !rec.parseError ? rec.value : null; }
-      });
-      F.error = '';
-    } catch (e) { F.error = 'Could not read the folder: ' + ((e && e.message) || e); }
-    L.busy = false; draw();
-  }
-  async function applyImport() {
-    const plan = L.plan; if (!plan || L.busy) return;
-    L.busy = true; draw();
-    try {
-      await syncToFolder(false);   // first save what is here, so a replaced snapshot still exists as a file in the folder
-      let ok = 0, bad = 0;
-      plan.add.concat(plan.update).forEach(it => { let r; try { r = V().write(it.caller, it.key, it.value); } catch (e) { r = { ok: false }; } if (r && r.ok) ok++; else bad++; });
-      L.plan = null; load();
-      L.msg = 'Loaded ' + ok + ' record' + (ok === 1 ? '' : 's') + ' from ' + F.name + (bad ? ' (' + bad + ' failed)' : '') + '. Reload the generator tab so it reads them.';
-      say(L.msg, bad > 0);
-    } catch (e) { F.error = 'Load failed: ' + ((e && e.message) || e); }
-    L.busy = false; draw();
-  }
-  function importCard() {
-    const wrap = E('div', { 'data-import': '1', style: { marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--wc-line,#555)' } });
-    wrap.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Load copies that other computers saved into this folder. You see what would change first. Chat copies already here are never overwritten; a source copy is replaced only by a newer one.' }));
-    wrap.appendChild(btn(L.busy ? 'Working...' : 'Check folder for new saves', () => { scanFolder(); }, { disabled: !F.handle || F.perm !== 'granted' || L.busy || F.busy }));
-    const p = L.plan;
-    if (p) {
-      const n = p.add.length + p.update.length, sk = p.skipped;
-      wrap.appendChild(E('div', { 'data-import-summary': '1', style: { fontSize: '12px', margin: '6px 0' }, text: 'Read ' + L.files + ' file' + (L.files === 1 ? '' : 's') + (L.unreadable ? ' (' + L.unreadable + ' unreadable)' : '') + ': ' + p.add.length + ' new, ' + p.update.length + ' updated. Left alone: ' + (sk.present + sk.unchanged + sk.older) + ' already here or older, ' + (sk.operational + sk.legacy) + ' device-specific or legacy' + (sk.held ? ', ' + sk.held + ' held back for secret-shaped values' : '') + (sk.tombstoned ? ', ' + sk.tombstoned + ' deleted here on purpose' : '') + '.' }));
-      p.add.concat(p.update).slice(0, 60).forEach(it => wrap.appendChild(E('div', { style: { fontSize: '12px', wordBreak: 'break-all' }, text: (it.action === 'new' ? 'NEW ' : it.action === 'newer' ? 'NEWER ' : 'MERGE ') + it.key + ' · ' + C.fmtBytes(it.bytes) + ' · ' + it.note })));
-      if (n > 60) wrap.appendChild(E('div', { style: small, text: '...and ' + (n - 60) + ' more.' }));
-      if (!n) wrap.appendChild(E('div', { style: { fontSize: '12px' }, text: 'Everything in the folder is already here.' }));
-      else wrap.appendChild(E('div', { style: { display: 'flex', gap: '8px', marginTop: '6px' } }, [btn('Apply ' + n + ' change' + (n === 1 ? '' : 's'), () => { applyImport(); }, { disabled: L.busy }), btn('Cancel', () => { L.plan = null; draw(); })]));
-    }
-    return wrap;
+      const rows = (S.rows || []).filter(r => C.parseKey(r.key).kind !== 'operational');
+      const toFile = rows.filter(r => !r.stale && !saved.has(r.gmKey));   // not provably on disk yet (held back, failed, or no folder)
+      if (toFile.length) {
+        const recs = toFile.map(r => full(r.gmKey)).filter(Boolean), file = C.exportBundle('purged', recs, stamp());
+        V().download(file.filename, file.text);
+        keptNote = ' ' + recs.length + ' record' + (recs.length === 1 ? ' was' : 's were') + ' downloaded first as ' + file.filename + '.';
+      } else if (saved.size) keptNote = ' Every record is in ' + F.name + '.';
+      for (const r of rows) { let res; try { res = V().remove(r.gmKey); } catch (e) { res = null; } if (res && res.ok) gone++; else bad++; }
+      const proj = await dropProjectDb();
+      S.selected = null; S.inspected = null; S.secrets = null; D.found = null; D.sel = new Set();
+      load();
+      const t = 'Purged ' + gone + ' backup key' + (gone === 1 ? '' : 's') + ' from Weld storage' + (bad ? ' (' + bad + ' failed)' : '') + '.' + keptNote +
+        (proj === 'ok' ? ' Project tab copies and snapshots removed.' : proj === 'blocked' ? ' Project tab copies are removed once other Perchance tabs are closed.' : proj === 'failed' ? ' Project tab copies could not be removed.' : '');
+      say(t, bad > 0 || proj === 'failed'); try { H.toast(t, 8000); } catch (e) {}
+    } catch (e) { say('Purge stopped: ' + ((e && e.message) || e), true); }
+    S.busy = false; draw();
   }
   // ---- cleanup: duplicates. Exact duplicates can be removed in one step (after they are safely in the folder);
   // near duplicates are only listed and can be sent to the AI helper for a second opinion.
@@ -17887,11 +19607,212 @@ the diagnostics preview calls the same builders as the real prompt.`
     if (f.exact.length && (!F.handle || F.perm !== 'granted')) card.appendChild(note('Deleting needs a backup folder with access allowed, so every copy is saved first.'));
     return card;
   }
+  // ---- Weld data files: Studio projects and the Scrapbook live as files in <backup folder>/_weld-data, not in Weld
+  // storage. Weld's storage helpers route those keys here (see gget/gset). Reads come from an in-memory cache filled
+  // from the folder; writes update the cache and are written to the folder shortly after. A file another tab or
+  // computer changed since this tab read it is never overwritten: the newer file wins and the tab is told.
+  // Older copies still in browser storage are moved into the folder once access is allowed (verified, then removed).
+  const FK_DIR = '_weld-data', FK_DELAY = 500;
+  const FK = { cache: new Map(), seen: new Map(), pending: new Map(), loaded: false, loading: null, timer: null, flushing: null, moved: 0, conflicts: 0, error: '' };
+  const LG = () => H.legacy || null;
+  const fkName = key => String(key).replace(/[^a-zA-Z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) + '-' + C.hash8(key) + '.json';
+  const fkDoc = (key, raw) => '{"format":"weld-data","v":1,"key":' + JSON.stringify(key) + ',"savedAt":' + Date.now() + ',"value":' + raw + '}';
+  async function fkDirHandle(create) { return dirAt(F.handle, [FK_DIR], create); }
+  async function fkFile(dir, name) { try { return await (await dir.getFileHandle(name)).getFile(); } catch (e) { return null; } }
+  function fkReset() { FK.cache.clear(); FK.seen.clear(); FK.pending.clear(); FK.loaded = false; if (FK.timer) { clearTimeout(FK.timer); FK.timer = null; } fkChanged(); }
+  function fkChanged() { try { if (typeof H.refreshTab === 'function') H.refreshTab(); } catch (e) {} }
+  // Read every data file whose content changed since this tab last saw it (all of them the first time).
+  async function fkLoad() {
+    if (!ptReady()) return false;
+    if (FK.loading) return FK.loading;
+    FK.loading = (async () => {
+      let changed = false;
+      try {
+        let dir = null; try { dir = await fkDirHandle(false); } catch (e) { dir = null; }
+        if (dir) for (const name of await ptNames(dir)) {
+          const f = await fkFile(dir, name); if (!f) continue;
+          let doc; try { doc = JSON.parse(await f.text()); } catch (e) { continue; }
+          if (!doc || doc.format !== 'weld-data' || typeof doc.key !== 'string' || fkName(doc.key) !== name || FK.pending.has(doc.key)) continue;
+          if (FK.seen.get(doc.key) === f.lastModified && FK.cache.has(doc.key)) continue;
+          FK.cache.set(doc.key, JSON.stringify(doc.value === undefined ? null : doc.value)); FK.seen.set(doc.key, f.lastModified); changed = true;
+        }
+        const first = !FK.loaded; FK.loaded = true; FK.error = '';
+        if (first) { await fkMigrate(); changed = true; }
+      } catch (e) { FK.error = 'Could not read Weld data files: ' + ((e && e.message) || e); }
+      FK.loading = null;
+      if (changed) fkChanged();
+      if (host) scheduleDraw();
+      return true;
+    })();
+    return FK.loading;
+  }
+  function fkGet(key, dflt) {
+    if (FK.cache.has(key)) { const raw = FK.cache.get(key); if (raw === null) return dflt; try { return JSON.parse(raw); } catch (e) { return dflt; } }
+    const lg = LG(), old = lg ? lg.get(key) : undefined;   // not moved yet (no folder access so far)
+    return old === undefined ? dflt : old;
+  }
+  function fkSet(key, value) {
+    if (!ptReady() || !FK.loaded) return false;
+    let raw = null;
+    if (value !== null && value !== undefined) { try { raw = JSON.stringify(value); } catch (e) { return false; } if (raw === undefined) return false; }
+    FK.cache.set(key, raw); FK.pending.set(key, raw);
+    if (!FK.timer) FK.timer = setTimeout(() => { FK.timer = null; fkFlush().catch(() => {}); }, FK_DELAY);
+    return true;
+  }
+  async function fkFlush() {
+    if (FK.flushing) { await FK.flushing; if (FK.pending.size && !FK.timer) return fkFlush(); return; }
+    FK.flushing = (async () => {
+      const batch = Array.from(FK.pending.entries()); FK.pending.clear();
+      let dir; try { dir = await fkDirHandle(true); } catch (e) { batch.forEach(b => { if (!FK.pending.has(b[0])) FK.pending.set(b[0], b[1]); }); fkFail(e); return; }
+      for (const [key, raw] of batch) {
+        const name = fkName(key);
+        try {
+          const cur = await fkFile(dir, name);
+          if (cur && (!FK.seen.has(key) || cur.lastModified > FK.seen.get(key))) {   // changed elsewhere since this tab read it: keep the newer file
+            try { const doc = JSON.parse(await cur.text()); FK.cache.set(key, JSON.stringify(doc.value === undefined ? null : doc.value)); FK.seen.set(key, cur.lastModified); } catch (e) {}
+            FK.conflicts++;
+            try { H.toast('This was changed in another tab or on another computer, so your latest edit was not saved. The newer copy is shown.', 9000); } catch (e) {}
+            fkChanged(); continue;
+          }
+          if (raw === null) { if (cur) await dir.removeEntry(name); FK.seen.delete(key); continue; }
+          const w = await (await dir.getFileHandle(name, { create: true })).createWritable(); await w.write(fkDoc(key, raw)); await w.close();
+          const after = await fkFile(dir, name); if (after) FK.seen.set(key, after.lastModified);
+        } catch (e) { if (!FK.pending.has(key)) FK.pending.set(key, raw); fkFail(e); }
+      }
+    })();
+    try { await FK.flushing; } finally { FK.flushing = null; }
+  }
+  function fkFail(e) {
+    if (e && e.name === 'NotAllowedError') { F.perm = 'prompt'; armRegrant(); }
+    FK.error = 'Could not save to the backup folder: ' + ((e && e.message) || e) + '. Weld retries on the next save.';
+    try { H.toast(FK.error, 9000); } catch (x) {}
+    if (host) scheduleDraw();
+  }
+  // Merge rules when the folder already has a key that browser storage also holds.
+  function fkMerge(key, folderVal, oldVal) {
+    const byId = (a, b) => { const seen = new Set((a || []).map(x => x && x.id)); return (a || []).concat((b || []).filter(x => x && !seen.has(x.id))); };
+    if (key === 'scrapbook' && Array.isArray(folderVal) && Array.isArray(oldVal)) return { value: byId(folderVal, oldVal).sort((x, y) => ((y && y.t) || 0) - ((x && x.t) || 0)) };
+    if (key === 'studio:index:v1' && Array.isArray(folderVal) && Array.isArray(oldVal)) return { value: byId(folderVal, oldVal) };
+    const rev = v => (v && typeof v.revision === 'number' ? v.revision : -1);
+    return rev(oldVal) > rev(folderVal) ? { value: oldVal, loser: folderVal } : { value: folderVal, loser: oldVal };
+  }
+  async function fkWriteVerified(dir, name, text) {
+    const w = await (await dir.getFileHandle(name, { create: true })).createWritable(); await w.write(text); await w.close();
+    const f = await fkFile(dir, name); return f && (await f.text()) === text ? f : null;
+  }
+  async function fkMigrate() {
+    const lg = LG(); if (!lg || typeof lg.keys !== 'function') return;
+    const keys = lg.keys().filter(k => lg.owns(k)); if (!keys.length) return;
+    const dir = await fkDirHandle(true);
+    let moved = 0;
+    for (const key of keys) {
+      const old = lg.get(key); if (old === undefined) continue;
+      if (FK.cache.has(key) && FK.cache.get(key) === null) { lg.del(key); continue; }
+      let value = old, loser;
+      if (FK.cache.has(key)) { const m = fkMerge(key, JSON.parse(FK.cache.get(key)), old); value = m.value; loser = m.loser; }
+      try {
+        if (loser !== undefined && loser !== null) {   // keep the version that lost a revision tie-break as its own file
+          const cdir = await dirAt(F.handle, [FK_DIR, 'conflicts'], true), stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+          if (!await fkWriteVerified(cdir, fkName(key).replace(/\.json$/, '') + '-' + stamp + '.json', fkDoc(key, JSON.stringify(loser)))) continue;
+        }
+        const raw = JSON.stringify(value), f = await fkWriteVerified(dir, fkName(key), fkDoc(key, raw));
+        if (!f) continue;   // never remove from storage what is not provably on disk
+        FK.cache.set(key, raw); FK.seen.set(key, f.lastModified); lg.del(key); moved++;
+      } catch (e) { fkFail(e); return; }
+    }
+    if (moved) { FK.moved += moved; try { H.toast('Moved ' + moved + ' Studio/Scrapbook record' + (moved === 1 ? '' : 's') + ' out of browser storage into ' + F.name + '/' + FK_DIR + '.', 8000); } catch (e) {} }
+  }
+  function fkStatus() {
+    if (!F.handle) return 'Saved in your backup folder. Choose one in Weld > Backups to save.';
+    if (F.perm !== 'granted') return 'Saved in ' + F.name + '. Press Allow access in Weld > Backups (or click anywhere) to load and save.';
+    return FK.loaded ? 'Saved in ' + F.name + '/' + FK_DIR : 'Loading from ' + F.name + '...';
+  }
+  // ---- GitHub repo store (1.90.0): ALL of Weld's work data and the generator vault live in <repo>/_weld-data/ (see
+  // src/repo-store.js). Nothing is kept in browser storage and nothing is written to the backup folder any more.
+  // A write that another computer got to first is merged, not overwritten; deletions are kept.
+  const RP = window.WeldRepoStore.create({
+    api: (m, path, body) => H.gh.api(m, path, body), config: () => H.gh.config(), toast: (t, ms) => { try { H.toast(t, ms); } catch (e) {} },
+    encode: s => btoa(unescape(encodeURIComponent(s))), decode: b => decodeURIComponent(escape(atob(b)))
+  });
+  const rpLegacy = () => H.legacy || null;
+  const repoFiles = {
+    // Until the repo has been read, an older copy still in browser storage is shown (read-only) so screens are not blank.
+    get: (key, dflt) => { if (RP.ready()) return RP.get(key, dflt); const lg = rpLegacy(), old = lg ? lg.get(key) : undefined; return old === undefined ? dflt : old; },
+    set: (key, value) => RP.set(key, value), ready: () => RP.ready(), status: () => RP.status(), flush: () => RP.flush(), load: () => RP.load(), keys: () => RP.keys()
+  };
+  // One-time move of browser-storage copies (and of 1.89.x files in the backup folder) into the repo. The repo always wins:
+  // a copy of a key the repo does not have is imported; any other copy is filed under _weld-data/legacy/ and then removed
+  // from storage, so an old computer can never bring back something that was deleted.
+  async function repoMigrate() {
+    const lg = rpLegacy(); let moved = 0, filed = 0;
+    if (lg && typeof lg.keys === 'function') {
+      for (const key of lg.keys().filter(k => lg.owns(k))) {
+        const old = lg.get(key); if (old === undefined) continue;
+        const r = await RP.importLegacy(key, old, 'browser');
+        if (r) { lg.del(key); if (r === 'moved') moved++; else filed++; }
+      }
+    }
+    if (ptReady()) {   // 1.89.x kept these as files in the backup folder
+      try {
+        const dir = await fkDirHandle(false);
+        for (const name of await ptNames(dir)) {
+          const f = await fkFile(dir, name); if (!f) continue;
+          let doc; try { doc = JSON.parse(await f.text()); } catch (e) { continue; }
+          if (!doc || doc.format !== 'weld-data' || typeof doc.key !== 'string' || !/^(scrapbook|studio:.*)$/.test(doc.key)) continue;
+          const mark = 'repoMigrated:' + name, sig = String(f.lastModified) + ':' + f.size;
+          if ((await kvGet(mark)) === sig) continue;
+          const r = await RP.importLegacy(doc.key, doc.value === undefined ? null : doc.value, 'folder');
+          if (r) { await kvSet(mark, sig); if (r === 'moved') moved++; else filed++; }
+        }
+      } catch (e) {}
+    }
+    if (moved || filed) { try { H.toast('Moved ' + moved + ' record' + (moved === 1 ? '' : 's') + ' from this computer into your GitHub repo' + (filed ? ' (' + filed + ' older local cop' + (filed === 1 ? 'y' : 'ies') + ' filed under _weld-data/legacy)' : '') + '.', 9000); } catch (e) {} }
+  }
+  let repoTimer = null;
+  async function repoRefresh() { try { await RP.load(); } catch (e) {} if (host) scheduleDraw(); }
+  async function repoBoot() {
+    RP.onChange(() => { try { if (typeof H.refreshTab === 'function') H.refreshTab(); } catch (e) {} });
+    if (RP.configured()) { await RP.load(); if (RP.ready()) await repoMigrate(); }
+    if (!repoTimer) repoTimer = setInterval(() => { if ((typeof document === 'undefined' || !document.hidden) && RP.configured()) RP.load().catch(() => {}); }, 60000); if (repoTimer && typeof repoTimer.unref === 'function') repoTimer.unref();   // pick up another computer's saves
+    try { window.addEventListener('focus', () => { if (RP.configured()) RP.load().catch(() => {}); }); } catch (e) {}
+    try { window.addEventListener('beforeunload', e => { if (RP.pending()) { RP.flush().catch(() => {}); e.preventDefault(); e.returnValue = ''; } }); } catch (e) {}
+    if (host) scheduleDraw();
+  }
+  // Generator vault saves (Skybridge storage) go to the same repo store.
+  async function rpVaultSet(caller, key, value) {
+    if (!vaultReady()) return { ok: false, code: 'no-github-repo', reason: 'Weld keeps your data in your GitHub repo. Set owner, repo and token in Weld > GitHub and wait for it to load.' };
+    const p = C.parseKey(key);
+    if (!p.gen || p.gen !== caller || VAULT_KINDS.indexOf(p.kind) === -1) return { ok: false, code: 'bad-key', reason: 'bad-key' };
+    if (value === null || value === undefined) { RP.set(key, null); return { ok: true, where: 'github' }; }
+    if (C.checkStoreWrite(key, value).ok !== true) return { ok: false, code: 'owner-mismatch', reason: 'owner-mismatch' };
+    if (p.kind === 'chat-copy' && C.secretScan(value && value.data).length) return { ok: false, code: 'secret-shaped', reason: 'this chat copy holds a plaintext secret-shaped value, so it was not written to the repo' };
+    if (RP.get(key, undefined) !== undefined && C.canonical(RP.get(key, undefined)) === C.canonical(value)) return { ok: true, where: 'github' };
+    if (!ptBudget(caller, Date.now())) return { ok: false, code: 'rate-limited', reason: 'too many vault saves from this generator; try again in a few minutes' };
+    if (RP.get(key, undefined) === undefined && RP.truncated()) return { ok: false, code: 'folder-full', reason: 'the repo listing is too large to count vault entries safely; new entries are refused until some are deleted' };
+    if (RP.get(key, undefined) === undefined && RP.keys().filter(k => k.indexOf('weld:genvault:' + caller + '/') === 0).length >= PT_MAX_FILES) return { ok: false, code: 'folder-full', reason: 'this generator already has ' + PT_MAX_FILES + ' vault entries in the repo; delete some first' };
+    return RP.set(key, value) ? { ok: true, where: 'github' } : { ok: false, code: 'github-write-failed', reason: 'could not queue the save' };
+  }
+  async function rpVaultGet(caller, key) {
+    if (!vaultReady()) return undefined;
+    const p = C.parseKey(key); if (!p.gen || p.gen !== caller || VAULT_KINDS.indexOf(p.kind) === -1) return undefined;
+    return RP.get(key, undefined);
+  }
+  async function rpVaultList(caller, prefix) {
+    if (!vaultReady() || !C.GEN_RE.test(String(caller || ''))) return [];
+    const base = 'weld:genvault:' + caller + '/';
+    return RP.keys().filter(k => k.indexOf(base) === 0 && k.indexOf(String(prefix || '')) === 0).sort();
+  }
+  let migrating = null;
+  function afterGrant() { if (RP.ready() && !migrating) migrating = repoMigrate().catch(() => {}).then(() => { migrating = null; }); }   // the folder holds manual exports only; Weld's data is in the GitHub repo (repoBoot)
   let syncTimer = null;
-  function scheduleSync(ms) { if (syncTimer) clearTimeout(syncTimer); syncTimer = setTimeout(() => { syncTimer = null; syncToFolder(false).catch(() => {}); }, ms || 1500); }
+  function scheduleSync(ms) { if (syncTimer) clearTimeout(syncTimer); syncTimer = setTimeout(() => { syncTimer = null; syncToFolder(false, true).catch(() => {}); }, ms || 1500); }
   async function bootFolder() {
-    F.supported = typeof pageWin().showDirectoryPicker === 'function'; F.auto = H.get(AUTO_KEY, false) === true;
+    F.supported = typeof pageWin().showDirectoryPicker === 'function'; F.auto = false; F.keep = H.get(KEEP_KEY, true) !== false;
     try { const h = await kvGet('handle'); if (h && typeof h.queryPermission === 'function') { F.handle = h; F.name = h.name; F.perm = await permission(h, false); } } catch (e) {}
+    repoBoot().catch(() => {});
+    try { window.addEventListener('pagehide', () => { if (FK.pending.size) fkFlush().catch(() => {}); }); } catch (e) {}
+    try { window.addEventListener('focus', () => { recheckAccess().catch(() => {}); }); } catch (e) {}
+    armRegrant();
     const v = V(); if (v && typeof v.onChange === 'function') v.onChange(() => { if (F.auto) scheduleSync(1500); });   // a generator saved: mirror it
     if (F.auto) scheduleSync(3000);
     if (host) draw();
@@ -17899,7 +19820,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   function folderCard() {
     const card = E('div', { 'data-folder': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Backup location', style: { fontWeight: '600' } }));
-    card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Choose any folder on a drive or inside a cloud-synced folder (Google Drive, OneDrive, iCloud, Dropbox). Copies are saved there as files that are only ever added: nothing is overwritten or deleted, so browser cache clears cannot touch them.' }));
+    card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Optional, for manual copies only. Weld keeps your data (Studio projects, Scrapbook, notes, pins, favorites, generator vault saves) in your GitHub repo under _weld-data/, set in Weld > GitHub. This folder is used only by the Save all to folder now button.' }));
     if (!F.supported) card.appendChild(E('div', { style: { fontSize: '12px', color: '#e0a030' }, text: 'This browser cannot open folders (Chrome or Edge can). The Download buttons below still work.' }));
     card.appendChild(E('div', { 'data-folder-state': '1', style: { fontSize: '12px', margin: '4px 0' }, text: F.handle ? 'Folder: ' + F.name + ' · ' + (F.perm === 'granted' ? 'access allowed' : 'needs permission (press Allow access)') : 'No folder chosen yet.' }));
     if (F.error) card.appendChild(E('div', { role: 'alert', style: { fontSize: '12px', color: '#ff9e92' }, text: F.error }));
@@ -17911,8 +19832,12 @@ the diagnostics preview calls the same builders as the real prompt.`
     card.appendChild(row);
     const auto = E('input', { type: 'checkbox', 'aria-label': 'Save new backups to the folder automatically' }); auto.checked = F.auto;
     auto.addEventListener('change', () => setAuto(auto.checked));
-    card.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px' } }, [auto, E('span', { text: 'Save new backups to the folder automatically while Weld is open (needs access allowed)' })]));
-    if (F.handle) card.appendChild(importCard());
+    card.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px' } }, [auto, E('span', { text: 'Save new backups of starred generators to the folder automatically while Weld is open (needs access allowed; unstarred ones use the button above)' })]));
+    const keep = E('input', { type: 'checkbox', 'aria-label': 'Keep folder access allowed' }); keep.checked = F.keep;
+    keep.addEventListener('change', () => setKeep(keep.checked));
+    card.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px' }, title: 'Chrome forgets folder access when it restarts. With this on, Weld re-requests it on your first click or key press. Pick "Allow on every visit" in Chrome\'s prompt to stop it forgetting at all.' }, [keep, E('span', { text: 'Keep access allowed (re-ask on my next click after a browser restart)' })]));
+    card.appendChild(E('div', { 'data-weld-data': '1', style: { fontSize: '12px', marginTop: '6px' }, text: 'Studio projects and Scrapbook: ' + fkStatus() + (FK.loaded ? ' (' + Array.from(FK.cache.values()).filter(v => v !== null).length + ' file' + (Array.from(FK.cache.values()).filter(v => v !== null).length === 1 ? '' : 's') + ')' : '') + (FK.moved ? ' · moved ' + FK.moved + ' out of browser storage' : '') + '. Changing folder does not move these files; copy the ' + FK_DIR + ' folder yourself.' }));
+    if (FK.error) card.appendChild(E('div', { role: 'alert', style: { fontSize: '12px', color: '#ff9e92' }, text: FK.error }));
     if (F.last && F.last.held.length) card.appendChild(E('div', { 'data-held': '1', style: { fontSize: '12px', marginTop: '6px', color: '#e0a030' }, text: 'Held back (plaintext secret-shaped values; not copied to your folder): ' + F.last.held.join(', ') }));
     return card;
   }
@@ -17921,35 +19846,42 @@ the diagnostics preview calls the same builders as the real prompt.`
     load();
     if (unsub) { try { unsub(); } catch (e) {} unsub = null; }
     const v = V();
-    if (v && typeof v.onChange === 'function') unsub = v.onChange(() => { if (host && host.isConnected !== false && !S.pendingDelete) { load(); draw(); } });
+    if (v && typeof v.onChange === 'function') unsub = v.onChange(() => { if (host && host.isConnected !== false) { load(); draw(); } });
     draw();
   }
+  // Redraws keep the reader where they were: scroll offsets of the panel and every opened section are restored.
+  function scrolled(n) { const out = []; for (let x = n; x && x.nodeType === 1; x = x.parentNode) if (x.scrollTop > 0) out.push([x, x.scrollTop]); return out; }
+  function remembered(d, id) { if (S.openGens.has(id)) d.open = true; d.addEventListener('toggle', () => { if (d.open) S.openGens.add(id); else S.openGens.delete(id); }); return d; }
   function draw() {
     const parent = host; if (!parent) return;
+    const keepScroll = scrolled(parent);
     while (parent.firstChild) parent.removeChild(parent.firstChild);
+    try { build(parent); } finally { keepScroll.forEach(x => { x[0].scrollTop = x[1]; }); }
+  }
+  function build(parent) {
     const rerender = () => draw();
     const wrap = E('div', { id: 'wc-backup-body' });
     wrap.appendChild(E('div', { text: 'Backup Manager', style: { fontWeight: '600', fontSize: '15px' } }));
-    wrap.appendChild(note('Look after the generator backup copies kept in this companion. You can inspect and download them, and delete a single key. This tab never edits, moves or repairs a record; generators own their own data.'));
+    wrap.appendChild(note('Weld keeps no backups of its own and no data in browser storage: everything lives in your GitHub repo (_weld-data/). This tab lists, exports and purges anything older still held in browser storage.'));
     const top = E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', margin: '8px 0' } });
     top.appendChild(btn('Refresh', () => { load(); draw(); }));
     top.appendChild(btn('Export all', () => exportRows('all-generators', S.rows || []), { disabled: !(S.rows && S.rows.length) }));
     top.appendChild(btn('Scan for plaintext secrets', () => { scanSecrets(); draw(); }, { disabled: !(S.rows && S.rows.length) }));
+    top.appendChild(btn(S.busy ? 'Purging...' : 'Purge all Weld-stored backups', () => { purgeAll(); }, { disabled: S.busy, title: 'Removes every vault backup and the Project tab copies and snapshots from browser storage. Anything not yet on disk is saved to your backup folder (or downloaded) first.' }));
     wrap.appendChild(top);
     if (S.msg) wrap.appendChild(E('div', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', margin: '4px 0', color: S.msgErr ? '#ff9e92' : '' }, text: S.msg }));
     if (S.error) { wrap.appendChild(E('div', { role: 'alert', style: { color: '#ff9e92', margin: '8px 0' }, text: S.error })); parent.appendChild(wrap); return; }
     const inv = S.inv, info = (V() && V().info && V().info()) || {};
     wrap.appendChild(E('div', { 'data-summary': '1', style: Object.assign({ margin: '4px 0 10px' }, small), text:
-      (info.backend || 'Userscript storage') + ' · ' + inv.count + ' backup key' + (inv.count === 1 ? '' : 's') + ' · ' + C.fmtBytes(inv.bytes) + ' used by backups' +
+      (info.backend || 'Userscript storage') + ' · ' + inv.count + ' backup key' + (inv.count === 1 ? '' : 's') + ' still in browser storage · ' + C.fmtBytes(inv.bytes) +
       (info.quota ? ' · browser storage ' + C.fmtBytes(info.usage || 0) + ' of ' + C.fmtBytes(info.quota) : '') }));
-    if (!inv.count) wrap.appendChild(note('No generator backups are stored yet. They appear here after a generator saves a copy through Skybridge storage.'));
+    if (!inv.count) wrap.appendChild(note('Nothing is held in Weld storage. Generator vault saves land in your backup folder.'));
     wrap.appendChild(folderCard());
     wrap.appendChild(cleanupCard());
     wrap.appendChild(familyCard(rerender));
-    const bar = confirmBar(rerender); if (bar) wrap.appendChild(bar);
     inv.generators.forEach(g => {
-      const d = E('details', { 'data-gen': g.gen, style: { margin: '6px 0' } });
-      if (S.selected && g.keys.some(k => k.gmKey === S.selected) || g.keys.some(k => k.gmKey === S.pendingDelete)) d.open = true;
+      const d = remembered(E('details', { 'data-gen': g.gen, style: { margin: '6px 0' } }), 'gen:' + g.gen);
+      if (S.selected && g.keys.some(k => k.gmKey === S.selected)) { d.open = true; S.openGens.add('gen:' + g.gen); }
       d.appendChild(E('summary', { text: g.gen + ' — ' + (g.snapshot ? 'source copy ' + (g.snapshot.stale ? '(stale)' : (g.snapshot.at ? C.fmtDate(g.snapshot.at) : 'present')) : 'no source copy') + ', ' + g.chats + ' chat cop' + (g.chats === 1 ? 'y' : 'ies') + ', ' + C.fmtBytes(g.bytes) +
         (g.newest ? ', newest ' + C.fmtDate(g.newest).slice(0, 10) : '') + (g.oldest && g.oldest !== g.newest ? ', oldest ' + C.fmtDate(g.oldest).slice(0, 10) : '') + (g.stale ? ', ' + g.stale + ' stale' : '') }));
       d.appendChild(E('div', { style: { padding: '2px 0 4px 12px' } }, [btn('Export folder', () => exportRows(g.gen, g.keys), { 'aria-label': 'Export folder ' + g.gen })]));
@@ -17958,13 +19890,13 @@ the diagnostics preview calls the same builders as the real prompt.`
     });
     function plain(title, rows, canDelete, why) {
       if (!rows.length) return;
-      const d = E('details', { 'data-section': title, style: { margin: '6px 0' } });
+      const d = remembered(E('details', { 'data-section': title, style: { margin: '6px 0' } }), 'section:' + title);
       d.appendChild(E('summary', { text: title + ' (' + rows.length + ')' }));
       d.appendChild(E('div', { style: Object.assign({ padding: '2px 0 4px 12px' }, small), text: why }));
       rows.forEach(r => d.appendChild(E('div', { style: { paddingLeft: '12px' } }, [rowLine(r, canDelete, rerender)])));
       wrap.appendChild(d);
     }
-    plain('Legacy (dadchat:vault)', inv.legacy, false, 'Read-only. Generators own the migration of these keys; this tab never migrates, renames or cleans them.');
+    plain('Legacy (dadchat:vault)', inv.legacy, true, 'Old-format vault keys. This tab never migrates or renames them; Delete or Purge removes them.');
     plain('Operational keys', inv.operational, false, 'Small link and self-test records. Display only.');
     plain('Other vault-prefix keys', inv.other, true, 'Keys under weld:genvault: whose folder name is not a valid generator name.');
     if (S.secrets) {
@@ -17976,8 +19908,316 @@ the diagnostics preview calls the same builders as the real prompt.`
     parent.appendChild(wrap);
   }
   bootFolder().catch(() => {});
-  window.weldBackup = { render, _sync: syncToFolder, _state: F };
+  // vault: the pass-through store Skybridge storage uses for weld:genvault: keys (see sbServiceStorage).
+  // files: the folder store behind Weld's storage helpers for Studio projects and the Scrapbook (see gget/gset).
+  window.weldBackup = { render, purge: purgeAll, _sync: syncToFolder, _state: F, vault: { ready: vaultReady, set: rpVaultSet, get: rpVaultGet, list: rpVaultList, noFolder: 'Weld keeps your data in your GitHub repo. Set owner, repo and token in Weld > GitHub.' },
+    files: repoFiles, repo: RP };
 })();
+
+/* Shared collector: generator sources, with optional public cached/model bytes for local downloads. */
+(function (host) {
+  'use strict';
+  const PART = 4 * 1024 * 1024;
+  function safePath(path) {
+    return typeof path === 'string' && path.length > 0 && path.length < 1024 &&
+      !/[\\\x00-\x1f:]/.test(path) && path.split('/').every(p => p && p !== '.' && p !== '..' && p !== '.git' &&
+        !/^\.env(?:\.|$)|\.(pem|key|p12|pfx)$/i.test(p));
+  }
+  function base64(bytes) {
+    let text = '';
+    for (let i = 0; i < bytes.length; i += 32768) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    return btoa(text);
+  }
+  // Runs only in the generator preview via Perchance's existing evaluateJs channel.
+  // Read operations are stateless, so a timed-out request never leaves retained model buffers.
+  async function runtime(op, arg) {
+    const staticUrl = value => {
+      const u = new URL(value);
+      return u.protocol === 'https:' && !u.username && !u.password && (!u.search || u.search === '?download=true') &&
+        /(^|\.)(huggingface\.co|cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com|user\.uploads\.dev|perchance\.org)$/.test(u.hostname) &&
+        /\.(gguf|onnx|bin|safetensors|wasm|json|js|css|woff2?|ttf|png|jpe?g|svg|webp)$/i.test(u.pathname) &&
+        !/\/(api|chat|session|user|account)(\/|\.)/i.test(u.pathname);
+    };
+    async function opfs(path) {
+      let dir = await navigator.storage.getDirectory();
+      const bits = path.split('/'), name = bits.pop();
+      for (const bit of bits) dir = await dir.getDirectoryHandle(bit);
+      return (await dir.getFileHandle(name)).getFile();
+    }
+    if (op === 'inventory') {
+      const entries = [], unavailable = [];
+      if (typeof caches === 'undefined') unavailable.push('Cache Storage unavailable');
+      else {
+        for (const name of await caches.keys()) {
+          const cache = await caches.open(name);
+          for (const req of await cache.keys()) {
+            if (!staticUrl(req.url) || req.method !== 'GET' || req.headers.has('authorization')) continue;
+            const res = await cache.match(req);
+            if (!res || !res.ok || res.type === 'opaque') throw new Error('Cached asset unreadable');
+            const blob = await res.blob();
+            entries.push({ kind: 'cache', cache: name, url: req.url, size: blob.size,
+              version: res.headers.get('etag') || res.headers.get('last-modified') || '' });
+          }
+        }
+      }
+      // Perchance's on-device GGUF runtime uses browser-model in origin-private storage.
+      if (!navigator.storage || !navigator.storage.getDirectory) unavailable.push('OPFS unavailable');
+      else {
+        const root = await navigator.storage.getDirectory();
+        let models;
+        try { models = await root.getDirectoryHandle('browser-model'); }
+        catch (e) { if (e.name !== 'NotFoundError') throw e; }
+        async function walk(dir, prefix) {
+          for await (const [name, handle] of dir.entries()) {
+            const path = prefix + '/' + name;
+            if (handle.kind === 'directory') await walk(handle, path);
+            else { const f = await handle.getFile(); entries.push({ kind: 'opfs', path, size: f.size, modified: f.lastModified }); }
+          }
+        }
+        if (models) await walk(models, 'browser-model');
+      }
+      return { entries, unavailable, origin: location.origin };
+    }
+    let blob;
+    if (arg.kind === 'cache') {
+      if (!staticUrl(arg.url)) throw new Error('Unsafe cached URL');
+      const res = await (await caches.open(arg.cache)).match(arg.url);
+      if (!res || !res.ok) throw new Error('Cached file disappeared');
+      if ((res.headers.get('etag') || res.headers.get('last-modified') || '') !== arg.version) throw new Error('Cached file changed during backup');
+      blob = await res.blob();
+    } else if (arg.kind === 'opfs' && arg.path.startsWith('browser-model/') && !arg.path.split('/').includes('..')) {
+      blob = await opfs(arg.path);
+      if (blob.lastModified !== arg.modified) throw new Error('Model changed during backup');
+    } else throw new Error('Unknown backup asset');
+    if (blob.size !== arg.size) throw new Error('Asset size changed during backup');
+    if (!Number.isSafeInteger(arg.offset) || arg.offset < 0 || !Number.isSafeInteger(arg.length) || arg.length < 0 || arg.length > 4 * 1024 * 1024) throw new Error('Invalid asset range');
+    const bytes = new Uint8Array(await blob.slice(arg.offset, arg.offset + arg.length).arrayBuffer());
+    let text = '';
+    for (let i = 0; i < bytes.length; i += 32768) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    return btoa(text);
+  }
+  async function collect(opts) {
+    const { name, dslPath, htmlPath, dsl, html, state, evaluate, crypto } = opts;
+    if (!safePath(dslPath) || !safePath(htmlPath) || dslPath === htmlPath) throw new Error('Unsafe or duplicate GitHub panel paths');
+    const slash = dslPath.lastIndexOf('/'), prefix = slash < 0 ? name + '/' : dslPath.slice(0, slash + 1);
+    const files = [{ path: dslPath, content: dsl }, { path: htmlPath, content: html }];
+    const seen = new Set(files.map(f => f.path)), records = [];
+    function add(file) { if (!safePath(file.path) || seen.has(file.path)) throw new Error('Unsafe or duplicate backup path'); seen.add(file.path); files.push(file); }
+    let listing = {};
+    if (state) { await state.ready(); listing = state.list(); }
+    else if (/\bsrc\//.test(html)) throw new Error('Project file store unavailable; select the correct editor draft first');
+    if (!Object.keys(listing).length && /\bsrc\//.test(html)) throw new Error('Project manifest empty; select the correct editor draft first');
+    const fingerprint = JSON.stringify(listing);
+    function asset(path, size, read, metadata) {
+      if (!safePath(path) || !Number.isSafeInteger(size) || size < 0) throw new Error('Invalid project file metadata');
+      const rec = Object.assign({ path, size, parts: [] }, metadata); records.push(rec);
+      const count = Math.max(1, Math.ceil(size / PART));
+      for (let n = 0; n < count; n++) {
+        const offset = n * PART, length = Math.min(PART, size - offset);
+        const target = count === 1 ? path : prefix + '.weld-backup/parts/' + (records.length - 1) + '/' + String(n).padStart(6, '0');
+        const part = { path: target, size: length }; rec.parts.push(part);
+        add({ path: target, encoding: 'base64', read: async () => {
+          const content = await read(offset, length);
+          const binary = atob(content), bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+          if (bytes.length !== length) throw new Error('Incomplete backup read');
+          part.sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
+          return content;
+        } });
+      }
+    }
+    for (const path of Object.keys(listing).sort()) {
+      const entry = listing[path];
+      // A project source file is small enough for the platform's readFile API; models use slices below.
+      asset(prefix + 'src/' + path, entry.size, async (offset, length) => {
+        if (JSON.stringify(state.list()) !== fingerprint) throw new Error('Project changed during backup; retry after editing finishes');
+        const data = new Uint8Array(await state.readFile(path));
+        if (data.byteLength !== entry.size) throw new Error('Project file size mismatch');
+        const text = new TextDecoder().decode(data);
+        if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:gh[opusr]_|github_pat_|sk-proj-|sk-ant-api)[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{30,}/.test(text)) throw new Error('Secret-shaped project content detected; branch not updated');
+        return base64(data.subarray(offset, offset + length));
+      }, { kind: 'project' });
+    }
+    const includeCache = opts.includeCache !== false;
+    const inventory = includeCache ? await evaluate('inventory') : { entries: [], unavailable: [], origin: null };
+    for (const [i, item] of inventory.entries.entries()) {
+      const label = item.kind === 'opfs' ? item.path.split('/').pop() : new URL(item.url).pathname.split('/').pop();
+      asset(prefix + '.weld-backup/assets/' + i + '/' + encodeURIComponent(label), item.size,
+        (offset, length) => evaluate('read', Object.assign({}, item, { offset, length })),
+        item.kind === 'opfs' ? { kind: item.kind, originalPath: item.path } : { kind: item.kind, url: item.url });
+    }
+    const manifest = { format: 'weld-project-backup', version: 1, generator: name, origin: inventory.origin, includeCache, files: records,
+      unavailable: inventory.unavailable,
+      coverage: includeCache ? 'Editor panels, complete selected src tree, readable public static/model Cache Storage responses, and browser-model OPFS files in the visible preview origin. HTTP cache, other origins, IndexedDB, cookies, credentials and private chat data are not exported.'
+        : 'Editor panels and complete selected src tree only. Browser caches, model downloads, OPFS, IndexedDB, cookies, credentials and private chat data are not exported.' };
+    add({ path: prefix + '.weld-backup/manifest.json', read: () => JSON.stringify(manifest, null, 2) });
+    add({ path: prefix + '.weld-backup/restore.py', content: restoreSource });
+    return { files, manifest, bytes: records.reduce((sum, r) => sum + r.size, 0), validate: () => {
+      if (state && JSON.stringify(state.list()) !== fingerprint) throw new Error('Project changed during backup; branch not updated');
+      if (opts.panels && !opts.panels(dsl, html)) throw new Error('Editor panels changed during backup; branch not updated');
+    } };
+  }
+  const restoreSource = `"""Restore chunked files to a separate directory; verify every part before writing.
+Run: python .weld-backup/restore.py --output restored
+Cache/model files are restored to disk, not inserted into browser storage.
+"""
+import argparse, hashlib, json, pathlib, os, tempfile
+p = argparse.ArgumentParser()
+p.add_argument('--output', required=True)
+a = p.parse_args()
+root = pathlib.Path(__file__).resolve().parent.parent
+out = pathlib.Path(a.output).resolve()
+if out == root or root in out.parents:
+    raise SystemExit('Choose an output directory outside the generator backup')
+m = json.loads((root / '.weld-backup/manifest.json').read_text(encoding='utf-8'))
+def safe(base, path):
+    bits = pathlib.PurePosixPath(path).parts
+    if not bits or '..' in bits or pathlib.PurePosixPath(path).is_absolute() or ':' in path or '\\\\' in path:
+        raise ValueError('Unsafe manifest path')
+    dest = base.joinpath(*bits).resolve()
+    if base not in dest.parents: raise ValueError('Path leaves backup directory')
+    return dest
+# Stored paths are repository-relative. Resolve using the generator directory's suffix.
+for rec in m['files']:
+    marker = '/src/' if rec['kind'] == 'project' else '/.weld-backup/'
+    rel = ('src/' if rec['kind'] == 'project' else '.weld-backup/') + rec['path'].split(marker, 1)[1]
+    dest = safe(out, rel)
+    if dest.exists(): raise FileExistsError(str(dest))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=dest.parent, delete=False) as f:
+            tmp = pathlib.Path(f.name)
+            total = 0
+            for part in rec['parts']:
+                part_marker = '/.weld-backup/' if '/.weld-backup/' in part['path'] else '/src/'
+                part_rel = part_marker[1:] + part['path'].split(part_marker, 1)[1]
+                data = safe(root, part_rel).read_bytes()
+                if len(data) != part['size'] or hashlib.sha256(data).hexdigest() != part['sha256']:
+                    raise ValueError('Part integrity check failed')
+                f.write(data); total += len(data)
+            if total != rec['size']: raise ValueError('File size mismatch')
+        os.link(tmp, dest)  # fails if another process created the destination
+    finally:
+        if tmp is not None: tmp.unlink(missing_ok=True)
+    print(rel, rec['size'])
+`;
+  const api = { collect, runtime, safePath, base64, PART, restoreSource };
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else host.WeldGitHubBackup = api;
+})(typeof window === 'object' ? window : globalThis);
+
+/* Local project downloads share the GitHub collector, but store assembled files. */
+(function (host) {
+  'use strict';
+  const B = typeof module === 'object' && module.exports ? require('./github-backup') : host.WeldGitHubBackup;
+  const MANIFEST = '.weld-backup/local-manifest.json';
+  async function fileHandle(root, path, create) {
+    if (!B.safePath(path)) throw new Error('Unsafe local backup path');
+    const bits = path.split('/'), name = bits.pop();
+    for (const bit of bits) root = await root.getDirectoryHandle(bit, { create });
+    return root.getFileHandle(name, { create });
+  }
+  async function existing(root, path) {
+    try { return await (await fileHandle(root, path, false)).getFile(); }
+    catch (e) { if (e.name === 'NotFoundError') return null; throw e; }
+  }
+  const digest = async (crypto, bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
+  const same = (a, b) => !!a && a.size === b.size && JSON.stringify(a.parts) === JSON.stringify(b.parts);
+  async function matches(file, record, crypto) {
+    if (!file || !record || file.size !== record.size) return false;
+    let offset = 0;
+    for (const part of record.parts) {
+      if (await digest(crypto, await file.slice(offset, offset + part.size).arrayBuffer()) !== part.sha256) return false;
+      offset += part.size;
+    }
+    return offset === file.size;
+  }
+  async function save({ root, slug, backup, crypto, overwrite = false, active = () => true, progress = () => {} }) {
+    if (!/^[a-z0-9][a-z0-9_-]*$/i.test(slug)) throw new Error('Unsafe generator name');
+    const prefix = slug + '/', manifestPath = prefix + MANIFEST;
+    const previousFile = await existing(root, manifestPath);
+    let previous = null;
+    if (previousFile) {
+      try { previous = JSON.parse(await previousFile.text()); }
+      catch (e) { if (!overwrite) throw new Error('Local backup manifest is unreadable; download manually to replace it'); }
+      if (previous && (previous.format !== 'weld-local-project-backup' || previous.generator !== slug || !Array.isArray(previous.files))) {
+        if (!overwrite) throw new Error('Local backup manifest is not valid for this generator');
+        previous = null;
+      }
+    }
+    const prior = new Map((previous ? previous.files : []).map(r => [r.path, r]));
+    const byPath = new Map(backup.files.map(f => [f.path, f]));
+    const partPaths = new Set(backup.manifest.files.flatMap(r => r.parts.map(p => p.path)));
+    const records = backup.manifest.files.map(r => ({ path: r.path, parts: r.parts, kind: r.kind, url: r.url, originalPath: r.originalPath }));
+    for (const f of backup.files) {
+      if (!partPaths.has(f.path) && !f.path.includes('/.weld-backup/')) records.push({ path: f.path, kind: 'panel', parts: [{ path: f.path }] });
+    }
+    const manifest = { format: 'weld-local-project-backup', version: 1, generator: slug,
+      origin: backup.manifest.origin, coverage: backup.manifest.coverage, unavailable: backup.manifest.unavailable, files: [] };
+    let written = 0;
+    function check() {
+      if (!active()) throw new Error('Local backup paused or generator/location changed; download stopped');
+      backup.validate();
+    }
+    async function readPart(part) {
+      check();
+      const source = byPath.get(part.path);
+      if (!source) throw new Error('Missing local backup part');
+      const content = source.read ? await source.read() : source.content;
+      return source.encoding === 'base64' ? Uint8Array.from(atob(content), c => c.charCodeAt(0)) : new TextEncoder().encode(content);
+    }
+    const metadata = record => ({ path: record.path, kind: record.kind, url: record.url, originalPath: record.originalPath, size: 0, parts: [] });
+    check();
+    for (const [index, record] of records.entries()) {
+      if (!B.safePath(record.path) || !record.path.startsWith(prefix)) throw new Error('Backup file leaves the selected generator folder');
+      check(); progress(index + 1, records.length);
+      const before = await existing(root, record.path);
+      const old = prior.get(record.path);
+      let scanned = null;
+      if (!overwrite && old && before) {
+        // Read/hash first: unchanged models never create temporary disk writes.
+        scanned = metadata(record);
+        for (const part of record.parts) {
+          const bytes = await readPart(part);
+          scanned.parts.push({ size: bytes.length, sha256: await digest(crypto, bytes) }); scanned.size += bytes.length;
+        }
+        check();
+        if (same(old, scanned)) { manifest.files.push(scanned); continue; }
+        if (!await matches(before, old, crypto) && !await matches(before, scanned, crypto)) {
+          throw new Error('Computer copy changed: ' + record.path + '. Download manually to replace it.');
+        }
+      }
+      const target = await fileHandle(root, record.path, true), stream = await target.createWritable();
+      const next = metadata(record);
+      let closed = false;
+      try {
+        for (const part of record.parts) {
+          const bytes = await readPart(part);
+          next.parts.push({ size: bytes.length, sha256: await digest(crypto, bytes) }); next.size += bytes.length;
+          await stream.write(bytes);
+        }
+        check();
+        if (scanned && !same(scanned, next)) throw new Error('Cached file changed during local backup; retry');
+        const disk = await target.getFile();
+        if (!overwrite && before && !await matches(disk, old, crypto) && !await matches(disk, next, crypto)) {
+          throw new Error('Computer copy changed: ' + record.path + '. Download manually to replace it.');
+        } else { await stream.close(); written++; }
+        closed = true; manifest.files.push(next);
+      } finally { if (!closed) await stream.abort().catch(() => {}); }
+    }
+    check();
+    const text = JSON.stringify(manifest, null, 2);
+    if (!previousFile || await previousFile.text() !== text) {
+      const stream = await (await fileHandle(root, manifestPath, true)).createWritable();
+      try { await stream.write(text); check(); await stream.close(); }
+      catch (e) { await stream.abort().catch(() => {}); throw e; }
+    }
+    return { written, files: manifest.files.length, bytes: backup.bytes, unavailable: manifest.unavailable };
+  }
+  const api = { save };
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else host.WeldLocalBackup = api;
+})(typeof window === 'object' ? window : globalThis);
 /* END GENERATED BACKUP */
 
 /* BEGIN GENERATED EXTRAS */
