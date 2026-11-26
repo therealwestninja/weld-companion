@@ -6,9 +6,9 @@
 
 Favorites · reading comfort · save & pin results · undo-reroll · a full generator manager with your real folders · **two-way GitHub sync (Pull & Push)** · rename/delete that drive Perchance's own controls · a **Library** tab for readers and players — a permanent cross-generator **Scrapbook**, AICC **chat-story export** (styled HTML / Markdown / text), a **backup guardian**, night light, and read-aloud · a **Tools** tab housing the AI Helper (edit it, *point at your own GPT, or run a free local model*), AICC character file import/export, and a one-click **self-test** · a **federated Data Manager** that browses, edits and backs up every generator's IndexedDB · an **AICC pack** for AI Character Chat with a Lore Library, character GitHub round-trip, and database repair & recovery with quarantine.
 
-[![Checks](https://github.com/therealwestninja/weld-companion/actions/workflows/test.yml/badge.svg)](https://github.com/therealwestninja/weld-companion/actions/workflows/test.yml)
+[![Checks](https://github.com/JawlessEel/weld-companion/actions/workflows/test.yml/badge.svg)](https://github.com/JawlessEel/weld-companion/actions/workflows/test.yml)
 [![Userscript](https://img.shields.io/badge/type-userscript-4493f8)](#install)
-[![Version](https://img.shields.io/badge/version-1.74.0-3fb950)](#)
+[![Version](https://img.shields.io/badge/version-1.97.0-3fb950)](#)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-supported-00485b)](https://www.tampermonkey.net/)
 [![Violentmonkey](https://img.shields.io/badge/Violentmonkey-supported-663399)](https://violentmonkey.github.io/)
 [![Local & account-free](https://img.shields.io/badge/your%20data-100%25%20local-3fb950)](#privacy--safety)
@@ -48,6 +48,9 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
 - [License](#license)
 
 ## Install
+
+For local models and AI clients, see [Weld connections](docs/CONNECTIONS.md)
+(LM Studio, Antigravity and the Gemini macOS app).
 
 1. Install a userscript manager:
    - **[Tampermonkey](https://www.tampermonkey.net/)** — Chrome, Edge, Safari, Opera
@@ -105,7 +108,7 @@ If your generators' source lives in a GitHub repo — one folder per generator, 
 
 **⬇ Pull (GitHub → editor).** Fetches the two files from `raw.githubusercontent.com` (public, no auth or cookies) and fills the editor's two CodeMirror panes via the editor's own transaction pipeline — so the change is undoable with `Ctrl+Z`. You then review and click **Save**. Optionally it downloads a local backup of the current source first.
 
-**⬆ Push (editor → GitHub).** Reads both editor panes and commits them together through GitHub's Git Data API. The branch moves only after both blobs and the combined tree are ready, so the DSL and HTML files are always updated in one atomic commit. A confirmation dialog shows exactly what will be committed before anything goes out.
+**⬆ Push (editor → GitHub).** Reads both editor panes and commits them together through GitHub's Git Data API. The branch moves only after both blobs and the combined tree are ready, so the DSL and HTML files are always updated in one atomic commit. A confirmation dialog shows exactly what will be committed before anything goes out. Each GitHub request has a 30-second timeout plus a 35-second watchdog if the userscript manager does not respond. Failures identify the step (such as GET branch or POST blob); aborts and network errors are reported too. A timed-out branch update may still have reached GitHub, so check the repository before retrying.
 
 Push writes to your account, so it needs a token:
 
@@ -130,7 +133,7 @@ Everything in the **📒 Library** tab is for people who *use* generators rather
 
 ##### 📌 Scrapbook
 
-A permanent, cross-generator collection of saved results. The drawer's **Save** button downloads a one-shot file and **Pins** are per-generator and capped at 12 — the Scrapbook is where great rolls actually live. One click saves the open generator's current output — captured from **inside the generator's sandbox frame** via the agent, reading the real output container and skipping Perchance's own frame chrome (the fullscreen / reload / warnings strip) and any inline scripts. On an AI Character Chat page it recognises the conversation and points you to **Chat stories** instead, where the whole thread exports cleanly from the database; every entry is searchable (text, generator, tags, notes), taggable, annotatable, readable aloud, and links back to the generator it came from. The whole collection (including your per-generator notes) exports to a single JSON file and imports back with duplicate-safe merging. Capacity is 500 entries; when full, the oldest entry rotates out and the save tells you so.
+A permanent, cross-generator collection of saved results. The drawer's **Save** button downloads a one-shot file and **Pins** are per-generator and capped at 12 — the Scrapbook is where great rolls actually live. One click saves the open generator's current output — captured from **inside the generator's sandbox frame** via the agent, reading the real output container and skipping Perchance's own frame chrome (the fullscreen / reload / warnings strip) and any inline scripts. On an AI Character Chat page it recognises the conversation and points you to **Chat stories** instead, where the whole thread exports cleanly from the database; every entry is searchable (text, generator, tags, notes), taggable, annotatable, readable aloud, and links back to the generator it came from. The whole collection (including your per-generator notes) exports to a single JSON file and imports back with duplicate-safe merging. Capacity is 500 entries; when full, the oldest entry rotates out and the save tells you so. Since 1.89.0 the Scrapbook is a file in your backup folder (Weld > Backups), not in browser storage.
 
 ##### 🔍 Search everything
 
@@ -268,7 +271,8 @@ See [the Skills guide](docs/SKILLS.md). No separate model configuration is requi
 
 The **🧩 Dev** tab connects the generator you are editing to files, to AI coding agents and to GitHub, with one rule: **nothing changes your editor without showing you a diff and getting your click.**
 
-- **Folder sync** mirrors the open generator to plain files in a folder you choose (Chromium browsers). Work on them with any editor or agent; Weld notices changes, shows a diff, and applies it only when you say so. Conflicts are flagged, never overwritten.
+- **Folder sync** uses one master Dev folder for all generators in the same browser profile (Chromium browsers). Choose or change it once in the Dev tab; open tabs pick up the change within a few seconds. Each generator lives in its own subfolder. Choosing a new master folder turns automatic writes off; **Pause automatic writes in all tabs** stops automatic mirroring globally. GitHub Push remains a separate operation. Folder sync mirrors the open generator to plain files in that folder. Work on them with any editor or agent; Weld notices changes, shows a diff, and applies it only when you say so. Conflicts are flagged, never overwritten.
+- **Download all files and assets (this generator)** saves the current editor, its selected `src/` files and readable cached assets/models to the master folder, then enables updates only for that explicitly selected generator. Model files are assembled locally; automatic updates protect computer-side edits. GitHub Push and Push as PR use the earlier two-panel backup behavior; full project files and assets remain available through this local download option.
 - **Agent bridge (MCP)**: run `npm run bridge`, and agents such as Claude Code, Codex, Gemini CLI, Antigravity and Copilot's agent mode can read the live editor, run Weld's analysis, and **propose** edits that you review. Local only, behind a secret token.
 - **GitHub agents**: hand a task to Copilot's cloud agent, Claude or Codex through an issue in your backup repo, and get a pull request back. **Push as PR** opens a pull request instead of writing to your branch, and Push shows Weld's findings first.
 - **AI helper upgrades**: a Perchance syntax primer in every request, a "look things up first" mode, OpenRouter and GitHub Models providers, and prompt caching for Claude.
@@ -658,7 +662,7 @@ Keep changes feature-detected and fail-soft — never break the host page.
 
 ## License
 
-MIT © 2026 **therealwestninja**
+MIT © 2026 **therealwestninja**. This repository is a fork maintained by [JawlessEel](https://github.com/JawlessEel), with additions credited in the commit history; the original project is [therealwestninja/weld-companion](https://github.com/therealwestninja/weld-companion).
 
 - DeviantArt: [west-ninja](https://www.deviantart.com/west-ninja)
 - GitHub: [therealwestninja](https://github.com/therealwestninja)

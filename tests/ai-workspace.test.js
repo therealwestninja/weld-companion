@@ -60,6 +60,34 @@ assert.match(hookSource, /#aiAgentInputEl/);
 assert.match(hookSource, /cfg\.interceptAgent/);
 assert.doesNotMatch(hookSource, /viewSet\s*\(/);
 
+let routeConfig = { provider: 'localai', interceptAgent: true, models: { localai: 'saved-model' } };
+let routeToggle;
+const routeParent = {
+  querySelector: () => routeToggle,
+  insertBefore(node) { routeToggle = node; },
+};
+const routeButton = { parentNode: routeParent };
+const routeControl = load(['updateHelperRouteToggle'], between('function updateHelperRouteToggle(', 'function hookHelperSubmit('), {
+  aiConfig: () => ({ ...routeConfig }),
+  gset(key, value) { assert.equal(key, 'ai'); routeConfig = value; return true; },
+  document: {
+    createElement() { return { style: {}, setAttribute(key, value) { this[key] = value; }, addEventListener(type, fn) { this.click = fn; } }; },
+    querySelector: () => null,
+  },
+});
+routeControl.updateHelperRouteToggle(routeButton);
+assert.equal(routeToggle.textContent, 'Weld: On');
+routeToggle.click();
+assert.equal(routeConfig.interceptAgent, false);
+assert.equal(routeConfig.models.localai, 'saved-model');
+assert.equal(routeToggle.textContent, 'Weld: Off');
+routeToggle.click();
+assert.equal(routeConfig.interceptAgent, true);
+routeConfig.provider = 'builtin';
+routeControl.updateHelperRouteToggle(routeButton);
+assert.equal(routeToggle.disabled, true);
+assert.equal(routeToggle['aria-pressed'], 'false');
+
 const instructionSource = between('function applyHelperInstruction(', 'function aiAgentButton(');
 assert.doesNotMatch(instructionSource, /aiHelperInputEl/);
 

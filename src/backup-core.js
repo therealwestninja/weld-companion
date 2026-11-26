@@ -392,8 +392,8 @@
     return { add, update, skipped };
   }
 
-  // ---- working copy: one .zip a person can unpack anywhere (stored, not compressed: no dependency).
-  // entries: [{ path, bytes: Uint8Array | string }]. Plain zip32, archive under 4 GiB. (Encoder from the fork.)
+  // ---- working copy: one .zip a person can unpack anywhere (stored, not compressed: no dependency, and models do not
+  // shrink anyway). entries: [{ path, bytes: Uint8Array | string }]. Plain zip32, so the whole archive must stay under 4 GiB.
   const ZIP_MAX = 0xfffffffe;
   let crcTable = null;
   function crc32(bytes) {
@@ -424,7 +424,7 @@
       cv.setUint16(28, name.length, true); cv.setUint32(42, offset, true); cen.set(name, 46);
       heads.push(local, data); centrals.push(cen);
       offset += local.length + data.length;
-      if (offset > ZIP_MAX) throw new Error('The working copy is over 4 GiB');
+      if (offset > ZIP_MAX) throw new Error('The working copy is over 4 GiB; save it to the backup folder instead');
     }
     const cenSize = centrals.reduce((n, c) => n + c.length, 0), end = new Uint8Array(22), ev = new DataView(end.buffer);
     ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, entries.length, true); ev.setUint16(10, entries.length, true); ev.setUint32(12, cenSize, true); ev.setUint32(16, offset, true);

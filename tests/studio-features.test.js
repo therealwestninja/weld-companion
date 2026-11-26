@@ -219,3 +219,11 @@ const sampleSession = C.session(sample, sample.characters[0].id, 'x'); sample.se
 assert.doesNotMatch(C.context(sample, sampleSession, 'harbormaster smuggling').system, /scuttled the Gannet/, 'private secret stays hidden');
 assert.match(C.context(sample, sampleSession, 'the harbor').system, /Silver Harbor/);
 console.log('Studio migration, macros, regex, advanced lore, cards, PNG, World Info, chats, assist and sample tests passed');
+
+{
+  const ms = { name: 'Run 1', memories: [{ id: 'a', text: 'Ayla fears fire' }, { id: 'b', text: 'Two\nlines' }], proposals: [{ id: 'c', text: 'Maybe a scar' }] };
+  const md = C.memoriesText(ms);
+  assert.match(md, /Approved \(2\)[\s\S]*- Ayla fears fire[\s\S]*- Two\n  lines[\s\S]*Pending proposals[\s\S]*Maybe a scar/);
+  assert.deepEqual(C.clearMemories(ms), { memories: 2, proposals: 1 });
+  assert.equal(ms.memories.length, 0); assert.equal(ms.proposals.length, 0);
+}

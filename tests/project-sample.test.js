@@ -4,12 +4,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync('weld-companion.user.js', 'utf8');
-const from = source.indexOf("case 'sample': return (function () {");
-const to = source.indexOf("case 'estimate':", from);
+const from = source.search(/case ['"]sample['"]:\s*return \(function \(\) \{/);
+const to = from + source.slice(from).search(/case ['"]estimate['"]:/);
 assert.ok(from > 0 && to > from, 'sample op not found');
 const body = source.slice(from, to);
 assert.doesNotMatch(body, /localStorage|GM_setValue|indexedDB|fetch\(|XMLHttpRequest/, 'the sample op never touches storage or the network');
-assert.match(source, /ENGINE_FREE = \(d\.op === 'pageText' \|\| d\.op === 'ping' \|\| d\.op === 'sample'\)/, 'sample must answer even without an IndexedDB engine');
+assert.match(source, /ENGINE_FREE =\s*\(?d\.op === ['"]pageText['"] \|\| d\.op === ['"]ping['"] \|\| d\.op === ['"]sample['"]\)?/, 'sample must answer even without an IndexedDB engine');
 
 function run(args, world) {
   const code = 'function op(runOp, eng, a, unsafeWindow, window, setTimeout) { switch ("sample") {\n' + body + '\n} }';

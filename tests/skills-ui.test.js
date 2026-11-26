@@ -175,8 +175,8 @@ const render = () => window.weldSkills.render(parent);
   assert.ok(!byLabel('Copy prompt').disabled);
 
   const shipped = fs.readFileSync('weld-companion.user.js', 'utf8');
-  assert.match(shipped, /id: 'skills'.*label: 'Skills'/);
-  assert.match(shipped, /WC_TAB === 'skills'[\s\S]*?window\.weldSkills\.render\(body\)/);
+  assert.match(shipped, /id: ['"]skills['"].*label: ['"]Skills['"]/);
+  assert.match(shipped, /WC_TAB === ['"]skills['"][\s\S]*?window\.weldSkills\.render\(body\)/);
   assert.match(shipped, /\/\* BEGIN GENERATED SKILLS \*\//);
   console.log('Skills UI filtering, favorites, draft review, live findings and native handoff passed');
 })().catch(e => { console.error(e); process.exitCode = 1; });

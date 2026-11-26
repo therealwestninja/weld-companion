@@ -9,7 +9,6 @@ Thumbs.db
 .idea/
 
 # Local scratch and exports
-*.zip
 .env
 .env.*
 

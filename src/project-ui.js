@@ -18,10 +18,15 @@
   function notice(message) { S.status = message; H.toast(message, 6000); }
   function draw() { const host = document.getElementById('wc-project-body'); if (host && host.isConnected && host.parentNode) render(host.parentNode); }
 
-  // ----------------------------------------------------------- local database
+  // ----------------------------------------------------------- session store
+  // Weld keeps no data of its own: generator copies and snapshots live in memory for this tab only (every store call
+  // below falls back to `memory` when there is no database). PERSIST stays false; Backups > Purge deletes the old
+  // weldCompanionProjects database that earlier versions filled.
+  const PERSIST = false;
   let dbPromise = null; const memory = { projects: new Map(), history: [] };
   function db() {
     if (dbPromise) return dbPromise;
+    if (!PERSIST) return (dbPromise = Promise.resolve(null));
     dbPromise = new Promise(resolve => {
       try {
         const open = indexedDB.open(DB_NAME, 1);
@@ -444,7 +449,7 @@
   function historySection(parent) {
     const list = S.history;
     if (!list) return note(parent, 'Loading…');
-    note(parent, 'Every time you analyze a generator and its source differs from the last copy, Weld keeps a snapshot here (newest ' + 20 + '). Snapshots stay in this browser.');
+    note(parent, 'Every time you analyze a generator and its source differs from the last copy, Weld keeps a snapshot here (newest ' + 20 + ') until you reload or close this tab. Nothing is stored; use Download to keep one.');
     if (S.diff) return diffView(parent);
     if (!list.length) return note(parent, 'No snapshots yet.');
     list.forEach((h, i) => {
@@ -461,7 +466,6 @@
       ]));
     });
     row(parent, [btn('Delete all snapshots', () => {
-      if (!window.confirm('Delete every saved snapshot of "' + S.slug + '" from this browser?')) return;
       store.clearSnapshots(S.slug).then(() => { S.history = []; draw(); });
     }, { mini: true })]);
   }
@@ -517,9 +521,8 @@
     input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { S.search = input.value; runSearch(); } });
     row(parent, [input, btn('Search', () => { S.search = input.value; runSearch(); }, { mini: true })]);
     if (!S.results) {
-      note(parent, 'Searches the lists and HTML panels saved in this browser by the Project tab.');
+      note(parent, 'Searches the lists and HTML panels of the generators you analyzed in this tab.');
       row(parent, [btn('Forget all saved generators', () => {
-        if (!window.confirm('Delete every generator copy the Project tab saved in this browser? Snapshots are kept.')) return;
         store.clearProjects().then(() => { notice('Saved copies deleted.'); draw(); });
       }, { mini: true })]);
       return;

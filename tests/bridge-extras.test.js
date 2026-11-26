@@ -46,7 +46,7 @@ vm.createContext(ctx); vm.runInContext(src.slice(from, to), ctx);
   r = await call('tokens', { text: 'abcdef' }); assert.equal(r.value.tokens, 2);
   assert.equal((await call('tokens', null)).ok, false);
   // wiring: advertised, labelled and dispatched
-  assert.match(src, /var SB_CAPS = \[[^\]]*'download', 'clipboard', 'notify', 'tokens'\]/); assert.match(src, /cap === 'download' \|\| cap === 'clipboard'/);
+  assert.match(src, /var SB_CAPS = \[[^\]]*['"]download['"],\s*['"]clipboard['"],\s*['"]notify['"],\s*['"]tokens['"],?\s*\]/); assert.match(src, /cap === ['"]download['"]\s*\|\|\s*cap === ['"]clipboard['"]/);
   // skills for the new capabilities exist and carry the wire-shape pack
   for (const id of ['skybridge-download', 'skybridge-clipboard', 'skybridge-notify', 'skybridge-token-meter', 'skybridge-fetch-search', 'skybridge-vault-backup', 'skybridge-presence', 'skybridge-family-adapt', 'skybridge-health-check']) {
     assert.ok(C.get(id), id); const built = C.buildPrompt(id); assert.ok(built.includes('STRUCTURE REFERENCE'), id);
