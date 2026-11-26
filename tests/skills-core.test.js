@@ -2,9 +2,9 @@ const assert = require('node:assert/strict');
 const C = require('../src/skills-core.js');
 
 // Stable catalog IDs support saved favorites; every preset must be runnable and scoped.
-assert.equal(C.presets.length, 251);
+assert.equal(C.presets.length, 362);
 assert.equal(new Set(C.presets.map(p => p.id)).size, C.presets.length);
-assert.equal(C.categories.length, 24);
+assert.equal(C.categories.length, 26);
 for (const p of C.presets) {
   assert.ok(C.categories.some(c => c.id === p.category));
   assert.ok(p.types.every(id => C.types.some(t => t.id === id)));
@@ -34,6 +34,16 @@ for (const p of C.presets) {
 // the 43 direct skills landed in the 6 direct categories
 assert.equal(C.presets.filter(p => p.direct).length, 43, '43 direct skills');
 assert.deepEqual(['working-rules', 'ai-methods', 'prompt-eng', 'review-safety', 'web-design', 'three-3d'].map(c => C.presets.filter(p => p.category === c).length), [10, 10, 6, 3, 7, 7], 'direct category counts');
+// Imported suites (image-gen, website builder) and per-row steps/check from skills-extra.
+assert.equal(C.presets.filter(p => p.category === 'imagegen').length, 20, 'imagegen suite');
+assert.equal(C.presets.filter(p => p.category === 'site').length, 24, 'website-builder suite');
+// an imported extra skill carries its OWN steps/check (not the section default)
+const sand = C.get('prompt-flow-sandwich');
+assert.ok(sand && sand.steps.length === 3 && sand.check, 'imported skill carries per-row steps/check');
+// an image skill resolves its structure-reference packs
+assert.ok(C.get('img-prompt-library').refs.includes('img-anatomy'), 'image skill links its ref pack');
+// an Extra.upgrades override reached an existing preset
+assert.ok(C.get('ai-chat').steps.length === 3, 'upgrades applied to existing skill');
 assert.throws(() => C.buildPrompt('not-a-skill'), /Choose a valid skill/);
 assert.equal(C.get('not-a-skill'), null);
 assert.ok(C.search(' MOBILE ', 'design').some(p => p.id === 'mobile-layout'));
@@ -135,14 +145,16 @@ assert.ok(Refs.packs.filter(p => /^dad-skill-/.test(p.id)).every(p => !p.text.in
 assert.ok(Refs.packs.every(p => p.text.length > 200 && !p.text.includes('\u0000')));
 // Every Tavern/Chub card skill and every Dad-Chat skill carries a diagram or schema plus an example.
 const cardSkills = C.presets.filter(p => p.category === 'cards'), dadSkills = C.presets.filter(p => p.category === 'dad');
-assert.equal(cardSkills.length, 31);
-assert.equal(dadSkills.length, 33);
+assert.equal(cardSkills.length, 33);
+assert.equal(dadSkills.length, 48);
+// Compact playbooks (imported Dad-Chat debug/parity skills) carry a structure reference but no worked example.
+const compactPlaybooks = new Set(['dad-debug-loop', 'dad-debug-attribution', 'dad-debug-provider', 'dad-debug-stale', 'dad-debug-shapes', 'dad-debug-context', 'dad-debug-continuity', 'dad-debug-presets', 'dad-debug-voicing', 'dad-debug-no-spend', 'dad-forge-alignment', 'dad-family-parity', 'dad-vault-manager']);
 for (const p of cardSkills.concat(dadSkills)) {
   assert.ok(p.refs.length >= 1, p.id + ' needs a structure reference');
-  assert.ok(p.example.length > 80, p.id + ' needs a worked example');
+  if (!compactPlaybooks.has(p.id)) assert.ok(p.example.length > 80, p.id + ' needs a worked example');
   const built = C.buildPrompt(p.id);
   assert.ok(built.includes('STRUCTURE REFERENCE\n'), p.id);
-  assert.ok(built.includes('WORKED EXAMPLE'), p.id);
+  if (!compactPlaybooks.has(p.id)) assert.ok(built.includes('WORKED EXAMPLE'), p.id);
   for (const r of p.refs) assert.ok(built.includes(Refs.byId[r].text), p.id + ' prompt missing pack ' + r);
 }
 for (const p of dadSkills) {

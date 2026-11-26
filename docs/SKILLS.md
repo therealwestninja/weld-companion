@@ -1,6 +1,6 @@
 # Generator skills
 
-Open **Weld > Skills** on a Perchance generator. The library contains **251 presets in 24 sections** for full browser applications as well as creative generators. Dashboards and complex applications come first; all original 48 preset IDs remain compatible with favorites. The last six sections are **direct skills** — ready-to-send prompts, moved here from Snippets so Skills is now the single home for all AI prompt-skills (the [Snippets tab](SNIPPETS.md) is code boilerplate only).
+Open **Weld > Skills** on a Perchance generator. The library contains **362 presets in 26 sections** for full browser applications as well as creative generators. Dashboards and complex applications come first; all original 48 preset IDs remain compatible with favorites. Two sections — **AI image generation** (prompt libraries, template/slot builders, edit-recipe studios, consent safeguards) and **Website builder** (idea → multi-section site, SEO, design tokens, render safety) — plus Dad-Chat troubleshooting playbooks and extra repair/quality skills were imported from the companion fork. The last six sections are **direct skills** — ready-to-send prompts, the single home for all AI prompt-skills (the [Snippets tab](SNIPPETS.md) is code boilerplate only). A full generated listing of every preset lives in [SKILLS-CATALOG.md](SKILLS-CATALOG.md) (`npm run docs:skills`).
 
 | Section | Presets |
 | --- | ---: |

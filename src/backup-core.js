@@ -392,6 +392,50 @@
     return { add, update, skipped };
   }
 
+  // ---- working copy: one .zip a person can unpack anywhere (stored, not compressed: no dependency).
+  // entries: [{ path, bytes: Uint8Array | string }]. Plain zip32, archive under 4 GiB. (Encoder from the fork.)
+  const ZIP_MAX = 0xfffffffe;
+  let crcTable = null;
+  function crc32(bytes) {
+    if (!crcTable) { crcTable = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; } }
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function zip(entries, at) {
+    const d = new Date(typeof at === 'number' ? at : Date.now());
+    const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), date = (Math.max(0, d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    const enc = new TextEncoder(), seen = new Set(), heads = [], centrals = [];
+    let offset = 0;
+    if (entries.length > 65000) throw new Error('Too many files for one zip');
+    for (const e of entries) {
+      const path = String(e.path || '');
+      if (!path || seen.has(path) || /^\/|(^|\/)\.\.(\/|$)|\\|[\x00-\x1f]/.test(path)) throw new Error('Unsafe or duplicate zip path: ' + path);
+      seen.add(path);
+      // ArrayBuffer.isView, not instanceof: bytes made in the page or a userscript sandbox are another realm's Uint8Array.
+      const name = enc.encode(path), b = e.bytes, data = ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : enc.encode(String(b == null ? '' : b)), crc = crc32(data);
+      const local = new Uint8Array(30 + name.length), lv = new DataView(local.buffer);
+      lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x0800, true); lv.setUint16(8, 0, true);
+      lv.setUint16(10, time, true); lv.setUint16(12, date, true); lv.setUint32(14, crc, true); lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true);
+      lv.setUint16(26, name.length, true); lv.setUint16(28, 0, true); local.set(name, 30);
+      const cen = new Uint8Array(46 + name.length), cv = new DataView(cen.buffer);
+      cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x0800, true); cv.setUint16(10, 0, true);
+      cv.setUint16(12, time, true); cv.setUint16(14, date, true); cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
+      cv.setUint16(28, name.length, true); cv.setUint32(42, offset, true); cen.set(name, 46);
+      heads.push(local, data); centrals.push(cen);
+      offset += local.length + data.length;
+      if (offset > ZIP_MAX) throw new Error('The working copy is over 4 GiB');
+    }
+    const cenSize = centrals.reduce((n, c) => n + c.length, 0), end = new Uint8Array(22), ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, entries.length, true); ev.setUint16(10, entries.length, true); ev.setUint32(12, cenSize, true); ev.setUint32(16, offset, true);
+    return heads.concat(centrals, [end]);   // parts for new Blob(parts): no single giant buffer is ever built
+  }
+  function workingCopyName(slug, at) {
+    const d = new Date(at), p = n => String(n).padStart(2, '0');
+    return String(slug).replace(/[^a-zA-Z0-9_-]+/g, '-') + '-working-copy-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+  }
+
   return { GEN_RE, MAX_VALUE_BYTES, MAX_CHAT_COPIES, parseKey, inScope, snapshotShape, missingFields, indexRefs, chatSummary, secretScan,
-    inspect, buildInventory, fmtBytes, fmtDate, exportRecord, exportBundle, isVaultUpdate, validateEnvelope, presenceTracker, checkStoreWrite, hash8, backupTarget, entryFor, planImport, findDuplicates, duplicateReport, refToKey, canonical };
+    inspect, buildInventory, fmtBytes, fmtDate, exportRecord, exportBundle, isVaultUpdate, validateEnvelope, presenceTracker, checkStoreWrite, hash8, backupTarget, entryFor, planImport, findDuplicates, duplicateReport, refToKey, canonical,
+    crc32, zip, workingCopyName };
 });

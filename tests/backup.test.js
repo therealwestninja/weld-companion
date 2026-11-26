@@ -320,5 +320,21 @@ for (const f of ['src/backup-core.js', 'src/backup-ui.js']) assert.ok(!/console\
     assert.ok(!JSON.stringify(f.exact).includes('SECRETVALUE'));
     const rep = C.duplicateReport(f); assert.ok(/EXACT/.test(rep) && /POSSIBLE/.test(rep) && !/different|"hi"/.test(rep), 'report has metadata only');
   }
+  // Working-copy zip encoder: real zip32 structure, stored content, path safety (prove-the-wire).
+  {
+    const parts = C.zip([{ path: 'g/dsl.txt', bytes: 'hello' }, { path: 'g/README.txt', bytes: 'readme' }], 0);
+    const total = parts.reduce((n, p) => n + p.length, 0), buf = new Uint8Array(total);
+    let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+    const dv = new DataView(buf.buffer);
+    assert.equal(dv.getUint32(0, true), 0x04034b50, 'first local file header signature');
+    assert.equal(dv.getUint32(total - 22, true), 0x06054b50, 'end-of-central-directory signature');
+    assert.equal(dv.getUint16(total - 22 + 10, true), 2, 'two entries in EOCD');
+    const text = Buffer.from(buf).toString('latin1');
+    assert.ok(text.includes('g/dsl.txt') && text.includes('g/README.txt'), 'file names present');
+    assert.ok(text.includes('hello') && text.includes('readme'), 'stored content present (uncompressed)');
+    assert.throws(() => C.zip([{ path: '../evil', bytes: 'x' }], 0), /Unsafe/, 'rejects path traversal');
+    assert.throws(() => C.zip([{ path: 'a', bytes: 'x' }, { path: 'a', bytes: 'y' }], 0), /[Dd]uplicate/, 'rejects duplicate path');
+    assert.match(C.workingCopyName('My Gen!', 0), /^My-Gen--working-copy-\d{8}-\d{6}$/);
+  }
   console.log('backup tests passed');
 })().catch(e => { console.error(e); process.exit(1); });

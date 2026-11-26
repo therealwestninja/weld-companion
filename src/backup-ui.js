@@ -17,6 +17,35 @@
   const LINE = '1px solid var(--wc-line,#555)';   // the standard divider/border (the red #c0392b border is a deliberate exception)
   // el() sets attributes with setAttribute, so a false `disabled` would still disable the button: only pass it when true.
   const btn = (label, fn, extra) => { const a = Object.assign({ type: 'button', class: 'wc-btn wc-mini', text: label, onclick: fn }, extra || {}); if (!a.disabled) delete a.disabled; return E('button', a); };
+  // Working copy: the open generator's two editor panels + a README, zipped locally in one click.
+  // (Source files and cached models belong to the GitHub data sync, which this build does not include.)
+  function workingCopyCard() {
+    const slug = typeof H.slug === 'function' ? H.slug() : '';
+    const live = (typeof H.isEdit === 'function' && H.isEdit() && typeof H.live === 'function') ? H.live() : null;
+    const ready = !!(slug && C.GEN_RE.test(slug) && live && live.dsl != null);
+    const card = E('details', { class: 'wc-card', 'data-card': 'working-copy', style: { margin: '6px 0' } }, [E('summary', { text: 'Working copy of this generator' })]);
+    card.appendChild(note(ready
+      ? 'Download the open generator’s two editor panels and a README as one .zip, saved on this computer.'
+      : 'Open a generator’s edit page first. (Source files and cached models need the GitHub data sync, not included in this build.)'));
+    card.appendChild(btn('Download working copy (.zip)', () => downloadWorkingCopy(slug, live), { disabled: !ready }));
+    return card;
+  }
+  function downloadWorkingCopy(slug, live) {
+    try {
+      const at = Date.now(), name = C.workingCopyName(slug, at);
+      const readme = 'Weld working copy of ' + slug + '\nSaved ' + new Date(at).toString() + ' by Weld Companion ' + (H.version || '') +
+        '\n\nContains the two editor panels of the open generator. Restore by pasting each panel back into the generator editor.\n';
+      const entries = [
+        { path: slug + '/dsl.txt', bytes: String(live.dsl == null ? '' : live.dsl) },
+        { path: slug + '/html.html', bytes: String(live.html == null ? '' : live.html) },
+        { path: slug + '/README.txt', bytes: readme }
+      ];
+      const blob = new Blob(C.zip(entries, at), { type: 'application/zip' });
+      const url = URL.createObjectURL(blob), a = E('a', { href: url, download: name + '.zip' });
+      a.click(); setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
+      say('Downloaded ' + name + '.zip (' + entries.length + ' files).');
+    } catch (e) { say('Working copy failed: ' + ((e && e.message) || e), true); }
+  }
   const V = () => H.vault || null;
 
   function say(t, isErr) { S.msg = t; S.msgErr = !!isErr; }
@@ -430,6 +459,7 @@
     top.appendChild(btn('Export all', () => exportRows('all-generators', S.rows || []), { disabled: !(S.rows && S.rows.length) }));
     top.appendChild(btn('Scan for plaintext secrets', () => { scanSecrets(); draw(); }, { disabled: !(S.rows && S.rows.length) }));
     wrap.appendChild(top);
+    wrap.appendChild(workingCopyCard());
     if (S.msg) wrap.appendChild(E('div', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', margin: '4px 0', color: S.msgErr ? '#ff9e92' : '' }, text: S.msg }));
     if (S.error) { wrap.appendChild(E('div', { role: 'alert', style: { color: '#ff9e92', margin: '8px 0' }, text: S.error })); parent.appendChild(wrap); return; }
     const inv = S.inv, info = (V() && V().info && V().info()) || {};

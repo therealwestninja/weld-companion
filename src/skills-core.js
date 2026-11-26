@@ -11,6 +11,11 @@
   const Dad = viaRequire ? require('./skills-dad.js') : (host.WeldSkillsDad || { rows: [] });
   // DIRECT (pre-written) skills: ready-to-send prompts, not composed from a task. Shown as their own categories.
   const Direct = viaRequire ? require('./skills-direct.js') : (host.WeldSkillsDirect || { RULES: [], METHODS: [], PROMPTS: [], REVIEW: [], WEBUI: [], THREED: [] });
+  // Imported skill-data modules (image-gen, website-builder, extra). Same row-tuple shape as `rows`,
+  // with two optional trailing slots: [category, id, title, desc, mode, task, types, sources, steps, check].
+  const Image = viaRequire ? require('./skills-image.js') : (host.WeldSkillsImage || { rows: [] });
+  const Web = viaRequire ? require('./skills-web.js') : (host.WeldSkillsWeb || { rows: [] });
+  const Extra = viaRequire ? require('./skills-extra.js') : (host.WeldSkillsExtra || { rows: [], upgrades: {} });
   const categories = [
     ['dashboards', 'Dashboards & live data'],
     ['agents', 'Prompts, models & plugins'],
@@ -22,6 +27,8 @@
     ['story', 'Stories & worlds'], ['games', 'Games & interaction'],
     ['cards', 'SillyTavern, Chub & character cards'], ['dad', 'Dad-Chat projects'], ['rework', 'Rebrand, simplify & privacy'],
     ['assist', 'AI input helpers & toolkit'],
+    // Imported suites (from the fork): image-generation prompt tooling and a full website builder.
+    ['imagegen', 'AI image generation'], ['site', 'Website builder'],
     // Direct (pre-written) skill categories — ready-to-send working prompts, not composed from a task.
     ['working-rules', 'Working rules'], ['ai-methods', 'AI methods'],
     ['prompt-eng', 'Prompt engineering'], ['review-safety', 'Review & safety'],
@@ -161,11 +168,14 @@
     Object.freeze({ id: 'st-docs', title: 'SillyTavern documentation', url: 'https://docs.sillytavern.app/', path: '' }),
     Object.freeze({ id: 'st-worldinfo', title: 'SillyTavern World Info docs', url: 'https://docs.sillytavern.app/usage/core-concepts/worldinfo/', path: '' }),
     Object.freeze({ id: 'dad-arch', title: 'Dad-Chat architecture (Weld docs)', url: 'https://github.com/therealwestninja/weld-companion/blob/main/docs/dad-chat/architecture.md', path: '' }),
-    Object.freeze({ id: 'dad-format', title: 'Dad-native format (Weld docs)', url: 'https://github.com/therealwestninja/weld-companion/blob/main/docs/dad-chat/dad-native-format.md', path: '' })
+    Object.freeze({ id: 'dad-format', title: 'Dad-native format (Weld docs)', url: 'https://github.com/therealwestninja/weld-companion/blob/main/docs/dad-chat/dad-native-format.md', path: '' }),
+    // Image-prompt skill sources (ideas only; no prompts or images bundled).
+    Object.freeze({ id: 'nano', title: 'Awesome Nano Banana Pro (prompt collection)', url: 'https://github.com/ZeroLu/awesome-nanobanana-pro', path: '' }),
+    Object.freeze({ id: 'nanoym', title: 'Awesome Nano Banana Pro Prompts (YouMind)', url: 'https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts', path: '' })
   ]));
   const types = Object.freeze([
     ['dashboard', 'Dashboards & applications'], ['agent', 'Prompt studios & plugins'], ['text', 'Random & text'], ['image', 'AI images & galleries'], ['chat', 'Chat, characters & memory'],
-    ['story', 'Stories & worlds'], ['game', 'Games & RPGs'], ['art', 'Procedural art'], ['utility', 'Tools & utilities']
+    ['story', 'Stories & worlds'], ['game', 'Games & RPGs'], ['art', 'Procedural art'], ['utility', 'Tools & utilities'], ['website', 'Websites & pages']
   ].map(([id, title]) => Object.freeze({ id, title })));
   const guides = {
     dashboards: ['Build a dependable application', 'Map real sources, data contracts, units, timestamps and the current application state.', 'Validate data at each boundary and keep UI, calculations and network lifecycle separate.', 'Check normal data, gaps, stale feeds, failures, symbol changes and saved layouts.', 'Displayed values have traceable sources and timestamps; stale or missing data is never presented as live.'],
@@ -192,7 +202,9 @@
     'prompt-eng': ['Techniques for the root.aiTextPlugin prompts inside your generator.', '', '', '', ''],
     'review-safety': ['Audit a generator for the threats that actually bite on Perchance.', '', '', '', ''],
     'web-design': ['Kill the generic "AI slop" look — build layouts with a real aesthetic point of view.', '', '', '', ''],
-    'three-3d': ['Make Three.js / WebGL look right — lighting, materials, models and performance.', '', '', '', '']
+    'three-3d': ['Make Three.js / WebGL look right — lighting, materials, models and performance.', '', '', '', ''],
+    'imagegen': ['Build image-prompt tooling — libraries, templates, studios and safeguards — around the generator’s own image plugin.', 'Read how the generator calls its image plugin and what input shapes it accepts.', 'Build the feature as data and UI; render all prompt text as text and never auto-generate or auto-upload.', 'Verify empty, oversized, repeated and malformed inputs, and that nothing is sent without the user.', 'Prompts render as text, inputs are validated, and no image is generated or uploaded without an explicit user action.'],
+    'site': ['Turn an idea into a real multi-section website or page, generated safely and editable afterwards.', 'Agree the brief, pages and sections, and read what the generator can actually render and store.', 'Generate section by section with real-looking content, a token-based design system and safe rendering.', 'Verify long content, missing fields, narrow screens, export and re-editing a generated section.', 'The site matches the brief, renders safely with no injected markup, and every section stays editable.']
   };
   const sections = Object.freeze(categories.map(c => Object.freeze(Object.assign({}, c, {
     description: guides[c.id][0], steps: Object.freeze(guides[c.id].slice(1, 4)), check: guides[c.id][4]
@@ -462,11 +474,16 @@
     'prompt-quality': ['image', 'chat', 'story', 'text'], 'prompt-presets': ['image', 'chat', 'story', 'text'],
     'ai-resilience': ['image', 'chat', 'story'], 'output-variety': ['text', 'story', 'game']
   };
-  const composed = rows.concat(additions, Dad.rows).map(([category, id, title, description, mode, task, fit, origin]) =>
+  // Imported rows (image-gen, website, extra) carry their own steps/check in slots 8-9; when present they
+  // replace the section defaults. Extra.upgrades does the same for existing presets by id.
+  const upgrades = Extra.upgrades || {};
+  const composed = rows.concat(additions, Dad.rows, Image.rows || [], Web.rows || [], Extra.rows || [])
+    .map(([category, id, title, description, mode, task, fit, origin, rowSteps, rowCheck]) =>
     Object.freeze({ category, id, title, description, mode, task,
       types: Object.freeze(fit || specialized[id] || []), sources: Object.freeze(origin || []),
       refs: Object.freeze((Refs.links[id] || []).filter(r => Refs.byId[r])), example: Refs.examples[id] || '',
-      steps: sections.find(c => c.id === category).steps, check: guides[category][4] }));
+      steps: Object.freeze((upgrades[id] && upgrades[id].steps) || rowSteps || sections.find(c => c.id === category).steps),
+      check: (upgrades[id] && upgrades[id].check) || rowCheck || guides[category][4] }));
   // Pre-written skills become `direct` presets: their prompt is sent whole, bypassing the task->prompt composition.
   const DIRECT_CATS = { RULES: 'working-rules', METHODS: 'ai-methods', PROMPTS: 'prompt-eng', REVIEW: 'review-safety', WEBUI: 'web-design', THREED: 'three-3d' };
   const directPresets = [];

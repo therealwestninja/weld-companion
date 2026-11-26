@@ -128,6 +128,9 @@ function raw(port, { method = 'GET', path, headers = {}, body }) {
   // Routing between two tabs by generator name.
   const tabB = weld('tab-bbbb', 'castle', 'view', async cmd => ({ ok: true, result: { from: 'castle' } }));
   await new Promise(r => setTimeout(r, 150));
+  const ambiguous = await call('weld_get_source', {});
+  assert.equal(ambiguous.isError, true);
+  assert.match(ambiguous.content[0].text, /Several Weld generators.*tab argument/);
   assert.deepEqual(JSON.parse((await call('weld_get_source', { tab: 'castle' })).content[0].text), { from: 'castle' });
   assert.equal(JSON.parse((await call('weld_get_source', { tab: 'zoo' })).content[0].text).pane, 'both');
   const missing = await call('weld_get_source', { tab: 'nowhere' });

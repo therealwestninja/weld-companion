@@ -21,9 +21,11 @@ const Dev = require('../src/dev-core.js');
 const VERSION = '1.0.0';
 const SUPPORTED = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const MAX_BODY = 6 * 1048576;
-const CLIENT_TTL = 45000;      // a Weld tab counts as connected this long after its last poll
-const POLL_MAX = 25000;
-const TOOL_MS = { default: 30000, weld_sample: 70000 };
+const CLIENT_TTL = 120000;     // allow a background browser's minute-long timer throttling
+// Browsers share a small HTTP/1 connection pool across generator tabs. Long polls
+// must release slots promptly so MCP command replies cannot sit behind other tabs.
+const POLL_MAX = 2000;
+const TOOL_MS = { default: 90000, weld_sample: 90000 };
 const MAX_RESULT = 200000;
 
 function randomToken() { return crypto.randomBytes(24).toString('hex'); }
@@ -51,7 +53,8 @@ function createBridge(options) {
   function pickClient(tab) {
     const live = liveClients();
     if (tab) return live.find(c => c.slug === tab) || null;
-    return live[0] || null;
+    // Poll order is not focus order. Never silently send a command to another generator.
+    return new Set(live.map(c => c.slug)).size === 1 ? live[0] : null;
   }
   function touch(info) {
     let c = clients.get(info.cid);
@@ -73,7 +76,11 @@ function createBridge(options) {
   // ------------------------------------------------------------------ MCP tools
   const toolByName = new Map(Dev.BRIDGE_TOOLS.map(t => [t.name, t]));
   function mcpTool(t) {
-    return { name: t.name, description: t.description, inputSchema: t.inputSchema,
+    const routed = t.name !== 'weld_status' && t.name !== 'weld_get_primer';
+    const schema = routed ? Object.assign({}, t.inputSchema, { properties: Object.assign({}, t.inputSchema.properties, {
+      tab: { type: 'string', description: 'Generator name from weld_status. Required when multiple generators are connected.' }
+    }) }) : t.inputSchema;
+    return { name: t.name, description: t.description, inputSchema: schema,
       annotations: { title: t.name.replace(/^weld_/, '').replace(/_/g, ' '), readOnlyHint: !!t.readOnly, destructiveHint: false, idempotentHint: !!t.readOnly, openWorldHint: false } };
   }
   function textResult(value, isError) {
@@ -94,6 +101,7 @@ function createBridge(options) {
     if (name === 'weld_status') return textResult(statusReport());
     const tab = typeof args.tab === 'string' ? args.tab : '';
     const client = pickClient(tab);
+    if (!tab && !client && liveClients().length) return textResult('Several Weld generators are connected. Call weld_status and pass the intended generator name in the tab argument. ' + JSON.stringify(statusReport()), true);
     if (!client) return textResult(tab ? 'No connected Weld tab has "' + tab + '" open. ' + JSON.stringify(statusReport()) : 'Weld is not connected. ' + JSON.stringify(statusReport()), true);
     const send = Object.assign({}, args); delete send.tab; delete send._agent;   // the agent name comes from the MCP session, never from the caller
     if (name === 'weld_propose_edit') send._agent = (session && session.clientInfo && String(session.clientInfo.name || '').slice(0, 60)) || 'agent';

@@ -8414,12 +8414,11 @@
       caps.stream = !!(streamWrap() || builtinAI());   // Perchance native AI text (wrapper or built-in)
       caps.image = !!(imageWrap() || builtinT2I());     // Perchance native image (wrapper or built-in)
       caps.transport = caps.bus ? 'bus' : ((window.weld && window.weld.sync) ? 'sync' : 'memory');
-      if (connected && sb.has && sb.has('ai') && typeof sb.ai === 'function') {
-        try { var r = await sb.ai('ok', { system: 'Reply with the single word ok.' }); caps.ai = !!(r && r.ok); } catch (e) { caps.ai = false; }
-      }
+      // No test completion here: probing with a real sb.ai call spent a paid request on every (re)connect.
+      caps.ai = !!(connected && sb.has && sb.has('ai') && typeof sb.ai === 'function');
       modelMeta = null;   // D4: cache the configured model's limits so synthesis/context sizing can use them
       if (caps.ai && sb && typeof sb.modelInfo === 'function') {
-        try { var mi = await sb.modelInfo(); if (mi && mi.ok) modelMeta = mi; } catch (e) {}
+        try { var mi = await sb.modelInfo(); if (mi && mi.ok) modelMeta = mi; else if (mi && mi.code === 'no-own-model') caps.ai = false; } catch (e) {}
       }
       // model source: your own model (companion) > Perchance native > scripted echo
       var modelText = caps.ai ? 'model: yours' : (caps.stream ? 'model: perchance' : 'model: scripted');
