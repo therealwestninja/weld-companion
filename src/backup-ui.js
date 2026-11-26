@@ -7,6 +7,10 @@
   if (!C || !H) return;
   const E = H.el;
   const S = { pick: '', rows: null, inv: null, error: '', selected: null, inspected: null, pendingDelete: null, secrets: null, msg: '', stamp: 0 };
+  const cardOpen = {};   // remembers which collapsible cards are open across the frequent re-renders
+  // Attrs for a collapsible card that remembers its open state (so an interaction-triggered redraw keeps it open).
+  const openAttrs = (id, force) => (force || cardOpen[id]) ? { open: '' } : {};
+  function trackOpen(card, id) { card.addEventListener('toggle', () => { cardOpen[id] = !!card.open; }); }
   let host = null, unsub = null;
   const note = t => E('div', { class: 'wc-section-note', text: t });
   const small = { fontSize: '12px', opacity: '.75' };
@@ -143,8 +147,9 @@
     Object.keys(pres.tabs || {}).forEach(t => { if (C.GEN_RE.test(t)) tags.add(t); });
     const here = typeof H.slug === 'function' ? H.slug() : ''; if (here && C.GEN_RE.test(here)) tags.add(here);
     const list = Array.from(tags).sort();
-    const card = E('div', { 'data-family': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
-    card.appendChild(E('div', { text: 'Dad-Chat family', style: { fontWeight: '600' } }));
+    const card = E('details', Object.assign({ 'data-family': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } }, openAttrs('family')));
+    trackOpen(card, 'family');
+    card.appendChild(E('summary', { text: 'Dad-Chat family', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Any generator that stores copies under its own tag appears here. The companion only watches; it never routes chats or subscribes channels for a generator.' }));
     if (!list.length) { card.appendChild(note('No generator tags seen yet.')); return card; }
     if (!S.pick || !tags.has(S.pick)) S.pick = list.indexOf(here) >= 0 ? here : list[0];
@@ -349,8 +354,9 @@
     D.found = null; D.sel = new Set(); D.busy = false; load(); draw();
   }
   function cleanupCard() {
-    const card = E('div', { 'data-cleanup': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
-    card.appendChild(E('div', { text: 'Cleanup duplicates', style: { fontWeight: '600' } }));
+    const card = E('details', Object.assign({ 'data-cleanup': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } }, openAttrs('cleanup', !!D.found)));
+    trackOpen(card, 'cleanup');   // open when results are showing or the user opened it
+    card.appendChild(E('summary', { text: 'Cleanup duplicates', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Finds copies with identical content. Only exact duplicates can be deleted here, the newest copy is always kept, and each one is deleted only after it is confirmed saved in your backup folder. Possible duplicates (same size, different content) are listed for you or the AI helper to judge.' }));
     card.appendChild(btn('Find duplicates', () => findDups(), { disabled: D.busy || !(S.rows && S.rows.length) }));
     const f = D.found; if (!f) return card;
@@ -385,8 +391,8 @@
     if (host) draw();
   }
   function folderCard() {
-    const card = E('div', { 'data-folder': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
-    card.appendChild(E('div', { text: 'Backup location', style: { fontWeight: '600' } }));
+    const card = E('details', { 'data-folder': '1', open: '', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    card.appendChild(E('summary', { text: 'Backup location', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Choose any folder on a drive or inside a cloud-synced folder (Google Drive, OneDrive, iCloud, Dropbox). Copies are saved there as files that are only ever added: nothing is overwritten or deleted, so browser cache clears cannot touch them.' }));
     if (!F.supported) card.appendChild(E('div', { style: { fontSize: '12px', color: '#e0a030' }, text: 'This browser cannot open folders (Chrome or Edge can). The Download buttons below still work.' }));
     card.appendChild(E('div', { 'data-folder-state': '1', style: { fontSize: '12px', margin: '4px 0' }, text: F.handle ? 'Folder: ' + F.name + ' · ' + (F.perm === 'granted' ? 'access allowed' : 'needs permission (press Allow access)') : 'No folder chosen yet.' }));

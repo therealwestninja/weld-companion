@@ -1266,11 +1266,15 @@
     '.wc-adv{margin-top:10px;padding-top:12px;border-top:1px solid var(--wc-line);flex-direction:column;gap:8px;}',
     '.wc-subhead{font:600 10.5px/1.4 var(--wc-sans);color:var(--wc-dim);text-transform:uppercase;letter-spacing:.05em;margin:6px 0 -2px;}',
     // ---- collapsible disclosure (declutter: fold secondary controls behind a summary) ----
+    // Universal: give EVERY companion <details> one consistent, obvious chevron, replacing the
+    // browser default triangle so all collapsibles (Skills, Dev, Tools, Project, Agents) match.
+    '.wc-root details > summary{cursor:pointer;list-style:none;}',
+    '.wc-root details > summary::-webkit-details-marker{display:none;}',
+    '.wc-root details > summary::before{content:"\\25B8";display:inline-block;font-size:10px;opacity:.6;margin-right:7px;transition:transform .15s ease;}',
+    '.wc-root details[open] > summary::before{transform:rotate(90deg);}',
+    // The disclosure "card" used to fold a tab\'s secondary controls behind a labelled bar.
     '.wc-disclose{border:1px solid var(--wc-line-2);border-radius:10px;margin:8px 0;background:var(--wc-surface-2);overflow:hidden;}',
-    '.wc-disclose > summary{cursor:pointer;padding:9px 12px;font:600 12px/1.2 var(--wc-sans);color:var(--wc-dim);list-style:none;display:flex;align-items:center;gap:8px;user-select:none;}',
-    '.wc-disclose > summary::-webkit-details-marker{display:none;}',
-    '.wc-disclose > summary::before{content:"\\25B8";font-size:10px;opacity:.7;transition:transform .15s;flex:none;}',
-    '.wc-disclose[open] > summary::before{transform:rotate(90deg);}',
+    '.wc-disclose > summary{padding:9px 12px;font:600 12px/1.2 var(--wc-sans);color:var(--wc-dim);display:flex;align-items:center;user-select:none;transition:color .15s;}',
     '.wc-disclose > summary:hover{color:var(--wc-ink);}',
     '.wc-disclose > summary .wc-disclose-hint{margin-left:auto;font-weight:500;color:var(--wc-faint);font-size:11px;}',
     '.wc-disclose-body{padding:2px 12px 12px;}',
@@ -1577,18 +1581,18 @@
     aiCard.appendChild(el('label', { class: 'wc-label', text: '\uD83E\uDD16 Model chat \u00b7 AI Agent' }));
     var aiBody = el('div', {}); aiCard.appendChild(aiBody);
     try { renderAI(aiBody); } catch (e) { aiBody.appendChild(el('div', { class: 'wc-section-note', text: 'AI Agent settings failed to render.' })); }
-    var cfCard = el('div', { class: 'wc-card wc-col' });
-    cfCard.appendChild(el('label', { class: 'wc-label', text: '\uD83D\uDC64 Character files \u00b7 AI Character Chat' }));
+    var cfCard = el('details', { class: 'wc-card wc-col' });
+    cfCard.appendChild(el('summary', { class: 'wc-label', style: { cursor: 'pointer' }, text: '\uD83D\uDC64 Character files \u00b7 AI Character Chat' }));
     var cfBody = el('div', {}); cfCard.appendChild(cfBody);
     var t = window.weldAICCTools;
     if (t && typeof t.renderCharacterFilesCard === 'function') { try { t.renderCharacterFilesCard(cfBody); } catch (e2) { cfBody.appendChild(el('div', { class: 'wc-section-note', text: 'Character tools failed to render.' })); } }
     else cfBody.appendChild(el('div', { class: 'wc-section-note', text: 'Character tools module not loaded.' }));
-    var dgCard = el('div', { class: 'wc-card wc-col' });
-    dgCard.appendChild(el('label', { class: 'wc-label', text: '🧪 Diagnostics · self-test' }));
+    var dgCard = el('details', { class: 'wc-card wc-col' });
+    dgCard.appendChild(el('summary', { class: 'wc-label', style: { cursor: 'pointer' }, text: '🧪 Diagnostics · self-test' }));
     try { renderSelfTest(dgCard); } catch (e) { dgCard.appendChild(el('div', { class: 'wc-section-note', text: 'Self-test failed to render.' })); }
-    var seCard = el('div', { class: 'wc-card wc-col' });
     var sePendCount = seQueue().filter(function (x) { return x.status === 'pending'; }).length;
-    seCard.appendChild(el('label', { class: 'wc-label', text: '📝 Self-edits' + (sePendCount ? ' · ' + sePendCount + ' pending' : '') }));
+    var seCard = el('details', sePendCount ? { class: 'wc-card wc-col', open: '' } : { class: 'wc-card wc-col' });
+    seCard.appendChild(el('summary', { class: 'wc-label', style: { cursor: 'pointer' }, text: '📝 Self-edits' + (sePendCount ? ' · ' + sePendCount + ' pending' : '') }));
     var seBody = el('div', {}); seCard.appendChild(seBody);
     try { seRenderInto(seBody); } catch (e) { seBody.appendChild(el('div', { class: 'wc-section-note', text: 'Self-edit queue failed to render.' })); }
     grid.appendChild(aiCard); grid.appendChild(cfCard); grid.appendChild(dgCard); grid.appendChild(seCard);
@@ -1773,16 +1777,21 @@
       el('button', { class: 'wc-btn wc-mini', text: '\u{1F52C} Analyze', title: 'Findings, outline, imports, export (Project tab)', onclick: function () { setTab('project'); } }),
       el('button', { class: 'wc-btn wc-btn-accent wc-mini', text: '\u21C5 GitHub', title: 'Pull / Push this generator (GitHub tab)', onclick: function () { setTab('github'); } })
     ]));
-    var actions = el('div', { class: 'wc-row', style: { marginTop: '8px', flexWrap: 'wrap' } }, [
-      el('button', { class: 'wc-btn', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave }),
-      el('button', { class: 'wc-btn', text: 'Lint JS', title: 'Check the HTML pane\u2019s <script> blocks for JavaScript errors', onclick: lintNow }),
-      el('button', { class: 'wc-btn', text: 'Find bugs (AI)', title: 'Send the active pane to Perchance\u2019s AI bug reviewer', onclick: aiBugCheck }),
-      el('button', { class: 'wc-btn', text: 'Backups\u2026', title: 'Browse local backups \u2014 download or restore', onclick: openBackupBrowser })
-    ]);
+    sec.appendChild(el('div', { class: 'wc-row', style: { marginTop: '8px' } }, [
+      el('button', { class: 'wc-btn wc-btn-accent', text: 'Save', title: 'Save the generator (Ctrl/Cmd+S in the editor)', onclick: doSave })
+    ]));
+    // The occasional and destructive actions fold away so the panel shows Save + navigation, not a wall.
+    var more = el('details', { class: 'wc-disclose', style: { marginTop: '8px' } });
+    more.appendChild(el('summary', { text: 'More actions' }));
+    var moreBody = el('div', { class: 'wc-disclose-body wc-row', style: { flexWrap: 'wrap' } });
+    moreBody.appendChild(el('button', { class: 'wc-btn', text: 'Lint JS', title: 'Check the HTML pane\u2019s <script> blocks for JavaScript errors', onclick: lintNow }));
+    moreBody.appendChild(el('button', { class: 'wc-btn', text: 'Find bugs (AI)', title: 'Send the active pane to Perchance\u2019s AI bug reviewer', onclick: aiBugCheck }));
+    moreBody.appendChild(el('button', { class: 'wc-btn', text: 'Backups\u2026', title: 'Browse local backups \u2014 download or restore', onclick: openBackupBrowser }));
     var sm0 = pageSettingsModal();
-    if (sm0 && typeof sm0.changeGeneratorName === 'function') actions.appendChild(el('button', { class: 'wc-btn', text: 'Rename\u2026', title: 'Rename this generator (Perchance\u2019s own rename)', onclick: renameThisGenerator }));
-    if (sm0 && typeof sm0.deleteGenerator === 'function') actions.appendChild(el('button', { class: 'wc-btn', style: { color: '#e70000', borderColor: '#e70000' }, text: 'Delete\u2026', title: 'Delete this generator \u2014 permanent (Perchance\u2019s own delete)', onclick: deleteThisGenerator }));
-    sec.appendChild(actions);
+    if (sm0 && typeof sm0.changeGeneratorName === 'function') moreBody.appendChild(el('button', { class: 'wc-btn', text: 'Rename\u2026', title: 'Rename this generator (Perchance\u2019s own rename)', onclick: renameThisGenerator }));
+    if (sm0 && typeof sm0.deleteGenerator === 'function') moreBody.appendChild(el('button', { class: 'wc-btn', style: { color: '#e70000', borderColor: '#e70000' }, text: 'Delete\u2026', title: 'Delete this generator \u2014 permanent (Perchance\u2019s own delete)', onclick: deleteThisGenerator }));
+    more.appendChild(moreBody);
+    sec.appendChild(more);
     var luNode = el('div', { class: 'wc-section-note', style: { marginTop: '6px' }, text: '\u23F1 Last updated: checking\u2026' });
     sec.appendChild(luNode);
     try { showLastUpdated(name, luNode); } catch (e) {}
@@ -1868,8 +1877,8 @@
       colA.appendChild(el('div', { class: 'wc-card' }, [note('Open a generator (its #edit page) to Pull or Push it. You can still set your token and repo defaults \u2192')]));
     }
 
-    var cardTok = el('div', { class: 'wc-card' });
-    cardTok.appendChild(head('GitHub push token'));
+    var cardTok = el('details', ghToken() ? { class: 'wc-card' } : { class: 'wc-card', open: '' });
+    cardTok.appendChild(el('summary', { class: 'wc-subhead', style: { cursor: 'pointer' }, text: 'GitHub push token' }));
     cardTok.appendChild(note('Push commits the editor to GitHub, which needs a Personal Access Token. Use a fine-grained token scoped to this one repo with Contents: read & write. The same token lets Pull and Diff read a PRIVATE repo; without one they use public files only. Stored locally; sent only to api.github.com; never logged.'));
     var tokIn = el('input', { class: 'wc-field', type: 'password', placeholder: ghToken() ? '\u2022\u2022\u2022\u2022 token saved \u2014 type to replace' : 'github_pat_\u2026 / ghp_\u2026', 'aria-label': 'GitHub personal access token', autocomplete: 'off' });
     cardTok.appendChild(tokIn);
@@ -1879,8 +1888,8 @@
     ]));
     colB.appendChild(cardTok);
 
-    var cardLint = el('div', { class: 'wc-card' });
-    cardLint.appendChild(head('Code checks'));
+    var cardLint = el('details', { class: 'wc-card' });
+    cardLint.appendChild(el('summary', { class: 'wc-subhead', style: { cursor: 'pointer' }, text: 'Code checks' }));
     cardLint.appendChild(note('Lints the HTML pane\u2019s <script> blocks for JavaScript syntax errors (Perchance\u2019s own ESLint) plus Perchance parser traps the JS linter can\u2019t see \u2014 unicode-brace escapes, import patterns, and brace/bracket HTML entities. Runs before Save and is flagged in the Push dialog.'));
     var lchk = el('input', { type: 'checkbox', id: 'wc-lint-save', style: { margin: '0 8px 0 0' } });
     lchk.checked = gget('lintOnSave', true);
@@ -1899,8 +1908,8 @@
     cardLint.appendChild(row([ el('button', { class: 'wc-btn', text: 'Lint JS now', title: 'Check the HTML pane\u2019s <script> blocks now', onclick: lintNow }), el('button', { class: 'wc-btn', text: 'Find bugs (AI)', title: 'AI review of the active pane via Perchance\u2019s editor copilot', onclick: aiBugCheck }) ]));
     colB.appendChild(cardLint);
 
-    var cardSb = el('div', { class: 'wc-card' });
-    cardSb.appendChild(head('Skybridge'));
+    var cardSb = el('details', { class: 'wc-card' });
+    cardSb.appendChild(el('summary', { class: 'wc-subhead', style: { cursor: 'pointer' }, text: 'Skybridge' }));
     cardSb.appendChild(note('Generators that import the weld-skybridge plugin can use storage, your own AI model, web fetch/search and the message bus through Weld. By default they just work, with no prompts. Turn this on only if you want a prompt the first time each generator uses each capability.'));
     var sbChk = el('input', { type: 'checkbox', id: 'wc-sb-ask', style: { margin: '0 8px 0 0' } });
     sbChk.checked = sbAskMode();
@@ -1967,8 +1976,8 @@
       });
       toast('Repo defaults saved'); renderTab();
     };
-    var cardDef = el('div', { class: 'wc-card' });
-    cardDef.appendChild(head('Repo defaults (all generators)'));
+    var cardDef = el('details', base.owner ? { class: 'wc-card' } : { class: 'wc-card', open: '' });
+    cardDef.appendChild(el('summary', { class: 'wc-subhead', style: { cursor: 'pointer' }, text: 'Repo defaults (all generators)' }));
     cardDef.appendChild(note('Set once and every generator uses them. Tip: paste a raw file URL into a template box \u2014 it fills owner / repo / branch and rewrites the path as a {name} template.'));
     cardDef.appendChild(row([gOwner, gRepo, gBranch]));
     cardDef.appendChild(el('div', { class: 'wc-section-note', text: 'DSL path template \u2014 path or raw URL:' }));
@@ -17743,6 +17752,10 @@ the diagnostics preview calls the same builders as the real prompt.`
   if (!C || !H) return;
   const E = H.el;
   const S = { pick: '', rows: null, inv: null, error: '', selected: null, inspected: null, pendingDelete: null, secrets: null, msg: '', stamp: 0 };
+  const cardOpen = {};   // remembers which collapsible cards are open across the frequent re-renders
+  // Attrs for a collapsible card that remembers its open state (so an interaction-triggered redraw keeps it open).
+  const openAttrs = (id, force) => (force || cardOpen[id]) ? { open: '' } : {};
+  function trackOpen(card, id) { card.addEventListener('toggle', () => { cardOpen[id] = !!card.open; }); }
   let host = null, unsub = null;
   const note = t => E('div', { class: 'wc-section-note', text: t });
   const small = { fontSize: '12px', opacity: '.75' };
@@ -17879,8 +17892,9 @@ the diagnostics preview calls the same builders as the real prompt.`
     Object.keys(pres.tabs || {}).forEach(t => { if (C.GEN_RE.test(t)) tags.add(t); });
     const here = typeof H.slug === 'function' ? H.slug() : ''; if (here && C.GEN_RE.test(here)) tags.add(here);
     const list = Array.from(tags).sort();
-    const card = E('div', { 'data-family': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
-    card.appendChild(E('div', { text: 'Dad-Chat family', style: { fontWeight: '600' } }));
+    const card = E('details', Object.assign({ 'data-family': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } }, openAttrs('family')));
+    trackOpen(card, 'family');
+    card.appendChild(E('summary', { text: 'Dad-Chat family', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Any generator that stores copies under its own tag appears here. The companion only watches; it never routes chats or subscribes channels for a generator.' }));
     if (!list.length) { card.appendChild(note('No generator tags seen yet.')); return card; }
     if (!S.pick || !tags.has(S.pick)) S.pick = list.indexOf(here) >= 0 ? here : list[0];
@@ -18085,8 +18099,9 @@ the diagnostics preview calls the same builders as the real prompt.`
     D.found = null; D.sel = new Set(); D.busy = false; load(); draw();
   }
   function cleanupCard() {
-    const card = E('div', { 'data-cleanup': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
-    card.appendChild(E('div', { text: 'Cleanup duplicates', style: { fontWeight: '600' } }));
+    const card = E('details', Object.assign({ 'data-cleanup': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } }, openAttrs('cleanup', !!D.found)));
+    trackOpen(card, 'cleanup');   // open when results are showing or the user opened it
+    card.appendChild(E('summary', { text: 'Cleanup duplicates', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Finds copies with identical content. Only exact duplicates can be deleted here, the newest copy is always kept, and each one is deleted only after it is confirmed saved in your backup folder. Possible duplicates (same size, different content) are listed for you or the AI helper to judge.' }));
     card.appendChild(btn('Find duplicates', () => findDups(), { disabled: D.busy || !(S.rows && S.rows.length) }));
     const f = D.found; if (!f) return card;
@@ -18121,8 +18136,8 @@ the diagnostics preview calls the same builders as the real prompt.`
     if (host) draw();
   }
   function folderCard() {
-    const card = E('div', { 'data-folder': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
-    card.appendChild(E('div', { text: 'Backup location', style: { fontWeight: '600' } }));
+    const card = E('details', { 'data-folder': '1', open: '', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    card.appendChild(E('summary', { text: 'Backup location', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Choose any folder on a drive or inside a cloud-synced folder (Google Drive, OneDrive, iCloud, Dropbox). Copies are saved there as files that are only ever added: nothing is overwritten or deleted, so browser cache clears cannot touch them.' }));
     if (!F.supported) card.appendChild(E('div', { style: { fontSize: '12px', color: '#e0a030' }, text: 'This browser cannot open folders (Chrome or Edge can). The Download buttons below still work.' }));
     card.appendChild(E('div', { 'data-folder-state': '1', style: { fontSize: '12px', margin: '4px 0' }, text: F.handle ? 'Folder: ' + F.name + ' · ' + (F.perm === 'granted' ? 'access allowed' : 'needs permission (press Allow access)') : 'No folder chosen yet.' }));
