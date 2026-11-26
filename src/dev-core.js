@@ -155,10 +155,27 @@
   function formatToolResults(results) {
     return results.map(r => 'RESULT of ' + r.tool + ' ' + JSON.stringify(r.args) + ':\n' + (r.error ? 'ERROR: ' + r.error : clip(typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 1), 14000))).join('\n\n');
   }
-  // ask(system, user) -> Promise<string>. Never calls a tool outside INVESTIGATE_TOOLS.
+  // Build the read-only lookup protocol text for an arbitrary tool subset (used by agents).
+  function buildInvestigateProtocol(toolList) {
+    const first = toolList[0] ? toolList[0][0] : 'get_outline';
+    return [
+      'You may look things up before answering. To run lookups reply with ONLY one or more fenced blocks, each holding one JSON request:',
+      '```weld-tool',
+      '{"tool":"' + first + '","args":{}}',
+      '```',
+      'Weld runs them (read-only) and replies with the results, then you continue. Available tools:',
+      toolList.map(t => '- ' + t[0] + ' ' + t[1]).join('\n'),
+      'When you have enough information, give your final answer with no weld-tool block. You can never change anything with these tools.'
+    ].join('\n');
+  }
+  // ask(system, user) -> Promise<string>. Never calls a tool outside its allowed list.
+  // o.tools (optional) restricts the agent to a subset [[name,desc],...]; default = INVESTIGATE_TOOLS.
   async function investigate(o) {
-    const allowed = new Set(INVESTIGATE_TOOLS.map(t => t[0])), maxRounds = o.maxRounds || 4, steps = [];
-    const system = o.system + '\n\n' + INVESTIGATE_PROTOCOL;
+    const custom = Array.isArray(o.tools) && o.tools.length;
+    const toolList = custom ? o.tools.filter(t => Array.isArray(t) && typeof t[0] === 'string') : INVESTIGATE_TOOLS;
+    const allowed = new Set(toolList.map(t => t[0])), maxRounds = o.maxRounds || 4, steps = [];
+    // Default path stays byte-identical to the shipped protocol; a custom subset builds its own.
+    const system = o.system + '\n\n' + (custom ? buildInvestigateProtocol(toolList) : INVESTIGATE_PROTOCOL);
     let transcript = o.user, reply = '';
     for (let round = 0; round <= maxRounds; round++) {
       if (o.isCancelled && o.isCancelled()) throw new Error('Stopped.');

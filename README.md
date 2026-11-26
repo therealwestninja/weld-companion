@@ -33,6 +33,7 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
   - [Project — read, check & export any generator](#project--read-check--export-any-generator-v1570)
   - [Skills - application and generator library](#skills--application-and-generator-library-v1600)
   - [Dev — folder sync, AI agents & GitHub](#dev--folder-sync-ai-agents--github-v1580)
+  - [Agents — in-browser assistants that read your generator](#agents--in-browser-assistants-that-read-your-generator)
   - [Tools — AI Helper & character files](#tools--ai-helper--character-files)
   - [Data Manager — browse, edit & back up every generator's IndexedDB](#data-manager--browse-edit--back-up-every-generators-indexeddb)
   - [AICC pack — Lore Library, character round-trip & repair](#aicc-pack--lore-library-character-round-trip--repair)
@@ -63,6 +64,7 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 | :-- | :----------- |
 | **Backups** | Inventory, inspect, download and delete the generator backup copies held in Weld, check a Dad-Chat family generator's persistence rungs, and **save copies to a folder you choose** (local drive or cloud-synced folder; add-only, secrets held back). See [docs/BACKUPS.md](docs/BACKUPS.md). |
 | **Skills** | 206 presets in 18 grouped sections for dashboards, chat/story systems, SillyTavern/Chub card and lore features, Dad-Chat projects (code and Dad-native content), Skybridge setup, rebranding, AI input helpers, prompt studios, plugins, debugging and more, with type/mode filters and native AI handoff. |
+| 🤖 **Agents** | Named, reusable assistants that run against the generator you're viewing. Each one uses **your own AI model** to plan, run **read-only** lookups over the generator (the same investigate loop the Dev tab uses), and report back — explain a generator, hunt bugs, suggest improvements, or plan a feature. Agents never change a generator. Watch the lookups live, stop any time, and define your own with a custom role and tool set. |
 | ★ **Generators** | Your whole generator directory grouped by your real Perchance folders, plus favorites & recents — with search, sort (incl. **Edited** / **Views**), per-row open/edit, and a **Stats** button that pulls real **view counts + last-edited times** from Perchance's public API. A **This Generator** panel shows the open generator's status and an **About this page** card (public stats — views, last edited, title, imports — for *any* generator, even ones you don't own), plus owner actions. |
 | 📒 **Library** | The reader's home, grouped by task. **📚 Collect**: a permanent **Scrapbook** of saved results (searchable, taggable, exportable), **Chat stories** (read or export any AICC thread as styled HTML, Markdown, or text), **clipboard history**, and your **👍/👎 ratings**. **🛡 Care**: a **backup guardian**, a **time tracker** (per-generator minutes, CSV export), a **time capsule**, **output rules** (post-processing on save), and **Move everything** (full state export/import). Plus **search everything**, **session replay**, and a **spaced-repetition review queue** in Collect; **My Perchance** stats, **tab snapshots**, **My boundaries**, and a **Ctrl/Cmd+Shift+S** quick-save hotkey; a **keepsake HTML archive** and **recommendation bundles** to share generators; **lore link health** (catches removed/quarantined uploads before they break a character), **generator watch** (update notifications for favorites), and a one-click **platform speed check**; night light gains an **ambient mode** that follows hour and season. A sticky header keeps save / read-aloud / rate / random-favorite in reach. |
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
@@ -261,6 +263,21 @@ The **🧩 Dev** tab connects the generator you are editing to files, to AI codi
 - **Find usages and rename** across both panels, **editor markers** beside lines with findings, and a **regression check** that compares output before and after an edit.
 
 See [the Dev guide](docs/DEV.md) for setup, per-agent instructions, the security model, and what has and has not been verified.
+
+### Agents — in-browser assistants that read your generator
+
+The **🤖 Agents** tab runs small, goal-directed assistants against the generator you're viewing. Where the Dev tab's *agent bridge* lets an **external** coding agent drive Weld over MCP, the Agents tab is the **in-browser** version: pick an agent, give it a job, and it works the problem itself using **your own configured AI model** — no local process, no extra setup beyond a model.
+
+Each agent runs a **plan → look up → observe → answer** loop. It can only use **read-only lookups** — the same ones the Dev tab's "investigate" mode offers (outline, findings, numbered lines, search, find-usages, imports, HTML map) — so **an agent can never change a generator.** It reads, reasons, and reports; you decide what to do with the answer.
+
+- **Built-in agents:** **📖 Explain this generator**, **🐛 Find likely bugs**, **✨ Suggest improvements**, and **🗺 Plan a new feature** (describe the feature and it drafts an ordered plan against the real structure).
+- **Watch it work.** The transcript shows each lookup the agent runs as it happens, then its final answer. **Stop** aborts a run at any point; the round budget (1–8 lookups) is bounded so a run always ends.
+- **Make your own.** Create a custom agent with its own name, role (system prompt), default goal, allowed tools, and round budget. Custom agents are stored locally (and travel in **Move everything**). A built-in can be **Duplicated** as a starting point.
+- **Requirements.** Agents need **your own AI model** (OpenAI / Anthropic / Google or a free local Ollama / OpenAI-compatible model) set up in the **Tools** tab — the built-in Perchance helper can't be driven automatically, and the tab says so. They work best with a generator open (the lookups read the current one).
+
+Treat everything an agent reads from a generator as **data, not instructions** — the agents' roles tell the model exactly that, so a crafted generator can't turn an agent against you.
+
+See [the Agents guide](docs/AGENTS.md).
 
 ### Tools — AI Helper & character files
 
