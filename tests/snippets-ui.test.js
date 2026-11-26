@@ -38,17 +38,11 @@ vm.runInNewContext(fs.readFileSync('src/snippets-ui.js', 'utf8'), { window, cons
 const render = () => window.weldSnippets.render(parent);
 
 render();
-// top folders present; skill leaves (rules/methods expanded by default) are visible
-assert.ok(folder('code') && folder('rules') && folder('methods'), 'top folders rendered');
-assert.ok(leaf('rule-prove-the-wire'), 'skill leaf visible under an expanded top folder');
-// code sub-folders start collapsed, so code leaves are hidden until expanded
+// the code tree: top 'code' folder open by default; its pane sub-folders start collapsed.
+assert.ok(folder('code'), 'top code folder rendered');
+assert.ok(folder('code-dsl') && folder('code-html'), 'pane sub-folders present');
 assert.ok(!leaf('meta'), 'code leaf hidden until its sub-folder is expanded');
-
-// ---- skill leaf -> loads prompt into the AI Helper (openAI) ----
-leaf('rule-prove-the-wire').click();
-assert.equal(opens.length, 1, 'skill click called openAI once');
-assert.ok(/wire/i.test(opens[0].prompt) && opens[0].prompt.length > 300, 'the real skill prompt was loaded');
-assert.ok(toasts.some(m => /AI Helper/.test(m)), 'user told it loaded into the AI Helper');
+assert.equal(opens.length, 0, 'no AI-skill actions on this tab any more');
 
 // ---- expand a code sub-folder, then a code leaf -> insertSnippet ----
 folder('code-dsl').click();           // toggle open -> re-renders
@@ -59,17 +53,17 @@ assert.equal(inserts[0].pane, 'dsl', 'inserted into the DSL pane');
 assert.ok(/\$meta/.test(inserts[0].text), 'the real snippet text was inserted');
 
 // ---- collapse a folder hides its children ----
-folder('rules').click();
-assert.ok(!leaf('rule-prove-the-wire'), 'collapsing a folder hides its leaves');
-folder('rules').click();              // re-open for the filter test
-assert.ok(leaf('rule-prove-the-wire'), 're-expanded');
+folder('code-dsl').click();
+assert.ok(!leaf('meta'), 'collapsing a folder hides its leaves');
+folder('code-dsl').click();           // re-open for the filter test
+assert.ok(leaf('meta'), 're-expanded');
 
 // ---- filter: typing narrows the tree to matches ----
 const search = walk(parent).find(n => n.tagName === 'input' && n.attrs.type === 'search');
-search.value = 'theme'; search.events.input();
+search.value = 'kv'; search.events.input();
 const after = leaves().map(n => n.attrs['data-leaf']);
-assert.ok(after.includes('method-theme-factory'), 'match shown');
-assert.ok(!after.includes('rule-prove-the-wire'), 'non-matches filtered out');
-assert.ok(after.every(id => /theme/i.test(Core.findById(id).name + Core.findById(id).desc)), 'only matches remain');
+assert.ok(after.includes('kv-usage'), 'match shown');
+assert.ok(!after.includes('meta'), 'non-matches filtered out');
+assert.ok(after.every(id => /kv/i.test(Core.findById(id).name + Core.findById(id).desc)), 'only matches remain');
 
-console.log('Snippets UI tests passed');
+console.log('Snippets UI (code-only) tests passed');

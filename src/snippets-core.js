@@ -1,13 +1,11 @@
-/* Snippets & Skills catalog: a file-tree of two node kinds.
-     - code  : Perchance boilerplate that drops into the matching editor pane at the cursor.
-     - skill : a ready-to-send prompt that loads into the AI Helper's input (for a chat model
-               that cannot use agents: single-shot or multi-run prompts).
+/* Code-snippet catalog: a file-tree of Perchance boilerplate that drops into the matching editor
+   pane at the cursor. (AI-Helper skill prompts live in the Skills tab, not here.)
    Pure data + tree helpers: no DOM, network or storage. The UI (snippets-ui) and the monolith
    render this tree; the monolith's menu commands look code nodes up by id. */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./snippets-skills.js'));
-  else root.WeldSnippetsCore = factory(root.WeldSnippetsSkills || { RULES: [], METHODS: [] });
-})(typeof window === 'object' ? window : globalThis, function (SKILLS) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.WeldSnippetsCore = factory();
+})(typeof window === 'object' ? window : globalThis, function () {
   'use strict';
   const VERSION = 1;
 
@@ -47,29 +45,15 @@
     ]
   };
 
-  // ---- AI-Helper skill prompts (loaded into the AI Helper input; the model single-shots or
-  //      multi-runs them). RULES = the user's working disciplines; METHODS = adapted techniques.
-  //      Populated by the build from the authored catalog below. ----
-  const pick = k => (SKILLS && Array.isArray(SKILLS[k])) ? SKILLS[k] : [];
-  const RULES = pick('RULES');       // the user's working-discipline prompts
-  const METHODS = pick('METHODS');   // AI-method prompts adapted for Perchance
-  const PROMPTS = pick('PROMPTS');   // prompt-engineering for root.aiTextPlugin
-  const REVIEW = pick('REVIEW');     // security / threat-model / edge-input review
-
   const codeNode = n => ({ kind: 'code', id: n.id, name: n.name, desc: n.desc, pane: n.pane, text: n.text });
-  const skillNode = s => ({ kind: 'skill', id: s.id, name: s.name, desc: s.desc, run: s.run === 'multi' ? 'multi' : 'single', prompt: s.prompt });
 
-  // The full tree: three top folders, code split by pane.
+  // The tree: code snippets split by editor pane. (AI-Helper skill prompts live in the Skills tab.)
   function tree() {
-    return { id: 'root', name: 'Snippets & Skills', children: [
+    return { id: 'root', name: 'Code snippets', children: [
       { id: 'code', name: 'Code snippets', glyph: '\u{1F4C4}', note: 'Boilerplate that drops into the matching editor pane at your cursor (open a generator’s #edit page).', children: [
         { id: 'code-dsl', name: 'DSL — top panel', children: CODE.dsl.map(n => codeNode(Object.assign({ pane: 'dsl' }, n))) },
         { id: 'code-html', name: 'HTML panel — JS', children: CODE.html.map(n => codeNode(Object.assign({ pane: 'html' }, n))) }
-      ] },
-      { id: 'rules', name: 'Working rules', glyph: '\u{1F4D0}', note: 'Review and build disciplines. Click to load the prompt into the AI Helper, then send it (single-shot) or work it across messages.', children: RULES.map(skillNode) },
-      { id: 'methods', name: 'AI methods', glyph: '\u{1F9E0}', note: 'Design, critique and test techniques adapted for Perchance. Click to load into the AI Helper.', children: METHODS.map(skillNode) },
-      { id: 'prompts', name: 'Prompt engineering', glyph: '\u{1F3AF}', note: 'Techniques for the root.aiTextPlugin prompts INSIDE your generator (the AI the generator runs).', children: PROMPTS.map(skillNode) },
-      { id: 'review', name: 'Review & safety', glyph: '\u{1F6E1}', note: 'Audit a generator for the threats that actually bite on Perchance (user text → innerHTML, bad odds, silent fails).', children: REVIEW.map(skillNode) }
+      ] }
     ] };
   }
 
@@ -93,7 +77,7 @@
     return prune(tree()) || { id: 'root', name: 'Snippets & Skills', children: [] };
   }
 
-  function counts() { const l = leaves(); return { code: l.filter(n => n.kind === 'code').length, skill: l.filter(n => n.kind === 'skill').length, total: l.length }; }
+  function counts() { const l = leaves(); return { code: l.filter(n => n.kind === 'code').length, total: l.length }; }
 
-  return { VERSION, tree, walk, leaves, findById, codeById, search, counts, isFolder, RULES, METHODS, CODE };
+  return { VERSION, tree, walk, leaves, findById, codeById, search, counts, isFolder, CODE };
 });

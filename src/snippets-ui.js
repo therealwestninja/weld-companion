@@ -13,33 +13,23 @@
   function badge(text, color) { return E('span', { text: text, style: { fontSize: '10px', fontFamily: 'var(--wc-mono,monospace)', opacity: '.85', padding: '1px 6px', borderRadius: '6px', border: '1px solid var(--wc-line,#555)', color: color || 'inherit', whiteSpace: 'nowrap' } }); }
 
   function useCode(node) {
-    const ok = H.insertSnippet(node.pane, node.text, node.name);   // host toasts on its own
-    return ok;
-  }
-  function useSkill(node) {
-    try {
-      if (typeof H.openAI !== 'function') { H.toast && H.toast('AI Helper is unavailable'); return; }
-      H.openAI(node.prompt, null);   // loads the prompt into the AI Helper workspace input, opens Tools
-      H.toast && H.toast('Loaded into the AI Helper — review and send' + (node.run === 'multi' ? ' (multi-step)' : ''));
-    } catch (e) { H.toast && H.toast('Could not load the skill: ' + ((e && e.message) || e)); }
+    return H.insertSnippet(node.pane, node.text, node.name);   // host toasts on its own
   }
 
   function leafRow(node, depth) {
-    const isCode = node.kind === 'code';
     const row = E('div', { 'data-leaf': node.id, role: 'button', tabindex: '0',
       style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', paddingLeft: (depth * 16 + 8) + 'px', borderRadius: '7px', cursor: 'pointer' },
-      onclick: () => (isCode ? useCode(node) : useSkill(node)),
-      title: isCode ? 'Insert at the cursor in the ' + (node.pane === 'html' ? 'HTML' : 'DSL') + ' panel' : 'Load this prompt into the AI Helper input' });
-    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); isCode ? useCode(node) : useSkill(node); } });
+      onclick: () => useCode(node),
+      title: 'Insert at the cursor in the ' + (node.pane === 'html' ? 'HTML' : 'DSL') + ' panel' });
+    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); useCode(node); } });
     row.addEventListener('mouseenter', () => { row.style.background = 'var(--wc-surface-3,rgba(255,255,255,.06))'; });
     row.addEventListener('mouseleave', () => { row.style.background = ''; });
-    row.appendChild(E('span', { text: isCode ? '\u{1F4C4}' : '✨', style: { flex: '0 0 auto' } }));
+    row.appendChild(E('span', { text: '\u{1F4C4}', style: { flex: '0 0 auto' } }));
     row.appendChild(E('div', { style: { flex: '1', minWidth: '0' } }, [
       E('div', { text: node.name, style: { fontWeight: '600', fontSize: '13px' } }),
       node.desc ? E('div', { text: node.desc, class: 'wc-section-note', style: { margin: '1px 0 0' } }) : null
     ]));
-    if (isCode) row.appendChild(badge(node.pane === 'html' ? 'HTML' : 'DSL', 'var(--wc-signal,#4ee0c8)'));
-    else row.appendChild(badge(node.run === 'multi' ? 'multi-run' : 'single-shot', 'var(--wc-arc,#ff8a3d)'));
+    row.appendChild(badge(node.pane === 'html' ? 'HTML' : 'DSL', 'var(--wc-signal,#4ee0c8)'));
     return row;
   }
 
@@ -72,11 +62,11 @@
     mountParent = parent;
     while (parent.firstChild) parent.removeChild(parent.firstChild);
     const wrap = E('div', { id: 'wc-snippets-body' });
-    wrap.appendChild(E('h2', { text: 'Snippets & Skills', style: { margin: '0 0 6px', fontSize: '20px' } }));
+    wrap.appendChild(E('h2', { text: 'Code snippets', style: { margin: '0 0 6px', fontSize: '20px' } }));
     const c = C.counts();
-    wrap.appendChild(note('A tree of ' + c.code + ' code snippets (drop into the editor) and ' + c.skill + ' AI-Helper skills (load a ready-to-send prompt into the AI Helper). Click any item to use it.'));
+    wrap.appendChild(note('A tree of ' + c.code + ' ready-to-paste Perchance code snippets. Click one to drop it at your cursor in the matching editor pane. (AI prompt-skills now live in the Skills tab.)'));
 
-    const search = E('input', { type: 'search', placeholder: 'Filter snippets & skills…', 'aria-label': 'Filter', style: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '9px', background: 'var(--wc-input,rgba(0,0,0,.18))', color: 'inherit', font: 'inherit', margin: '10px 0 8px' } });
+    const search = E('input', { type: 'search', placeholder: 'Filter snippets…', 'aria-label': 'Filter', style: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '9px', background: 'var(--wc-input,rgba(0,0,0,.18))', color: 'inherit', font: 'inherit', margin: '10px 0 8px' } });
     search.value = S.query;
     search.addEventListener('input', () => { S.query = search.value; render(parent); });
     wrap.appendChild(search);
@@ -89,7 +79,7 @@
     else root.children.forEach(f => renderNode(f, 0, treeEl));
     wrap.appendChild(treeEl);
 
-    if (!H.aiReady || !H.aiReady()) wrap.appendChild(note('Tip: AI skills load into the AI Helper; pick your own AI model in the Tools tab (or use Perchance’s built-in helper) to send them.'));
+    if (!H.slug || !H.isEdit || !H.isEdit()) wrap.appendChild(note('Open a generator’s #edit page to insert snippets at the cursor.'));
     parent.appendChild(wrap);
     // Restore default expansion after a filter is cleared.
     if (!S.query.trim() && S.expanded && S.expanded.size === 0) S.expanded = defaultExpanded();

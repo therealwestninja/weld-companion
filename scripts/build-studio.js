@@ -10,9 +10,9 @@ const bundles = [
   { marker: 'DEV', sources: ['dev-core.js', 'dev-ui.js'] },
   { marker: 'EXTRAS', sources: ['bridge-extras.js'] },
   { marker: 'BACKUP', sources: ['backup-core.js', 'backup-ui.js'] },
-  { marker: 'SKILLS', sources: ['skills-refs.js', 'skills-dad.js', 'skills-core.js', 'skills-ui.js'] },
+  { marker: 'SKILLS', sources: ['skills-refs.js', 'skills-dad.js', 'skills-direct.js', 'skills-core.js', 'skills-ui.js'] },
   { marker: 'AGENTS', sources: ['agent-core.js', 'agent-ui.js'] },
-  { marker: 'SNIPPETS', sources: ['snippets-skills.js', 'snippets-core.js', 'snippets-ui.js'] }
+  { marker: 'SNIPPETS', sources: ['snippets-core.js', 'snippets-ui.js'] }
 ];
 const normalize = s => s.replace(/\r\n/g, '\n');
 const current = normalize(fs.readFileSync(file, 'utf8'));

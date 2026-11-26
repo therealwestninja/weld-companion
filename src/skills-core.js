@@ -9,6 +9,8 @@
   const host = typeof window === 'object' ? window : globalThis;
   const Refs = viaRequire ? require('./skills-refs.js') : (host.WeldSkillsRefs || { packs: [], byId: {}, links: {}, examples: {} });
   const Dad = viaRequire ? require('./skills-dad.js') : (host.WeldSkillsDad || { rows: [] });
+  // DIRECT (pre-written) skills: ready-to-send prompts, not composed from a task. Shown as their own categories.
+  const Direct = viaRequire ? require('./skills-direct.js') : (host.WeldSkillsDirect || { RULES: [], METHODS: [], PROMPTS: [], REVIEW: [], WEBUI: [], THREED: [] });
   const categories = [
     ['dashboards', 'Dashboards & live data'],
     ['agents', 'Prompts, models & plugins'],
@@ -19,7 +21,11 @@
     ['create', 'Create a generator'], ['text', 'Text & randomness'],
     ['story', 'Stories & worlds'], ['games', 'Games & interaction'],
     ['cards', 'SillyTavern, Chub & character cards'], ['dad', 'Dad-Chat projects'], ['rework', 'Rebrand, simplify & privacy'],
-    ['assist', 'AI input helpers & toolkit']
+    ['assist', 'AI input helpers & toolkit'],
+    // Direct (pre-written) skill categories — ready-to-send working prompts, not composed from a task.
+    ['working-rules', 'Working rules'], ['ai-methods', 'AI methods'],
+    ['prompt-eng', 'Prompt engineering'], ['review-safety', 'Review & safety'],
+    ['web-design', 'Web layout & UI'], ['three-3d', '3D & WebGL (Three.js)']
   ].map(([id, title]) => Object.freeze({ id, title }));
   // Stable IDs are stored as favorites; task instructions stay in the shipped catalog.
   const rows = [
@@ -179,7 +185,14 @@
     dad: ['Work inside a Dad-Chat project with its real structure', 'Read the project against the layout diagram first and name the exact file and function you will touch; confirm every documented name in the real source.', 'Keep any change narrow and in the right file (load order, window.* API and storage keys unchanged); content tasks write the Dad-native format, never a Tavern shape.', 'Reload and exercise the changed path, or say you could not; check console and perchanceErrors; list anything unverified.', 'The change sits in the correct file, saved data and window.* names still work, content validates against the Dad-native schema and nothing in it runs as code.'],
     cards: ['Match real chat-card conventions', 'Read the actual chat, character and lore code, plus real sample cards or logs where supplied; use the STRUCTURE REFERENCE in the prompt to map each field to the target convention.', 'Treat card and lore text as data, keep unknown fields, and show users exactly what reaches the model.', 'Round-trip a small non-sensitive card, a Unicode edge case, a malformed file and a long chat before and after the change.', 'Imports and exports preserve fields, nothing in a card runs as code, and prompt contents are visible and bounded.'],
     rework: ['Change identity safely', 'Inventory every place the target element appears in both panels, imports, metadata, storage labels and network calls.', 'Change only what the user owns or may modify; keep license notices, required attribution, saved-data keys, IDs and list names.', 'Reload from a fresh and an existing saved state and confirm nothing broke or still leaks the old element.', 'Old branding or social features are gone from every visible and network path, and existing saved data still loads.'],
-    assist: ['Add helpers that fit the generator', 'Derive the generator purpose, inputs and available text/AI plugins from the actual source.', 'Keep helpers opt-in, reversible, bounded and clearly labeled; never auto-run paid or slow calls.', 'Test empty, filled, failing, cancelled and repeated actions on each input.', 'Every helper has loading, error, cancel and undo behavior and never overwrites user text without a way back.']
+    assist: ['Add helpers that fit the generator', 'Derive the generator purpose, inputs and available text/AI plugins from the actual source.', 'Keep helpers opt-in, reversible, bounded and clearly labeled; never auto-run paid or slow calls.', 'Test empty, filled, failing, cancelled and repeated actions on each input.', 'Every helper has loading, error, cancel and undo behavior and never overwrites user text without a way back.'],
+    // Direct-skill categories: the prompt is shipped whole, so these guide steps are placeholders (never rendered for a direct skill).
+    'working-rules': ['Battle-tested review and build disciplines — pick one, review it, send it.', '', '', '', ''],
+    'ai-methods': ['Design, critique and test techniques adapted for Perchance generators.', '', '', '', ''],
+    'prompt-eng': ['Techniques for the root.aiTextPlugin prompts inside your generator.', '', '', '', ''],
+    'review-safety': ['Audit a generator for the threats that actually bite on Perchance.', '', '', '', ''],
+    'web-design': ['Kill the generic "AI slop" look — build layouts with a real aesthetic point of view.', '', '', '', ''],
+    'three-3d': ['Make Three.js / WebGL look right — lighting, materials, models and performance.', '', '', '', '']
   };
   const sections = Object.freeze(categories.map(c => Object.freeze(Object.assign({}, c, {
     description: guides[c.id][0], steps: Object.freeze(guides[c.id].slice(1, 4)), check: guides[c.id][4]
@@ -449,11 +462,20 @@
     'prompt-quality': ['image', 'chat', 'story', 'text'], 'prompt-presets': ['image', 'chat', 'story', 'text'],
     'ai-resilience': ['image', 'chat', 'story'], 'output-variety': ['text', 'story', 'game']
   };
-  const presets = Object.freeze(rows.concat(additions, Dad.rows).map(([category, id, title, description, mode, task, fit, origin]) =>
+  const composed = rows.concat(additions, Dad.rows).map(([category, id, title, description, mode, task, fit, origin]) =>
     Object.freeze({ category, id, title, description, mode, task,
       types: Object.freeze(fit || specialized[id] || []), sources: Object.freeze(origin || []),
       refs: Object.freeze((Refs.links[id] || []).filter(r => Refs.byId[r])), example: Refs.examples[id] || '',
-      steps: sections.find(c => c.id === category).steps, check: guides[category][4] })));
+      steps: sections.find(c => c.id === category).steps, check: guides[category][4] }));
+  // Pre-written skills become `direct` presets: their prompt is sent whole, bypassing the task->prompt composition.
+  const DIRECT_CATS = { RULES: 'working-rules', METHODS: 'ai-methods', PROMPTS: 'prompt-eng', REVIEW: 'review-safety', WEBUI: 'web-design', THREED: 'three-3d' };
+  const directPresets = [];
+  Object.keys(DIRECT_CATS).forEach(k => (Direct[k] || []).forEach(s => directPresets.push(Object.freeze({
+    category: DIRECT_CATS[k], id: s.id, title: s.name, description: s.desc, mode: 'review', task: s.prompt,
+    types: Object.freeze([]), sources: Object.freeze([]), refs: Object.freeze([]), example: '',
+    steps: Object.freeze([]), check: '', direct: true, run: s.run === 'multi' ? 'multi' : 'single', prompt: s.prompt
+  }))));
+  const presets = Object.freeze(composed.concat(directPresets));
   const get = id => presets.find(p => p.id === id) || null;
   function search(query, category, favorites, filters) {
     const f = filters || {};
@@ -470,6 +492,8 @@
     const p = get(id);
     if (!p) throw new Error('Choose a valid skill first.');
     const o = options || {};
+    // Direct skills ship a complete prompt; send it whole (plus any extra instruction), no composition.
+    if (p.direct) { const extra = String(o.details || '').trim(); return p.prompt + (extra ? '\n\n' + extra : ''); }
     const type = types.find(t => t.id === o.type);
     if (o.type && !type) throw new Error('Choose a known generator type.');
     if (type && p.types.length && !p.types.includes(type.id)) throw new Error('This skill does not match the selected generator type. Choose a matching skill or All generator & app types.');

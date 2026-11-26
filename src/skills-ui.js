@@ -78,7 +78,7 @@
           onclick: () => { S.selected = p.id; drawList(); drawDetail(); build(); if (detail.scrollIntoView) detail.scrollIntoView({ block: 'nearest' }); }
         }, [E('strong', { text: (S.favorites.includes(p.id) ? '\u2605 ' : '') + p.title }),
           E('div', { text: p.description, style: { fontSize: '12px', opacity: '.8', marginTop: '5px', lineHeight: '1.5' } }),
-          E('div', { text: p.mode === 'review' ? 'Review only' : 'Makes changes', style: { fontSize: '11px', opacity: '.65', marginTop: '7px' } })]));
+          E('div', { text: p.direct ? (p.run === 'multi' ? 'Multi-run prompt' : 'Single-shot prompt') : (p.mode === 'review' ? 'Review only' : 'Makes changes'), style: { fontSize: '11px', opacity: '.65', marginTop: '7px' } })]));
         });
         section.appendChild(grid); list.appendChild(section);
       });
@@ -96,12 +96,20 @@
               S.favorites = next; drawDetail(); drawList();
             } catch (e) { message(e.message || String(e), true); }
           } })]));
-      detail.appendChild(note((p.mode === 'review' ? 'Review only: ' : 'Makes changes: ') + p.description));
-      detail.appendChild(note('Fits: ' + (p.types.length ? p.types.map(id => C.types.find(t => t.id === id).title).join(', ') : 'All generator and application types')));
-      const workflow = E('details', { 'aria-label': 'Skill workflow' }, [E('summary', { text: 'Workflow & acceptance checks', style: { cursor: 'pointer', padding: '8px 0' } }),
-        note(p.task),
-        E('ol', {}, p.steps.map(step => E('li', { text: step, style: { marginBottom: '6px' } }))), note('Acceptance: ' + p.check)]);
-      detail.appendChild(workflow);
+      if (p.direct) {
+        detail.appendChild(note((p.run === 'multi' ? 'Multi-run skill: ' : 'Single-shot skill: ') + p.description));
+        const pre = { whiteSpace: 'pre-wrap', fontSize: '11px', lineHeight: '1.5', margin: '6px 0', padding: '8px', borderRadius: '8px', background: 'var(--wc-input,rgba(0,0,0,.18))', maxHeight: '320px', overflow: 'auto' };
+        detail.appendChild(E('details', { 'aria-label': 'The prompt' }, [
+          E('summary', { text: 'The prompt that gets sent', style: { cursor: 'pointer', padding: '8px 0' } }),
+          E('pre', { text: p.prompt, style: pre })]));
+      } else {
+        detail.appendChild(note((p.mode === 'review' ? 'Review only: ' : 'Makes changes: ') + p.description));
+        detail.appendChild(note('Fits: ' + (p.types.length ? p.types.map(id => C.types.find(t => t.id === id).title).join(', ') : 'All generator and application types')));
+        const workflow = E('details', { 'aria-label': 'Skill workflow' }, [E('summary', { text: 'Workflow & acceptance checks', style: { cursor: 'pointer', padding: '8px 0' } }),
+          note(p.task),
+          E('ol', {}, p.steps.map(step => E('li', { text: step, style: { marginBottom: '6px' } }))), note('Acceptance: ' + p.check)]);
+        detail.appendChild(workflow);
+      }
       if (p.refs.length || p.example) {
         const blockStyle = { whiteSpace: 'pre-wrap', fontSize: '11px', lineHeight: '1.45', margin: '6px 0', padding: '8px', borderRadius: '8px',
           background: 'var(--wc-input,rgba(0,0,0,.18))', maxHeight: '260px', overflow: 'auto' };
@@ -191,7 +199,16 @@
         message(copied === true ? 'Prompt copied.' : 'Clipboard unavailable. Select the instructions and copy them manually.', copied !== true);
       } catch (e) { message(e.message || String(e), true); }
     } });
-    wrap.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } }, [send, copy]));
+    const toHelper = E('button', { type: 'button', class: 'wc-btn', text: '→ AI Helper', title: 'Load the prompt into your own AI Helper (Tools → Model chat), to send or multi-run it there',
+      onclick: () => {
+        try {
+          if (S.dirty) throw new Error('Build the prompt first to include your changed details.');
+          if (!S.draft.trim()) throw new Error('Build a prompt first.');
+          if (typeof H.openAI !== 'function') throw new Error('AI Helper is unavailable. Update the complete Weld userscript.');
+          H.openAI(S.draft, null); message('Loaded into the AI Helper (Tools → Model chat).');
+        } catch (e) { message(e.message || String(e), true); }
+      } });
+    wrap.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } }, [send, toHelper, copy]));
     status = E('div', { role: 'status', 'aria-live': 'polite', style: { marginTop: '10px', fontSize: '12px' } }); wrap.appendChild(status);
     parent.appendChild(wrap); drawList(); drawDetail();
     if (!S.draft) build(); else { ready(); message(S.dirty ? 'Details changed. Select Build prompt to include them.' : 'Your edited prompt is preserved for this page session.'); }

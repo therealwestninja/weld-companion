@@ -2,16 +2,24 @@ const assert = require('node:assert/strict');
 const C = require('../src/skills-core.js');
 
 // Stable catalog IDs support saved favorites; every preset must be runnable and scoped.
-assert.equal(C.presets.length, 208);
+assert.equal(C.presets.length, 251);
 assert.equal(new Set(C.presets.map(p => p.id)).size, C.presets.length);
-assert.equal(C.categories.length, 18);
+assert.equal(C.categories.length, 24);
 for (const p of C.presets) {
   assert.ok(C.categories.some(c => c.id === p.category));
-  assert.equal(p.steps.length, 3);
-  assert.ok(p.check.length > 30);
   assert.ok(p.types.every(id => C.types.some(t => t.id === id)));
   assert.ok(p.sources.every(id => C.sources.some(s => s.id === id)));
   assert.match(p.id, /^[a-z][a-z-]+$/);
+  if (p.direct) {
+    // direct skills ship a complete prompt sent whole, no composition
+    assert.ok(p.prompt && p.prompt.length > 100, 'direct preset ships a prompt: ' + p.id);
+    assert.ok(p.run === 'single' || p.run === 'multi', 'direct run flag: ' + p.id);
+    assert.equal(C.buildPrompt(p.id, {}), p.prompt, 'direct buildPrompt returns the prompt verbatim: ' + p.id);
+    assert.ok(!/\nWORKFLOW\n|MODE: /.test(C.buildPrompt(p.id, {})), 'direct prompt is not wrapped: ' + p.id);
+    continue;
+  }
+  assert.equal(p.steps.length, 3);
+  assert.ok(p.check.length > 30);
   const prompt = C.buildPrompt(p.id, { slug: 'demo' });
   assert.ok(prompt.includes(p.task));
   assert.match(prompt, /current lists and HTML panels/);
@@ -23,6 +31,9 @@ for (const p of C.presets) {
   assert.ok(prompt.includes(p.check));
   assert.match(prompt, p.mode === 'review' ? /MODE: REVIEW ONLY\. Do not modify/ : /MODE: IMPLEMENT\./);
 }
+// the 43 direct skills landed in the 6 direct categories
+assert.equal(C.presets.filter(p => p.direct).length, 43, '43 direct skills');
+assert.deepEqual(['working-rules', 'ai-methods', 'prompt-eng', 'review-safety', 'web-design', 'three-3d'].map(c => C.presets.filter(p => p.category === c).length), [10, 10, 6, 3, 7, 7], 'direct category counts');
 assert.throws(() => C.buildPrompt('not-a-skill'), /Choose a valid skill/);
 assert.equal(C.get('not-a-skill'), null);
 assert.ok(C.search(' MOBILE ', 'design').some(p => p.id === 'mobile-layout'));
@@ -85,7 +96,9 @@ const concise = C.buildPrompt('fix-bugs', { concise: true });
 assert.match(concise, /Preserve complete code, exact names, error details, verification evidence/);
 assert.ok(!C.buildPrompt('fix-bugs').includes('REPLY STYLE'));
 // Skybridge, Tavern/Chub card, rebrand and AI-input-helper skills (1.62.0).
-assert.deepEqual(C.sections.map(s => s.id).slice(-4), ['cards', 'dad', 'rework', 'assist']);
+assert.ok(['cards', 'dad', 'rework', 'assist'].every(id => C.sections.some(s => s.id === id)), 'composed categories present');
+// the direct-skill categories are appended last.
+assert.deepEqual(C.sections.map(s => s.id).slice(-6), ['working-rules', 'ai-methods', 'prompt-eng', 'review-safety', 'web-design', 'three-3d']);
 assert.ok(C.buildPrompt('skybridge-integrate').includes('call root.weldSkybridge() once early'));
 assert.ok(C.buildPrompt('skybridge-integrate').includes('gate every privileged call on sb.has(name)'));
 assert.match(C.buildPrompt('skybridge-integrate'), /Never place keys on the bridge/);

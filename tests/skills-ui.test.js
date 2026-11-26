@@ -42,8 +42,8 @@ const render = () => window.weldSkills.render(parent);
 
 (async () => {
   render();
-  assert.equal(cards().length, 208);
-  assert.equal(walk(parent).filter(n => n.attrs["data-section"]).length, 18);
+  assert.equal(cards().length, 251);
+  assert.equal(walk(parent).filter(n => n.attrs["data-section"]).length, 24);
   assert.equal(walk(parent).find(n => n.attrs['data-section']).attrs['data-section'], 'dashboards');
   assert.ok(walk(parent).filter(n => n.attrs['data-section']).every(n => !Object.hasOwn(n.attrs, 'open')));
   assert.ok(!byLabel('Send to Perchance AI').disabled);
@@ -65,7 +65,7 @@ const render = () => window.weldSkills.render(parent);
   // Search/filter updates the catalog without losing a hand-edited prompt or focus field.
   setValue(byId('wc-skill-prompt'), initial + '\nPreserve my custom controls.');
   const search = byLabel('Search skills'); setValue(search, 'gallery');
-  assert.ok(cards().length < 208);
+  assert.ok(cards().length < 251);
   assert.equal(byLabel('Search skills'), search);
   assert.match(byId('wc-skill-prompt').value, /Preserve my custom controls/);
   setValue(byLabel('Skill category'), 'ai', 'change');

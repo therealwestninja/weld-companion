@@ -1,6 +1,6 @@
 # Generator skills
 
-Open **Weld > Skills** on a Perchance generator. The library contains **195 presets in 18 sections** for full browser applications as well as creative generators. Dashboards and complex applications come first; all original 48 preset IDs remain compatible with favorites.
+Open **Weld > Skills** on a Perchance generator. The library contains **251 presets in 24 sections** for full browser applications as well as creative generators. Dashboards and complex applications come first; all original 48 preset IDs remain compatible with favorites. The last six sections are **direct skills** — ready-to-send prompts, moved here from Snippets so Skills is now the single home for all AI prompt-skills (the [Snippets tab](SNIPPETS.md) is code boilerplate only).
 
 | Section | Presets |
 | --- | ---: |
@@ -22,6 +22,12 @@ Open **Weld > Skills** on a Perchance generator. The library contains **195 pres
 | Dad-Chat projects | 29 |
 | Rebrand, simplify & privacy | 8 |
 | AI input helpers & toolkit | 13 |
+| 📐 Working rules (direct) | 10 |
+| 🧠 AI methods (direct) | 10 |
+| 🎯 Prompt engineering (direct) | 6 |
+| 🛡 Review & safety (direct) | 3 |
+| 🎨 Web layout & UI (direct) | 7 |
+| 🧊 3D & WebGL — Three.js (direct) | 7 |
 
 Browse collapsible sections or combine search, generator/application type, task mode and favorites. Generic tasks remain available for every type. Dashboard tasks cover feed adapters, financial calculations, provenance/freshness, terminal layouts, charts, recovery, report parity and AI analyst grounding. Advanced story/chat tasks cover branches, ensemble characters, memory, card interoperability, sync conflicts, vault recall and multimodal workflows. The prompts/models/plugins section covers compiled prompts, preset exchange, model capabilities, routing, reusable interfaces and agent/tool contracts.
 
@@ -35,6 +41,19 @@ A prompt for a card, lore, chat-log or Dad-Chat skill has two extra parts, place
 - **WORKED EXAMPLE**: a short concrete request and the shape of a good (and sometimes bad) result. The helper is told to adapt it, never copy its sample values.
 
 The skill detail view lists the packs included and lets you read each one before you send. Packs say they summarize public conventions; the project's own code and real sample files win, and the helper must report differences. Other skills are unchanged.
+
+## Direct skills — ready-to-send prompts
+
+The last four sections hold **direct skills**: a direct skill is a pre-written prompt, not a composed workflow. Its detail view shows a run badge (**Single-shot prompt** or **Multi-run prompt**) and a **The prompt that gets sent** disclosure with the full, editable text — there is no task/steps/check composition stage. These moved out of the old Snippets tab so Skills is the one place for AI prompt-skills.
+
+- **📐 Working rules** (10) — the author's working-rules (prove-the-wire, verify-as-wired, byte-identical gate, and the rest), as prompts you can drop on any task.
+- **🧠 AI methods** (10) — reusable methods (rotate-45, factory-build, reverse-treeshake, test-the-negative and friends) phrased as instructions to the helper, plus *Diagram the System* — pick the right diagram type from the question, lay it out so it reads (main path as a spine, branches hung off their owner, conditions on the edge), and emit clean Mermaid or inline SVG (adapted from the archify authoring method).
+- **🎯 Prompt engineering** (6) — prompt-shaping skills (tighten a prompt, add structure, write a system preamble, and so on).
+- **🛡 Review & safety** (3) — review and safety passes to run over generated output.
+- **🎨 Web layout & UI** (6) — the biggest "it looks AI-made" complaint, answered. *De-Slop a Layout* names the generic tells (centered column, Inter font, purple gradient, uniform rounded corners, timid spacing) and rewrites with intent; *Pick a Design Direction* derives one bold aesthetic from a concrete generation engine + five tonal dials (not an adjective) with a real type/color/space system; *Build a Striking Layout* produces the production HTML/CSS; a *Responsive & Mobile Pass* and *Visual Polish Micro-Pass* finish it; *Review a UI (slop rubric)* grades a layout like an independent reviewer — acceptance vetoes, the 480px three-second test, banned-defaults and data-realism checks, and a score out of 10; and *Node / Flow Editor UI* builds a node-graph editor (nodes, edges, drag-to-connect, pan/zoom) either in React Flow — with the setup rules an AI always gets wrong (import the stylesheet, size the parent, memoize `nodeTypes`, wire `onNodesChange`, handles inside custom nodes) — or hand-rolled in plain SVG + pointer events for a single-file Perchance page. Grounded in the anti-slop guidance from Anthropic's frontend-design / web-artifacts-builder skills, the oil-ui reviewer method, and the xyflow (React Flow) docs.
+- **🧊 3D & WebGL — Three.js** (7) — the "it can't make good 3D models" complaint, answered where the problem actually is. *Light, Tone & Grounding Rig* fixes the flat/plastic look (ACESFilmic tone mapping, sRGB, an IBL environment, a 3-point + rim light rig, grounded contact shadows); *Model by Blockout & Proportion* builds recognizable models by silhouette and ratio instead of a pile of default primitives; *Dial in PBR Materials* kills the plastic surface; *Stylized Low-Poly Look* makes simple geometry an intentional style; *Procedural Geometry from Parameters* generates meshes with correct normals/UVs and seeded variation; *3D Performance Budget* keeps it at 60fps (adaptive DPR, degrade order, context-loss handling); and *Combat & Game Feel* adds the systems that make a browser action game satisfying — hitstop, aim-snapping, input buffering, dodge priority, telegraphs, camera discipline, difficulty tuning (adapted from the guizang game-skill method).
+
+A direct skill's **Send to Perchance AI** and **Copy prompt** work as for any skill; a third **→ AI Helper** action loads the prompt straight into your own AI Helper input (Tools → Model chat, the OpenAI-compatible endpoint), so you can send it through your configured model instead of Perchance's. Any details you type are appended to the prompt verbatim.
 
 ## Dad-Chat projects (29 skills)
 
@@ -75,4 +94,4 @@ Favorites persist through Weld storage and contain only catalog IDs. Search, sel
 
 ## Development
 
-Edit `src/skills-core.js` (catalog and pure prompt composition), `src/skills-refs.js` (structure packs, preset-to-pack links and worked examples), `src/skills-dad.js` (Dad-Chat rows) and `src/skills-ui.js` (interface), then run `npm run build` and `npm run check`. The generated `SKILLS` block belongs to the build. Native helper internals are feature-detected by the shared `openPerchanceAI` adapter; live validation and installation in a userscript manager are separate checks.
+Edit `src/skills-core.js` (catalog and pure prompt composition), `src/skills-refs.js` (structure packs, preset-to-pack links and worked examples), `src/skills-dad.js` (Dad-Chat rows), `src/skills-direct.js` (the direct-skill prompts — the four `RULES`/`METHODS`/`PROMPTS`/`REVIEW` arrays) and `src/skills-ui.js` (interface), then run `npm run build` and `npm run check`. The generated `SKILLS` block belongs to the build. Native helper internals are feature-detected by the shared `openPerchanceAI` adapter; live validation and installation in a userscript manager are separate checks.
