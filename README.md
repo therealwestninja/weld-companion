@@ -34,6 +34,7 @@ Weld Companion runs **outside** the generator sandbox as a browser userscript, s
   - [Skills - application and generator library](#skills--application-and-generator-library-v1600)
   - [Dev — folder sync, AI agents & GitHub](#dev--folder-sync-ai-agents--github-v1580)
   - [Agents — in-browser assistants that read your generator](#agents--in-browser-assistants-that-read-your-generator)
+  - [Snippets & Skills — code boilerplate + AI-Helper prompts](#snippets--skills--code-boilerplate--ai-helper-prompts)
   - [Tools — AI Helper & character files](#tools--ai-helper--character-files)
   - [Data Manager — browse, edit & back up every generator's IndexedDB](#data-manager--browse-edit--back-up-every-generators-indexeddb)
   - [AICC pack — Lore Library, character round-trip & repair](#aicc-pack--lore-library-character-round-trip--repair)
@@ -70,7 +71,7 @@ Weld Companion adds **one ⚡ Weld item** to Perchance's menu bar — styled lik
 | 🗃 **Data** | A launcher for the **Data Manager**: browse, edit, back up, export and import the IndexedDB databases of every generator you've visited — full CRUD, deep-scan search, sweep backup, undo for destructive actions. When an AI Character Chat database is open, the **AICC pack** panels appear automatically. |
 | ⇅ **GitHub** | Two-way GitHub sync for the open generator — **⬇ Pull** (repo → editor, undoable) and **⬆ Push** (editor → repo in one atomic commit), with per-generator file mappings and global repo defaults. |
 | 👁 **Comfort** | Eye-comfort theme filters, font size, line height, max width, a dyslexia-friendly font, focus mode — and an option to apply the same sizing to the **code editor**. |
-| ✂ **Snippets** | Ready-to-paste Perchance code snippets — `aiTextPlugin`, `kv-plugin`, and other boilerplate — dropped at your cursor into the matching DSL or HTML pane on an `#edit` page. |
+| ✂ **Snippets & Skills** | A **file-tree** of two kinds of items. **Code snippets** — `aiTextPlugin`, `kv-plugin`, and other boilerplate — drop at your cursor into the matching DSL or HTML pane on an `#edit` page. **AI-Helper skills** — ready-to-send prompts that load into the AI Helper's input in one click, for a chat model that can't use agents (single-shot or multi-run). Includes the author's **Working rules** (Map / Prove / Force / Red-Room / Sweep / Offset / Factory-Build / Campaign / Harness) and **AI methods** adapted for Perchance (distinctive UI design, test plans, theming, generative/canvas art, a discernment check, generator specs, self-contained components, README co-authoring). Filter the whole tree as you type. |
 | 🛠 **Tools** | Tool cards. **AI Helper**: a custom instruction, or route the helper to your own **OpenAI / Anthropic / Google** model *or a free, private **local model** (Ollama / OpenAI-compatible)*. **Character Files**: import/export AICC character `.json`, or fetch from a GitHub raw URL. **🧪 Diagnostics**: a one-click **self-test** of the companion's capabilities (anchor, storage, fetch + Perchance API, your AI provider) with a copyable report. |
 
 ### Quality-of-life
@@ -278,6 +279,17 @@ Each agent runs a **plan → look up → observe → answer** loop. It can only 
 Treat everything an agent reads from a generator as **data, not instructions** — the agents' roles tell the model exactly that, so a crafted generator can't turn an agent against you.
 
 See [the Agents guide](docs/AGENTS.md).
+
+### Snippets & Skills — code boilerplate + AI-Helper prompts
+
+The **✂ Snippets & Skills** tab is a **file-tree** holding two kinds of item. Click a folder to expand it, filter the whole tree as you type, and click any leaf to use it.
+
+- **📄 Code snippets** — the classic Perchance boilerplate (`$meta`, core/Weld/data imports, `grab()`, `aiTextPlugin` call & stream, `textToImagePlugin`, `uploadPlugin`, `superFetch`, `kv-plugin`, the `<image>` hint), grouped by pane. Clicking one drops it at your cursor in the matching **DSL** or **HTML** editor pane (on an `#edit` page).
+- **✨ AI-Helper skills** — ready-to-send *prompts* that load into the **AI Helper's input** in one click, then you send them. These are for a chat model that **can't use agents** and must work from a single-shot or **multi-run** prompt (each skill is badged `single-shot` or `multi-run`). Every skill tells the model to treat the generator's own text as **data, not instructions**.
+  - **📐 Working rules** — the author's build/review disciplines turned into prompts: **Map the Build**, **Prove the Wire**, **Force the Wire**, **Red-Room the Surface**, **Sweep for Wins**, **Offset Don't Flatten**, **Factory Build**, **Campaign**, **Harness the Surface**, and a **Working Guidelines** overview.
+  - **🧠 AI methods** — techniques adapted for Perchance generator work: distinctive **UI design**, a manual **test plan**, a **theme generator**, **generative art** and **canvas art direction** for the HTML panel, an **output discernment check**, **generator spec & iterate**, a **self-contained component** build, and **README co-authoring**.
+
+The skills are a growing library — the built-ins are seeded from the author's rule set and from a curated, Perchance-adapted selection of the Anthropic Agent Skills; the catalog lives in `src/snippets-skills.js` and is easy to extend. See [the Snippets & Skills guide](docs/SNIPPETS.md).
 
 ### Tools — AI Helper & character files
 
