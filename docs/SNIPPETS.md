@@ -65,6 +65,30 @@ check**, **generator spec & iterate**, a **self-contained component** build, and
 co-authoring**. Each targets the HTML panel's JS/CSS, the DSL list layer, and Perchance's fixed image
 sizes where relevant.
 
+### Prompt engineering (`🎯`)
+
+Techniques for the **`root.aiTextPlugin` prompts inside your generator** — the AI the generator itself
+runs — lifted from Anthropic's prompt-engineering tutorial and cookbooks and kept model-agnostic (no
+Claude-only prefill tricks, so they work on the AI Helper's GPT endpoint and on `aiTextPlugin`):
+
+- **Prompt Builder (metaprompt)** — turn a one-line task + variable names into a full, structured prompt template.
+- **Refine Until It Passes** *(multi)* — a generate → self-critique-against-a-rubric → redraft loop that converges on `PASS`.
+- **Few-Shot Example Pack** — generate 3 diverse input→output examples to lock a prompt's format and voice.
+- **Schema-Locked JSON Output** — rewrite a prompt so it returns strict, parseable JSON the generator can consume.
+- **Hallucination Guard** — let the model say "don't know" and quote its evidence before answering.
+- **Split a Mega-Prompt** — decompose one overloaded call into a reliable chain of smaller ones.
+
+### Review & safety (`🛡`)
+
+Audit a generator for the threats that actually bite on Perchance — user/list text reaching `innerHTML`,
+runaway list recursion, broken odds, silent failures — lifted from the security-review and threat-model
+harnesses, using a "shapes not checklists" framing (describe the vulnerability's shape, assume issues
+exist, verify adversarially):
+
+- **Generator Security Review** *(multi)* — a phased senior-engineer audit, one surface per message, emitting JSON findings with severity + confidence.
+- **Generator Threat Model** — the four-question framework that scopes entry points → threats → mitigations.
+- **Edge-Input Attack Battery** — concrete breaking inputs (empty, huge, `<img onerror>`, recursion-triggering) with expected-vs-actual and the visible evidence to check.
+
 ## Adding your own skills
 
 The catalog is plain data in **`src/snippets-skills.js`** — two arrays, `RULES` and `METHODS`, of

@@ -13,6 +13,14 @@
   const LINE = '1px solid var(--wc-line,#555)';   // standard divider (the active-accent border is a deliberate exception)
   const fieldStyle = { width: '100%', boxSizing: 'border-box', border: LINE, borderRadius: '8px',
     padding: '10px', background: 'var(--wc-input,rgba(0,0,0,.18))', color: 'inherit', font: 'inherit' };
+  // Declutter: fold secondary controls behind a collapsed disclosure so fewer show at once.
+  function collapse(title, hint) {
+    const d = E('details', { class: 'wc-disclose' });
+    d.appendChild(E('summary', {}, [E('span', { text: title }), hint ? E('span', { class: 'wc-disclose-hint', text: hint }) : null]));
+    const body = E('div', { class: 'wc-disclose-body' });
+    d.appendChild(body);
+    return { el: d, body: body };
+  }
   function render(parent) {
     const slug = H.slug() || '';
     if (S.slug !== slug) {
@@ -133,32 +141,38 @@
     const mode = E('select', { 'aria-label': 'Task mode', style: fieldStyle }, [E('option', { value: '', text: 'Review & implementation' }),
       E('option', { value: 'review', text: 'Review only' }), E('option', { value: 'change', text: 'Make changes' })]);
     mode.value = S.mode; mode.addEventListener('change', () => { S.mode = mode.value; drawList(); });
-    wrap.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', margin: '12px 0' } },
+    wrap.appendChild(search);
+    const quick = collapse('Quick picks', 'common tasks');
+    quick.body.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' } },
       [['dashboard-architecture', 'Plan dashboard'], ['create-dashboard', 'Build an app'], ['fix-bugs', 'Fix problems'], ['custom-feature', 'Add a feature'], ['lorebook-builder', 'Build lorebook'], ['skybridge-integrate', 'Connect Skybridge'], ['ai-input-assist', 'Rewrite & Fill buttons'], ['card-spec-export', 'Tavern card export'], ['dad-diagnose', 'Diagnose Dad-Chat'], ['dad-add-feature', 'Add Dad-Chat feature'], ['dad-character-create', 'Dad-native character']].map(([id, title]) =>
         E('button', { type: 'button', class: 'wc-btn wc-mini', text: title, onclick: () => {
           S.selected = id; S.query = ''; S.category = ''; S.type = ''; S.mode = ''; S.favoritesOnly = false;
           search.value = ''; category.value = ''; type.value = ''; mode.value = ''; fav.checked = false;
           S.expanded.add(C.get(id).category); drawList(); drawDetail(); build();
         } }))));
-    wrap.appendChild(search);
-    wrap.appendChild(E('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,190px),1fr))', gap: '8px', marginTop: '8px' } }, [type, mode]));
-    wrap.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px', margin: '10px 0' } }, [category,
+    wrap.appendChild(quick.el);
+    const filters = collapse('Filters', 'type · mode · category');
+    filters.body.appendChild(E('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,190px),1fr))', gap: '8px', marginTop: '4px' } }, [type, mode]));
+    filters.body.appendChild(E('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px', margin: '10px 0 2px' } }, [category,
       E('label', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [fav, E('span', { text: 'Favorites only' })])]));
+    wrap.appendChild(filters.el);
     count = E('div', { style: { fontSize: '12px', opacity: '.7', marginBottom: '8px' }, 'aria-live': 'polite' }); wrap.appendChild(count);
     list = E('div', { 'aria-label': 'Skill presets', style: { display: 'grid', gap: '8px', maxHeight: '380px', overflowY: 'auto', padding: '2px' } }); wrap.appendChild(list);
     detail = E('div', { style: { borderTop: LINE, marginTop: '18px', paddingTop: '16px' } }); wrap.appendChild(detail);
-    wrap.appendChild(E('label', { for: 'wc-skill-details', text: 'Your goal or extra instructions (optional)' }));
+    const opts = collapse('Options', 'your goal · live findings · concise');
+    opts.body.appendChild(E('label', { for: 'wc-skill-details', text: 'Your goal or extra instructions (optional)' }));
     const details = E('textarea', { id: 'wc-skill-details', rows: '3', placeholder: 'What should change? Any style, feature or behavior to preserve?',
       style: Object.assign({}, fieldStyle, { marginTop: '6px', resize: 'vertical' }) });
-    details.value = S.details; details.addEventListener('input', () => { S.details = details.value; dirty(); }); wrap.appendChild(details);
+    details.value = S.details; details.addEventListener('input', () => { S.details = details.value; dirty(); }); opts.body.appendChild(details);
     const findings = E('input', { type: 'checkbox', 'aria-label': 'Include live findings' }); findings.checked = S.findings;
     findings.addEventListener('change', () => { S.findings = findings.checked; dirty(); });
-    wrap.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', margin: '10px 0' } },
+    opts.body.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', margin: '10px 0' } },
       [findings, E('span', { text: 'Include live findings (analyzed when you build the prompt)' })]));
     const concise = E('input', { type: 'checkbox', 'aria-label': 'Concise helper replies' }); concise.checked = S.concise;
     concise.addEventListener('change', () => { S.concise = concise.checked; dirty(); });
-    wrap.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', margin: '10px 0' } },
+    opts.body.appendChild(E('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', margin: '10px 0' } },
       [concise, E('span', { text: 'Concise helper replies (keep complete code & evidence)' })]));
+    wrap.appendChild(opts.el);
     wrap.appendChild(E('button', { type: 'button', class: 'wc-btn', text: 'Build prompt', onclick: build }));
     wrap.appendChild(E('label', { for: 'wc-skill-prompt', text: 'Instructions to send (editable)', style: { display: 'block', marginTop: '14px' } }));
     prompt = E('textarea', { id: 'wc-skill-prompt', rows: '9', style: Object.assign({}, fieldStyle, { margin: '6px 0 10px', resize: 'vertical', fontSize: '12px', lineHeight: '1.5' }) });

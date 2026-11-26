@@ -9,7 +9,7 @@ assert.equal(n.code, 14, '14 code snippets');
 assert.ok(n.skill >= 18, 'rules + methods present (>=18 skills)');
 assert.equal(n.total, n.code + n.skill);
 const t = C.tree();
-assert.deepEqual(t.children.map(f => f.id), ['code', 'rules', 'methods'], 'three top folders');
+assert.deepEqual(t.children.map(f => f.id), ['code', 'rules', 'methods', 'prompts', 'review'], 'five top folders');
 const code = t.children[0];
 assert.deepEqual(code.children.map(f => f.id), ['code-dsl', 'code-html'], 'code split by pane');
 assert.equal(t.children[1].children.length, 10, '10 working rules');
@@ -47,6 +47,6 @@ const red = C.search('red-room');
 const redLeaves = C.walk(red).filter(x => !C.isFolder(x) && x.id !== 'root');
 assert.ok(redLeaves.length >= 1 && redLeaves.every(l => /red/i.test(l.name + l.desc)), 'search matches by name/desc');
 assert.equal(C.walk(C.search('zzzznope')).filter(x => !C.isFolder(x) && x.id !== 'root').length, 0, 'no matches -> empty');
-assert.equal(C.search('').children.length, 3, 'empty query -> full tree');
+assert.equal(C.search('').children.length, 5, 'empty query -> full tree');
 
 console.log('Snippets core tests passed');
