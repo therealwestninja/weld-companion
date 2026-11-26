@@ -315,6 +315,7 @@
       if (!rp.cfg.owner || !rp.cfg.repo) throw new Error('Set your repo in the GitHub tab first.');
       const a = await fetchText(rp.r.dslUrl), b = await fetchText(rp.r.htmlUrl).catch(() => null);
       if (!live) A.repoState = 'The repo has the files. Open the editor to compare them.';
+      else if (b === null && live.html && live.html.trim()) A.repoState = '\u26a0 Fetched the repo DSL but could not fetch its HTML, so the two could not be fully compared. Push first to be safe.';
       else if (D.syncPlan({ dsl: live.dsl, html: live.html }, { dsl: a, html: b }, null).state === 'in-sync') A.repoState = '\u2713 The repo copy matches your editor.';
       else A.repoState = '\u26A0 The repo copy differs from your editor. Push first so the agent starts from your latest version.';
     } catch (e) { A.repoState = ''; A.error = e.message || String(e); }

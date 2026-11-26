@@ -10,6 +10,7 @@
   let host = null, unsub = null;
   const note = t => E('div', { class: 'wc-section-note', text: t });
   const small = { fontSize: '12px', opacity: '.75' };
+  const LINE = '1px solid var(--wc-line,#555)';   // the standard divider/border (the red #c0392b border is a deliberate exception)
   // el() sets attributes with setAttribute, so a false `disabled` would still disable the button: only pass it when true.
   const btn = (label, fn, extra) => { const a = Object.assign({ type: 'button', class: 'wc-btn wc-mini', text: label, onclick: fn }, extra || {}); if (!a.disabled) delete a.disabled; return E('button', a); };
   const V = () => H.vault || null;
@@ -117,7 +118,7 @@
   }
   function inspector(rerender) {
     const i = S.inspected; if (!i) return note('Select Inspect on a record to see its details.');
-    const wrap = E('div', { 'aria-label': 'Record inspector', style: { borderTop: '1px solid var(--wc-line,#555)', marginTop: '12px', paddingTop: '10px' } });
+    const wrap = E('div', { 'aria-label': 'Record inspector', style: { borderTop: LINE, marginTop: '12px', paddingTop: '10px' } });
     wrap.appendChild(E('div', { text: 'Inspector', style: { fontWeight: '600', marginBottom: '6px' } }));
     i.report.meta.forEach(m => wrap.appendChild(E('div', { style: { display: 'flex', gap: '8px', fontSize: '12px' } }, [E('span', { text: m[0], style: { minWidth: '110px', opacity: '.7' } }), E('span', { text: m[1], style: { wordBreak: 'break-all' } })])));
     const chat = i.report.chat;
@@ -142,7 +143,7 @@
     Object.keys(pres.tabs || {}).forEach(t => { if (C.GEN_RE.test(t)) tags.add(t); });
     const here = typeof H.slug === 'function' ? H.slug() : ''; if (here && C.GEN_RE.test(here)) tags.add(here);
     const list = Array.from(tags).sort();
-    const card = E('div', { 'data-family': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    const card = E('div', { 'data-family': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Dad-Chat family', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Any generator that stores copies under its own tag appears here. The companion only watches; it never routes chats or subscribes channels for a generator.' }));
     if (!list.length) { card.appendChild(note('No generator tags seen yet.')); return card; }
@@ -167,6 +168,7 @@
   // Files are only ever ADDED: a changed record gets a new file, an unchanged one is skipped, nothing is overwritten or deleted.
   const AUTO_KEY = 'backupFolderAuto';
   const F = { supported: false, handle: null, name: '', perm: 'none', auto: false, busy: false, error: '', last: null };
+  const folderReady = () => !!F.handle && F.perm === 'granted';   // the backup folder is chosen AND access is allowed
   const memKv = new Map();
   let dbp = null;
   function kvdb() {
@@ -219,7 +221,7 @@
   }
   // Copy every readable, non-stale record into the folder. Records holding plaintext secret-shaped values are held back.
   async function syncToFolder(manual) {
-    if (F.busy) return; if (!F.handle || F.perm !== 'granted') { if (manual) { F.error = 'Choose a backup folder and allow access first.'; draw(); } return; }
+    if (F.busy) return; if (!folderReady()) { if (manual) { F.error = 'Choose a backup folder and allow access first.'; draw(); } return; }
     F.busy = true; const res = { at: Date.now(), written: 0, skipped: 0, held: [], failed: 0 };
     try {
       load();
@@ -254,7 +256,7 @@
   }
   async function scanFolder() {
     if (L.busy) return;
-    if (!F.handle || F.perm !== 'granted') { F.error = 'Choose a backup folder and allow access first.'; draw(); return; }
+    if (!folderReady()) { F.error = 'Choose a backup folder and allow access first.'; draw(); return; }
     L.busy = true; L.plan = null; L.unreadable = 0; L.msg = ''; draw();
     try {
       load();
@@ -283,13 +285,13 @@
     L.busy = false; draw();
   }
   function importCard() {
-    const wrap = E('div', { 'data-import': '1', style: { marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--wc-line,#555)' } });
+    const wrap = E('div', { 'data-import': '1', style: { marginTop: '8px', paddingTop: '8px', borderTop: LINE } });
     wrap.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Load copies that other computers saved into this folder. You see what would change first. Chat copies already here are never overwritten; a source copy is replaced only by a newer one.' }));
-    wrap.appendChild(btn(L.busy ? 'Working...' : 'Check folder for new saves', () => { scanFolder(); }, { disabled: !F.handle || F.perm !== 'granted' || L.busy || F.busy }));
+    wrap.appendChild(btn(L.busy ? 'Working...' : 'Check folder for new saves', () => { scanFolder(); }, { disabled: !folderReady() || L.busy || F.busy }));
     const p = L.plan;
     if (p) {
       const n = p.add.length + p.update.length, sk = p.skipped;
-      wrap.appendChild(E('div', { 'data-import-summary': '1', style: { fontSize: '12px', margin: '6px 0' }, text: 'Read ' + L.files + ' file' + (L.files === 1 ? '' : 's') + (L.unreadable ? ' (' + L.unreadable + ' unreadable)' : '') + ': ' + p.add.length + ' new, ' + p.update.length + ' updated. Left alone: ' + (sk.present + sk.unchanged + sk.older) + ' already here or older, ' + (sk.operational + sk.legacy) + ' device-specific or legacy' + (sk.held ? ', ' + sk.held + ' held back for secret-shaped values' : '') + (sk.tombstoned ? ', ' + sk.tombstoned + ' deleted here on purpose' : '') + '.' }));
+      wrap.appendChild(E('div', { 'data-import-summary': '1', style: { fontSize: '12px', margin: '6px 0' }, text: 'Read ' + L.files + ' file' + (L.files === 1 ? '' : 's') + (L.unreadable ? ' (' + L.unreadable + ' unreadable)' : '') + ': ' + p.add.length + ' new, ' + p.update.length + ' updated. Left alone: ' + (sk.present + sk.unchanged + sk.older) + ' already here or older, ' + (sk.operational + sk.legacy) + ' device-specific or legacy' + (sk.held ? ', ' + sk.held + ' held back for secret-shaped values' : '') + (sk.tombstoned ? ', ' + sk.tombstoned + ' deleted here on purpose' : '') + (sk.invalid ? ', ' + sk.invalid + ' not recognized or malformed' : '') + '.' }));
       p.add.concat(p.update).slice(0, 60).forEach(it => wrap.appendChild(E('div', { style: { fontSize: '12px', wordBreak: 'break-all' }, text: (it.action === 'new' ? 'NEW ' : it.action === 'newer' ? 'NEWER ' : 'MERGE ') + it.key + ' · ' + C.fmtBytes(it.bytes) + ' · ' + it.note })));
       if (n > 60) wrap.appendChild(E('div', { style: small, text: '...and ' + (n - 60) + ' more.' }));
       if (!n) wrap.appendChild(E('div', { style: { fontSize: '12px' }, text: 'Everything in the folder is already here.' }));
@@ -304,9 +306,12 @@
     load();
     const recs = [];
     (S.rows || []).forEach(r => { const k = C.parseKey(r.key).kind; if (r.stale || r.parseError || (k !== 'chat-copy' && k !== 'snapshot')) return; const rec = full(r.gmKey); if (rec && !rec.unreadable && !rec.parseError) recs.push({ key: r.key, caller: r.caller, value: rec.value }); });
-    D.found = C.findDuplicates(recs); D.sel = new Set();
+    try { D.found = C.findDuplicates(recs); }
+    catch (e) { D.found = { exact: [], near: [], left: 0, skipped: 0 }; say('Could not scan for duplicates — some copies could not be compared. Nothing was changed.'); draw(); return; }
+    D.sel = new Set();
     D.found.exact.forEach(g => g.drop.forEach(x => D.sel.add(x.caller + '\u0000' + x.key)));
-    say(D.found.exact.length || D.found.near.length ? 'Found ' + D.found.exact.length + ' exact duplicate group' + (D.found.exact.length === 1 ? '' : 's') + ' and ' + D.found.near.length + ' possible group' + (D.found.near.length === 1 ? '' : 's') + '.' : 'No duplicates found.');
+    const skipNote = D.found.skipped ? ' ' + D.found.skipped + ' cop' + (D.found.skipped === 1 ? 'y' : 'ies') + ' could not be compared and were left alone.' : '';
+    say((D.found.exact.length || D.found.near.length ? 'Found ' + D.found.exact.length + ' exact duplicate group' + (D.found.exact.length === 1 ? '' : 's') + ' and ' + D.found.near.length + ' possible group' + (D.found.near.length === 1 ? '' : 's') + '.' : 'No duplicates found.') + skipNote);
     draw();
   }
   function askAIAboutDups() {
@@ -316,7 +321,7 @@
   }
   async function runCleanup() {
     if (!D.found || D.busy) return;
-    if (!F.handle || F.perm !== 'granted') { say('Choose a backup folder and allow access first. Duplicates are only deleted after they are safely saved there.', true); return draw(); }
+    if (!folderReady()) { say('Choose a backup folder and allow access first. Duplicates are only deleted after they are safely saved there.', true); return draw(); }
     D.busy = true; draw();
     let gone = 0, unsaved = 0;
     try {
@@ -344,7 +349,7 @@
     D.found = null; D.sel = new Set(); D.busy = false; load(); draw();
   }
   function cleanupCard() {
-    const card = E('div', { 'data-cleanup': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    const card = E('div', { 'data-cleanup': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Cleanup duplicates', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Finds copies with identical content. Only exact duplicates can be deleted here, the newest copy is always kept, and each one is deleted only after it is confirmed saved in your backup folder. Possible duplicates (same size, different content) are listed for you or the AI helper to judge.' }));
     card.appendChild(btn('Find duplicates', () => findDups(), { disabled: D.busy || !(S.rows && S.rows.length) }));
@@ -365,9 +370,9 @@
     if (f.exact.length || f.near.length) card.appendChild(E('div', { style: { fontSize: '12px', marginTop: '6px', opacity: '.75' }, text: 'The AI helper gets names, dates and counts only, never chat text. You press Ask yourself there.' }));
     const row = E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' } });
     if (f.exact.length || f.near.length) row.appendChild(btn('Ask the AI helper to review', () => askAIAboutDups(), { disabled: D.busy }));
-    if (f.exact.length) row.appendChild(btn('Delete ' + D.sel.size + ' selected duplicate' + (D.sel.size === 1 ? '' : 's'), () => { runCleanup(); }, { disabled: D.busy || !D.sel.size || !F.handle || F.perm !== 'granted' }));
+    if (f.exact.length) row.appendChild(btn('Delete ' + D.sel.size + ' selected duplicate' + (D.sel.size === 1 ? '' : 's'), () => { runCleanup(); }, { disabled: D.busy || !D.sel.size || !folderReady() }));
     card.appendChild(row);
-    if (f.exact.length && (!F.handle || F.perm !== 'granted')) card.appendChild(note('Deleting needs a backup folder with access allowed, so every copy is saved first.'));
+    if (f.exact.length && (!folderReady())) card.appendChild(note('Deleting needs a backup folder with access allowed, so every copy is saved first.'));
     return card;
   }
   let syncTimer = null;
@@ -380,7 +385,7 @@
     if (host) draw();
   }
   function folderCard() {
-    const card = E('div', { 'data-folder': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    const card = E('div', { 'data-folder': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Backup location', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Choose any folder on a drive or inside a cloud-synced folder (Google Drive, OneDrive, iCloud, Dropbox). Copies are saved there as files that are only ever added: nothing is overwritten or deleted, so browser cache clears cannot touch them.' }));
     if (!F.supported) card.appendChild(E('div', { style: { fontSize: '12px', color: '#e0a030' }, text: 'This browser cannot open folders (Chrome or Edge can). The Download buttons below still work.' }));
@@ -389,7 +394,7 @@
     const row = E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', margin: '6px 0' } });
     row.appendChild(btn(F.handle ? 'Change folder...' : 'Choose folder...', () => { chooseFolder(); }, { disabled: !F.supported }));
     if (F.handle && F.perm !== 'granted') row.appendChild(btn('Allow access', () => { allowFolder(); }));
-    row.appendChild(btn('Save all to folder now', () => { syncToFolder(true); }, { disabled: !F.handle || F.perm !== 'granted' || F.busy }));
+    row.appendChild(btn('Save all to folder now', () => { syncToFolder(true); }, { disabled: !folderReady() || F.busy }));
     if (F.handle) row.appendChild(btn('Disconnect folder', () => { forgetFolder(); }, { 'aria-label': 'Disconnect folder (nothing in it is deleted)' }));
     card.appendChild(row);
     const auto = E('input', { type: 'checkbox', 'aria-label': 'Save new backups to the folder automatically' }); auto.checked = F.auto;
@@ -452,7 +457,7 @@
     plain('Other vault-prefix keys', inv.other, true, 'Keys under weld:genvault: whose folder name is not a valid generator name.');
     if (S.secrets) {
       wrap.appendChild(E('div', { text: 'Secret scan', style: { fontWeight: '600', marginTop: '10px' } }));
-      if (!S.secrets.length) wrap.appendChild(note('No plaintext secret-shaped values found.'));
+      if (!S.secrets.length) wrap.appendChild(note('No plaintext secret-shaped config values found.'));
       S.secrets.forEach(h => wrap.appendChild(E('div', { 'data-secret': '1', style: { fontSize: '12px' }, text: '⚠ ' + h.key + ': ' + h.paths.join(', ') + ' (value hidden)' })));
     }
     wrap.appendChild(inspector(rerender));

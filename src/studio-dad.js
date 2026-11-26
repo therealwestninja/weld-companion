@@ -15,6 +15,8 @@
   const values = v => Array.isArray(v) ? v : obj(v) ? Object.values(v) : [];
   const keyArray = k => Array.isArray(k) ? k.map(s => str(s).trim()).filter(Boolean) : typeof k === 'string' ? k.split(',').map(s => s.trim()).filter(Boolean) : [];
   function uniqueId(prefix) { return prefix + C.id().replace(/-/g, '').slice(0, 14); }
+  const idSuffix = v => str(v).replace(/[^a-z0-9]/gi, '').slice(0, 16);            // a Studio id -> a Dad-safe id suffix
+  const dadPriority = v => Math.min(100, Math.max(1, Math.round(v) || 10));        // Studio lore priority -> Dad [1,100] int, default 10
 
   // ---- detection ----
   function detect(raw) {
@@ -112,9 +114,9 @@
   function dadLoreEntries(p, c) {
     const out = {};
     p.lore.filter(l => C.visible(l, c.id)).forEach(l => {
-      const id = 'lore_' + l.id.replace(/[^a-z0-9]/gi, '').slice(0, 16);
-      const keys = [...new Set(l.keywords.split(',').concat(l.secondaryKeys.split(',')).map(k => k.trim()).filter(Boolean))];
-      out[id] = { id, name: l.title, keys, content: l.body, priority: Math.min(100, Math.max(1, Math.round(l.priority) || 10)), constant: l.activation === 'always',
+      const id = 'lore_' + idSuffix(l.id);
+      const keys = [...new Set(keyArray(l.keywords).concat(keyArray(l.secondaryKeys)))];
+      out[id] = { id, name: l.title, keys, content: l.body, priority: dadPriority(l.priority), constant: l.activation === 'always',
         enabled: l.activation !== 'manual', vectorized: false, excludeRecursion: !l.recursive, scanDepth: null };
     });
     return out;
@@ -125,13 +127,13 @@
     const rows = rowsFromExamples(c.examples);
     const sections = Object.keys(FIELD_SECTIONS).filter(k => c[k].trim()).map(k => ({ header: FIELD_SECTIONS[k], content: c[k] }));
     return { type: 'dad-char', version: 2, data: {
-      id: 'char_studio_' + c.id.replace(/[^a-z0-9]/gi, '').slice(0, 16), name: c.name, avatar: c.avatar || '',
+      id: 'char_studio_' + idSuffix(c.id), name: c.name, avatar: c.avatar || '',
       description: c.creatorNotes || c.personality.replace(/\s+/g, ' ').slice(0, 240), systemPrompt: c.systemPrompt,
       profile: { name: c.name, age: '', gender: '', appearance: '', personality: c.personality, background: '', scenario: c.scenario, systemNote: '' },
       customSections: sections, exampleDialogue: rows,
       firstMessage: [c.opening].concat(c.alternateGreetings).filter(g => g.trim()), reminderMessage: c.postHistory,
       userOverride: { name: withPersona ? p.persona.name : '', description: withPersona ? p.persona.description : '', avatar: null }, preInstruction: c.systemPrompt.trim() ? 'custom' : 'roleplay',
-      preInstructionCustom: c.systemPrompt, tags: c.tags.split(',').map(t => t.trim()).filter(Boolean),
+      preInstructionCustom: c.systemPrompt, tags: keyArray(c.tags),
       chatBackground: '', bgBlur: '0', bgOpacity: '1', imagePrefix: '', visualMap: '', lorebook: dadLoreEntries(p, c),
       authorNote: { text: c.depthPrompt, depth: c.depthPromptDepth, role: 'system', enabled: !!c.depthPrompt.trim() }, lastModified: Date.now() } };
   }
@@ -147,11 +149,11 @@
   function toDadWorld(p) {
     const entries = {};
     p.lore.forEach(l => {
-      const id = 'we_' + l.id.replace(/[^a-z0-9]/gi, '').slice(0, 16);
-      entries[id] = { id, name: l.title, keys: l.keywords.split(',').map(k => k.trim()).filter(Boolean), content: l.body, priority: Math.min(100, Math.max(1, Math.round(l.priority) || 10)),
+      const id = 'we_' + idSuffix(l.id);
+      entries[id] = { id, name: l.title, keys: keyArray(l.keywords), content: l.body, priority: dadPriority(l.priority),
         constant: l.activation === 'always', vectorized: false, enabled: l.activation !== 'manual', excludeRecursion: !l.recursive, scanDepth: null };
     });
-    return { type: 'dad-world', version: 1, world: { id: 'world_' + p.id.replace(/[^a-z0-9]/gi, '').slice(0, 16), name: p.name, description: [p.world.description, p.world.rules && 'RULES\n' + p.world.rules].filter(Boolean).join('\n\n'), entries } };
+    return { type: 'dad-world', version: 1, world: { id: 'world_' + idSuffix(p.id), name: p.name, description: [p.world.description, p.world.rules && 'RULES\n' + p.world.rules].filter(Boolean).join('\n\n'), entries } };
   }
   function toBibleText(p) { return [p.world.description, p.world.rules].filter(x => x.trim()).join('\n\n') + '\n'; }
   function chatText(p, s) {
@@ -272,13 +274,16 @@
     let pos = view.getUint32(end + 16, true), total = 0;
     const files = [];
     for (let i = 0; i < count; i++) {
+      if (pos < 0 || pos + 46 > bytes.length) throw new Error('Corrupt zip directory.');
       if (view.getUint32(pos, true) !== 0x02014b50) throw new Error('Corrupt zip directory.');
       const method = view.getUint16(pos + 10, true), csize = view.getUint32(pos + 20, true), usize = view.getUint32(pos + 24, true);
       const nlen = view.getUint16(pos + 28, true), elen = view.getUint16(pos + 30, true), clen = view.getUint16(pos + 32, true), local = view.getUint32(pos + 42, true);
+      if (pos + 46 + nlen > bytes.length) throw new Error('Corrupt zip directory.');
       const name = TD.decode(bytes.subarray(pos + 46, pos + 46 + nlen));
       pos += 46 + nlen + elen + clen;
       if (name.endsWith('/')) continue;
       if (usize > MAX_ENTRY || total + usize > MAX_TOTAL) throw new Error('The zip is too large to open here.');
+      if (local < 0 || local + 30 > bytes.length) throw new Error('Corrupt zip directory.');
       const lnlen = view.getUint16(local + 26, true), lelen = view.getUint16(local + 28, true), start = local + 30 + lnlen + lelen;
       const raw = bytes.subarray(start, start + csize);
       if (method !== 0 && method !== 8) throw new Error('Unsupported zip compression in ' + name + '.');
@@ -352,7 +357,7 @@
         addLore(plan, loreList(w.entries), 'World book entries'); break;
       }
       case 'dad-full': {
-        const cfg = raw.config, book = values(cfg.characterBook).filter(c => obj(c) && typeof c.name === 'string');
+        const cfg = obj(raw.config) ? raw.config : {}, book = values(cfg.characterBook).filter(c => obj(c) && typeof c.name === 'string');
         const idMap = {};
         book.slice(0, LIMITS.characters).forEach(d => { const it = addCharacter(plan, d, { skipPersona: true }); it.checked = !/^char_preset_/.test(str(d.id)); idMap[str(d.id)] = it; if (!it.checked) it.detail += ' (built-in preset)'; });
         values(obj(cfg.worldBook) ? cfg.worldBook.worlds : null).filter(obj).forEach(w => {
@@ -391,19 +396,19 @@
   async function readFile(file, options) {
     const opts = options || {}, name = str(file.name), lower = name.toLowerCase(), plan = newPlan(name.replace(/\.[^.]+$/, ''));
     const apply = async (f, sub) => {
-      const n = str(f.name).toLowerCase();
+      const n = str(f.name).toLowerCase(), base = str(f.name).replace(/\.[^.]+$/, '');
       if (n.endsWith('.png') || f.type === 'image/png') {
         const buf = f.bytes || new Uint8Array(await f.arrayBuffer());
         cardPlan(sub, C.pngReadCard(buf).card, f.name); sub.format = 'Character card (PNG)';
       } else if (n.endsWith('.jsonl')) {
         const res = C.fromChatJsonl(typeof f.text === 'function' ? await f.text() : TD.decode(f.bytes));
-        item(sub, 'session', 'Chat "' + str(f.name).replace(/\.[^.]+$/, '') + '"', res.messages.length + ' messages', { session: { name: str(f.name).replace(/\.[^.]+$/, ''), messages: res.messages, memories: [], summary: '' }, characterRef: '', characterName: res.characterName, userName: res.userName });
+        item(sub, 'session', 'Chat "' + base + '"', res.messages.length + ' messages', { session: { name: base, messages: res.messages, memories: [], summary: '' }, characterRef: '', characterName: res.characterName, userName: res.userName });
         sub.format = 'Chat log (JSONL)';
       } else if (n.endsWith('.txt') || n.endsWith('.md') || f.type === 'text/plain') {
         const t = typeof f.text === 'function' ? await f.text() : TD.decode(f.bytes);
         if (t.length > 5000000) throw new Error('Text file exceeds 5 MB.');
-        if (looksLikeChat(t)) { const m = fromChatText(t, opts.userNames); item(sub, 'session', 'Chat "' + str(f.name).replace(/\.[^.]+$/, '') + '"', m.length + ' messages (from text)', { session: { name: str(f.name).replace(/\.[^.]+$/, ''), messages: m, memories: [], summary: '' }, characterRef: '', characterName: '', userName: '' }); sub.format = 'Chat text'; }
-        else { item(sub, 'world', 'World bible "' + str(f.name).replace(/\.[^.]+$/, '') + '"', t.length + ' characters', { description: cap(t.trim()), checked: true }); sub.format = 'World bible text'; }
+        if (looksLikeChat(t)) { const m = fromChatText(t, opts.userNames); item(sub, 'session', 'Chat "' + base + '"', m.length + ' messages (from text)', { session: { name: base, messages: m, memories: [], summary: '' }, characterRef: '', characterName: '', userName: '' }); sub.format = 'Chat text'; }
+        else { item(sub, 'world', 'World bible "' + base + '"', t.length + ' characters', { description: cap(t.trim()), checked: true }); sub.format = 'World bible text'; }
       } else if (n.endsWith('.js')) {
         const t = typeof f.text === 'function' ? await f.text() : TD.decode(f.bytes);
         const persona = personaFromScript(t);

@@ -1253,8 +1253,8 @@
     '.wc-tab:hover{color:var(--wc-ink);background:var(--wc-surface-2);}',
     '.wc-tab.wc-on{color:var(--wc-ink);background:var(--wc-surface-3);box-shadow:inset 0 -2px 0 var(--wc-arc);}',
     '.wc-tab .wc-ti{font-size:14px;}',
-    '.wc-body{overflow:auto;padding:16px;scrollbar-width:thin;scrollbar-color:var(--wc-faint) transparent;}',
-    '.wc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px 20px;align-items:start;}',
+    '.wc-body{flex:1 1 auto;min-height:0;overflow:auto;padding:16px;scrollbar-width:thin;scrollbar-color:var(--wc-faint) transparent;}',   // min-height:0 lets this scroll inside the max-height-capped, overflow:hidden drawer instead of the tail being clipped (flex-column gotcha)
+    '.wc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(290px,100%),1fr));gap:16px 20px;align-items:start;}',
     '.wc-col{display:flex;flex-direction:column;gap:8px;min-width:0;}',
     '.wc-card{border:1px solid var(--wc-line-2);border-radius:11px;padding:12px 13px;background:var(--wc-surface-2);}',
     '.wc-body::-webkit-scrollbar{width:9px;} .wc-body::-webkit-scrollbar-thumb{background:var(--wc-line);border-radius:9px;}',
@@ -1297,7 +1297,7 @@
     '.wc-check input:checked + .wc-sw::after{transform:translateX(16px);background:var(--wc-arc);box-shadow:0 0 8px var(--wc-arc);}',
     // ---- lists ----
     '.wc-list{list-style:none;margin:0;padding:0;}',
-    '.wc-list.wc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:2px 12px;align-content:start;}',
+    '.wc-list.wc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:2px 12px;align-content:start;}',
     '.wc-list.wc-grid > .wc-span{grid-column:1 / -1;}',
     '.wc-list li{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;',
     '  transition:background .12s;position:relative;}',
@@ -1896,6 +1896,41 @@
       el('label', { class: 'wc-section-note', for: 'wc-sb-ask', style: { flex: '1', margin: '0', cursor: 'pointer' }, text: 'Ask before a generator uses Skybridge (off = always allowed)' })
     ]));
     cardSb.appendChild(row([ el('button', { class: 'wc-btn', text: 'Reset permissions', title: 'Forget every saved allow/deny answer (only used when asking is on)', onclick: function () { gset('sb:perm', {}); toast('Skybridge: permissions reset'); } }) ]));
+    // Local/private host allowlist: by default a generator's web-fetch cannot reach
+    // localhost or your LAN (SSRF protection). Add a host here to let generators you
+    // approve reach a service YOU run on your own network — nothing else is opened.
+    cardSb.appendChild(el('div', { class: 'wc-subhead', text: 'Allowed local / private hosts' }));
+    cardSb.appendChild(note('By default generators cannot fetch from localhost or your private network. Add a host you run and trust (e.g. a self-hosted API or local model) to let an approved generator reach it. Only hosts you add here are ever reachable — add nothing you do not control.'));
+    var sbAllowList = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', margin: '4px 0' } });
+    function sbAllowlistRaw() { var v = gget('fetchAllowlist', []); return Array.isArray(v) ? v : []; }
+    function sbAllowHostOf(raw) {
+      var s = String(raw || '').trim(); if (!s) return '';
+      try { if (/:\/\//.test(s) || /\//.test(s)) { var u = new URL(/:\/\//.test(s) ? s : 'http://' + s); return (u.hostname || '').toLowerCase(); } } catch (e) { return ''; }
+      return s.toLowerCase().replace(/^\[|\]$/g, '').replace(/:\d+$/, '');   // bare host, drop any [brackets] and :port
+    }
+    function sbAllowRender() {
+      sbAllowList.innerHTML = '';
+      var hosts = sbAllowlistRaw();
+      if (!hosts.length) { sbAllowList.appendChild(el('div', { class: 'wc-section-note', style: { opacity: '.7', margin: '0' }, text: 'No hosts allowed — generators cannot reach your local network.' })); return; }
+      hosts.forEach(function (h, i) {
+        sbAllowList.appendChild(el('div', { class: 'wc-row', style: { alignItems: 'center', gap: '6px', margin: '0' } }, [
+          el('code', { style: { flex: '1', fontFamily: 'var(--wc-mono)', fontSize: '12px', color: 'var(--wc-ink)', wordBreak: 'break-all' }, text: h }),
+          el('button', { class: 'wc-toolbtn', title: 'Remove ' + h, text: '×', onclick: function () { var a = sbAllowlistRaw(); a.splice(i, 1); gset('fetchAllowlist', a); sbAllowRender(); toast('Removed ' + h); } })
+        ]));
+      });
+    }
+    var sbAllowInput = el('input', { class: 'wc-field', type: 'text', placeholder: '192.168.1.50  ·  my-nas.local  ·  127.0.0.1', style: { flex: '1' } });
+    function sbAllowAdd() {
+      var host = sbAllowHostOf(sbAllowInput.value);
+      if (!host || !/^[a-z0-9.\-:]+$/.test(host)) { toast('Enter a valid host (name or IP)'); return; }
+      var a = sbAllowlistRaw();
+      if (a.indexOf(host) === -1) { a.push(host); gset('fetchAllowlist', a); sbAllowInput.value = ''; sbAllowRender(); toast('Allowed ' + host); }
+      else { sbAllowInput.value = ''; toast(host + ' is already allowed'); }
+    }
+    sbAllowInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); sbAllowAdd(); } });
+    cardSb.appendChild(sbAllowList);
+    cardSb.appendChild(el('div', { class: 'wc-row', style: { gap: '6px', marginTop: '4px' } }, [ sbAllowInput, el('button', { class: 'wc-btn wc-mini', text: 'Allow host', onclick: sbAllowAdd }) ]));
+    sbAllowRender();
     colB.appendChild(cardSb);
 
     var gOwner = field(base.owner, 'default owner (all generators)', 'github username');
@@ -2242,11 +2277,11 @@
   // Pinned results are arbitrary generator HTML rendered into the privileged top
   // frame. Strip active content before insertion: drop script/style/iframe/etc,
   // remove on* event-handler attributes, and neutralise javascript: URLs.
-  function wcSanitizeHtml(html){ try { var d=document.createElement('div'); d.innerHTML=String(html||''); d.querySelectorAll('script,style,iframe,object,embed,link,meta').forEach(function(n){n.remove();}); d.querySelectorAll('*').forEach(function(el){ for(var i=el.attributes.length-1;i>=0;i--){ var a=el.attributes[i].name, v=el.attributes[i].value||''; if(/^on/i.test(a)||(/^(href|src|xlink:href)$/i.test(a)&&/^\s*javascript:/i.test(v))) el.removeAttribute(a); } }); return d.innerHTML; } catch(e){ return ''; } }
+  function wcSanitizeHtml(html){ try { var doc=new DOMParser().parseFromString(String(html||''),'text/html'); doc.querySelectorAll('script,style,iframe,object,embed,link,meta').forEach(function(n){n.remove();}); doc.querySelectorAll('*').forEach(function(el){ for(var i=el.attributes.length-1;i>=0;i--){ var a=el.attributes[i].name, v=el.attributes[i].value||''; if(/^on/i.test(a)||(/^(href|src|xlink:href)$/i.test(a)&&/^\s*javascript:/i.test(v))) el.removeAttribute(a); } }); return doc.body ? doc.body.innerHTML : ''; } catch(e){ return ''; } }
   function pinResult(html) {
     var pins = gget('pins:' + genName(), []);
     pins.unshift({ html: html, t: Date.now() }); if (pins.length > 12) pins = pins.slice(0, 12);
-    gset('pins:' + genName(), pins); renderPins();
+    var ok = gset('pins:' + genName(), pins); renderPins(); return ok;
   }
   function renderPins() {
     var tray = $('.wc-pin-tray'); if (tray) tray.remove();
@@ -2280,7 +2315,7 @@
     }
     host.appendChild(toolBtn('\u2398', 'Copy output', function () { var o = outputNode(); if (o) copyText(nodeToText(o)); }));
     host.appendChild(toolBtn('\u2913', 'Save output as .txt', function () { var o = outputNode(); if (o) download(genName() + '-output.txt', nodeToText(o)); }));
-    host.appendChild(toolBtn('\u{1F4CC}', 'Pin this result', function () { var o = outputNode(); if (o) { pinResult(o.innerHTML); toast('Pinned'); } }));
+    host.appendChild(toolBtn('\u{1F4CC}', 'Pin this result', function () { var o = outputNode(); if (o && pinResult(o.innerHTML)) toast('Pinned'); }));
     if (histStack.length > 1) {
       var grp = el('span', { class: 'wc-histgroup' }, [
         el('button', { class: 'wc-toolbtn', title: 'Previous result', onclick: function () { if (histPos > 0) { restore(histPos - 1); renderResultTools(); } } }, [ el('span', { text: '\u2190' }) ]),
@@ -2313,10 +2348,11 @@
   // ============================================================ F. resizable inputs
   function enhanceInputs() {
     $$('textarea').forEach(function (ta) {
-      if (ta.dataset.wcResize) return; ta.dataset.wcResize = '1';
+      if (ta.dataset.wcResize) return;
       if (ta.id === 'aiHelperInputEl' || ta.id === 'aiAgentInputEl') return;
       if (ta.closest && ta.closest('.wc-root, [role="dialog"], dialog, [class*="modal" i], [class*="popup" i], [class*="dialog" i], [class*="overlay" i], [class*="settings" i]')) return;
-      if (!ta.offsetParent || ta.clientHeight < 40) return;
+      if (!ta.offsetParent || ta.clientHeight < 40) return;   // hidden/short now: leave UNflagged so a later pass can enhance it once it is visible
+      ta.dataset.wcResize = '1';
       ta.style.resize = ta.style.resize || 'vertical';
       // Enter submits / Shift+Enter newline normalization is risky to force globally;
       // instead add an unobtrusive expand button.
@@ -3173,12 +3209,28 @@
     if (p.slice(0, 5).every(function (part) { return part === 0; }) && p[5] === 0xffff) return sbPrivateIpv4(p[6] >> 8, p[6] & 0xff);
     return false;
   }
+  // The user's own allowlist of local/private hosts a generator they approve may reach
+  // (e.g. a self-hosted API on their LAN). It is read ONLY from GM storage, which the
+  // page can never write, so a malicious generator still cannot reach an internal host
+  // it did not already have the user's explicit, revocable per-host consent for. An
+  // entry matches a host exactly (lowercased); an empty entry never matches anything.
+  function sbFetchAllowlist() {
+    var v = gget('fetchAllowlist', []);
+    return Array.isArray(v) ? v.filter(function (h) { return typeof h === 'string' && h.trim(); }).map(function (h) { return h.trim().toLowerCase(); }) : [];
+  }
+  function sbHostAllowed(host) {
+    if (!host) return false;
+    return sbFetchAllowlist().indexOf(String(host).toLowerCase()) !== -1;
+  }
   function sbFetchGuard(rawUrl) {
     var u;
     try { u = new URL(String(rawUrl)); } catch (e) { return { ok: false, reason: 'bad-url' }; }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, reason: 'scheme-blocked' };
     var host = (u.hostname || '').toLowerCase();
     if (!host) return { ok: false, reason: 'no-host' };
+    // The user explicitly allowlisted this exact host -> permit it past the local/private
+    // blocks (scheme is still enforced above; redirects are still rejected by the caller).
+    if (sbHostAllowed(host)) return { ok: true, url: u.href, allowlisted: true };
     if (host === 'localhost' || host === '0.0.0.0') return { ok: false, reason: 'local-blocked' };
     if (/\.local$|\.internal$|\.localhost$/.test(host)) return { ok: false, reason: 'local-blocked' };
     var m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -4012,18 +4064,27 @@
       window.addEventListener('resize', function () { if (WC_TAB) positionDrawer(); });
       window.addEventListener('scroll', function () { if (!WC_TAB) return; var b = perchanceBar(); if (b && b.getBoundingClientRect().bottom <= 0) return closeDrawer(); positionDrawer(); }, true);
 
-      // observe output: refresh history snapshots + the drawer's result tools
-      var out = outputNode();
-      if (out) { snapshotOutput();
+      // observe output: refresh history snapshots + the drawer's result tools.
+      // The output node may not exist yet at document-idle (generators that render
+      // their result asynchronously), so attach lazily and re-try on body mutations
+      // instead of giving up once — otherwise undo-reroll stays permanently dead for
+      // that whole class of generators.
+      var outObserved = false;
+      function ensureOutputObserver() {
+        if (outObserved) return;
+        var out = outputNode(); if (!out) return;
+        outObserved = true;
+        snapshotOutput();
         new MutationObserver(debounce(function () { snapshotOutput(); if (WC_TAB) renderResultTools(); }, 250)).observe(out, { childList: true, subtree: true, characterData: true });
       }
+      ensureOutputObserver();
       var enhance = debounce(function () { enhanceInputs(); applyHelperInstruction(); hookHelperSubmit(); enhanceNativeAIReplies(); }, 400);
       enhance();
       // If Perchance's bar appears after we loaded (or wasn't there yet), add our
       // single Weld item to it then. We never inject a competing bar.
       var barWatch = debounce(function () { if (!weldItem() && perchanceBar()) buildBar(); }, 500);
       var sbPing = debounce(function () { sbAnnounce(); }, 400);   // greet a generator iframe injected after load
-      new MutationObserver(function () { enhance(); barWatch(); sbPing(); }).observe(document.body, { childList: true, subtree: true });
+      new MutationObserver(function () { ensureOutputObserver(); enhance(); barWatch(); sbPing(); }).observe(document.body, { childList: true, subtree: true });
     } catch (e) { /* never break the host page */ if (window.console) console.warn('[WeldCompanion]', e); }
   }
 
@@ -8958,12 +9019,72 @@
     if (local.endpoints) c.endpoints = local.endpoints;
     return c;
   }
-  function exportState() {
+  // ---- opt-in encrypted credential carry (feature B2) ----------------------------------
+  // The default export above STILL strips every secret. This lets a user who wants to move
+  // to another device carry their own API keys/tokens, but only encrypted under a passphrase
+  // THEY choose: the file never holds a plaintext key, nothing auto-syncs, and a lost/leaked
+  // file is inert without the passphrase. Decryption (and restore) needs an explicit passphrase
+  // on the other end. This does not weaken the scrub; it adds a locked box beside it.
+  function wcSecretsBundle() {
+    var ai = gget('ai', {}) || {}, out = {};
+    if (ai.keys && typeof ai.keys === 'object' && Object.keys(ai.keys).length) out.aiKeys = ai.keys;
+    if (ai.endpoints && typeof ai.endpoints === 'object' && Object.keys(ai.endpoints).length) out.aiEndpoints = ai.endpoints;
+    var gh = gget('ghToken', undefined); if (gh) out.ghToken = gh;
+    var br = gget('bridge', undefined); if (br) out.bridge = br;
+    return out;
+  }
+  function wcSubtle() { return (typeof crypto !== 'undefined' && crypto.subtle) ? crypto.subtle : null; }
+  function wcDeriveKey(passphrase, salt, iter, usage) {
+    var subtle = wcSubtle();
+    return subtle.importKey('raw', new TextEncoder().encode(String(passphrase)), 'PBKDF2', false, ['deriveKey'])
+      .then(function (base) { return subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, usage); });
+  }
+  function wcEncryptSecrets(obj, passphrase) {
+    var subtle = wcSubtle(); if (!subtle) return Promise.reject(new Error('WebCrypto unavailable'));
+    var salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12)), iter = 200000;
+    return wcDeriveKey(passphrase, salt, iter, ['encrypt']).then(function (key) {
+      return subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+    }).then(function (ct) {
+      return { v: 1, kdf: 'PBKDF2-SHA256', iter: iter, salt: bytesToB64(salt), iv: bytesToB64(iv), ct: bytesToB64(new Uint8Array(ct)) };
+    });
+  }
+  function wcDecryptSecrets(blob, passphrase) {
+    var subtle = wcSubtle(); if (!subtle) return Promise.reject(new Error('WebCrypto unavailable'));
+    if (!blob || !blob.salt || !blob.iv || !blob.ct) return Promise.reject(new Error('Malformed credential block'));
+    var salt = b64ToBytes(blob.salt), iv = b64ToBytes(blob.iv), ct = b64ToBytes(blob.ct), iter = blob.iter || 200000;
+    return wcDeriveKey(passphrase, salt, iter, ['decrypt']).then(function (key) {
+      return subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ct);   // throws on a wrong passphrase (auth tag mismatch)
+    }).then(function (pt) { return JSON.parse(new TextDecoder().decode(pt)); });
+  }
+  function exportState(passphrase) {
     var data = {};
     stateKeys().forEach(function (k) { if (stateIsSecret(k)) return; var v = gget(k, undefined); if (v !== undefined) data[k] = stateScrubOut(k, v); });
     var env = { meta: { type: 'weld-companion-state-v1', t: Date.now(), keys: Object.keys(data).length }, data: data };
-    download('weld-companion-state.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(env, null, 1), 'application/json');
-    toast('\u2713 Exported ' + env.meta.keys + ' keys');
+    function finish() {
+      download('weld-companion-state.' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(env, null, 1), 'application/json');
+      toast('\u2713 Exported ' + env.meta.keys + ' keys' + (env.secrets ? ' + encrypted credentials' : ''));
+    }
+    var bundle = wcSecretsBundle();
+    if (passphrase && Object.keys(bundle).length) {
+      wcEncryptSecrets(bundle, passphrase).then(function (blob) { env.secrets = blob; env.meta.secrets = true; finish(); })
+        .catch(function (e) { toast('Could not encrypt credentials: ' + (e && e.message || e)); });
+      return;
+    }
+    finish();
+  }
+  function wcRestoreSecrets(sec) {
+    var pass = (typeof prompt === 'function') ? prompt('This file includes encrypted credentials (API keys / tokens). Enter the passphrase to restore them, or leave blank to skip:') : '';
+    if (!pass) { toast('Credentials left encrypted (not restored)'); return; }
+    wcDecryptSecrets(sec, pass).then(function (s) {
+      if (!s || typeof s !== 'object') throw new Error('bad');
+      var ai = gget('ai', {}) || {};
+      if (s.aiKeys && typeof s.aiKeys === 'object') ai.keys = Object.assign({}, ai.keys, s.aiKeys);
+      if (s.aiEndpoints && typeof s.aiEndpoints === 'object') ai.endpoints = Object.assign({}, ai.endpoints, s.aiEndpoints);
+      if (s.aiKeys || s.aiEndpoints) gset('ai', ai);
+      if (typeof s.ghToken === 'string' && s.ghToken) gset('ghToken', s.ghToken);
+      if (s.bridge && typeof s.bridge === 'object') gset('bridge', s.bridge);
+      toast('\u2713 Credentials restored \u2014 reopen the drawer');
+    }).catch(function () { toast('Wrong passphrase \u2014 credentials not restored'); });
   }
   function importState(file, mode, done) {
     file.text().then(function (txt) {
@@ -8976,6 +9097,7 @@
       var merged = core.stateMerge(current, incoming, mode);
       Object.keys(merged).forEach(function (k) { gset(k, merged[k]); });
       toast('\u2713 Imported ' + Object.keys(env.data).length + ' keys (' + mode + ') \u2014 reopen the drawer to see everything');
+      if (env.secrets) wcRestoreSecrets(env.secrets);   // opt-in: prompts for the passphrase, never automatic
       if (done) done();
     });
   }
@@ -8986,12 +9108,23 @@
       el('option', { value: 'merge', text: 'merge' }), el('option', { value: 'replace', text: 'replace' })
     ]);
     fileIn.addEventListener('change', function () { if (fileIn.files && fileIn.files[0]) importState(fileIn.files[0], modeSel.value); fileIn.value = ''; });
+    // Opt-in: carry your own API keys / tokens to another device, encrypted under a passphrase.
+    var secChk = el('input', { type: 'checkbox', id: 'wc-exp-secrets', style: { margin: '0 6px 0 0' } });
+    var passIn = el('input', { class: 'wlib-field', type: 'password', placeholder: 'passphrase for credentials', autocomplete: 'new-password', style: { flex: '1', minWidth: '140px', display: 'none' } });
+    secChk.onchange = function () { passIn.style.display = secChk.checked ? '' : 'none'; };
     bd.appendChild(el('div', { class: 'wlib-bar' }, [
-      el('button', { class: 'wlib-mini', text: '\u2913 Export everything', onclick: exportState }),
+      el('button', { class: 'wlib-mini', text: '\u2913 Export everything', onclick: function () {
+        if (secChk.checked) { if (!passIn.value) { toast('Enter a passphrase to include credentials'); return; } exportState(passIn.value); }
+        else exportState();
+      } }),
       modeSel,
       el('button', { class: 'wlib-mini', text: '\u2912 Import\u2026', onclick: function () { fileIn.click(); } }),
       fileIn
     ]));
+    bd.appendChild(el('label', { class: 'wlib-note', for: 'wc-exp-secrets', style: { display: 'flex', alignItems: 'center', marginTop: '6px', cursor: 'pointer' } }, [
+      secChk, el('span', { text: 'Include my API keys & tokens, encrypted (to move to another device). Default export never includes them. The file is useless without the passphrase; importing prompts for it.' })
+    ]));
+    bd.appendChild(passIn);
   }
 
   /* ---- cross-everything search -------------------------------------------------------- */
@@ -9058,7 +9191,9 @@
   // Captures the host's undo-reroll ring (window.weldHooks.histList, exposed by a
   // host patch) as a named, read-only session. HTML snapshots are reduced to text.
   function htmlToText(html) {
-    try { var d = document.createElement('div'); d.innerHTML = html; return (d.textContent || '').trim(); }
+    // Parse inertly: DOMParser builds a detached document that never loads resources
+    // or runs scripts, so an <img onerror=...> in captured host HTML cannot fire here.
+    try { var doc = new DOMParser().parseFromString(String(html == null ? '' : html), 'text/html'); return ((doc.body && doc.body.textContent) || '').trim(); }
     catch (e) { return ''; }
   }
   function saveSession() {
@@ -10177,7 +10312,7 @@
   function fromV2Book(book) {
     if (!book || !Array.isArray(book.entries)) throw new Error('Not a character book: expected an entries array.');
     list(book.entries, 'Lorebook entries', 1000);
-    return book.entries.map(e => {
+    return book.entries.filter(e => e && typeof e === 'object').map(e => {
       const ws = (e.extensions && e.extensions.weld_studio) || {};
       const ext = e.extensions || {};
       const secondary = Array.isArray(e.secondary_keys) ? e.secondary_keys.map(String).join(', ') : '';
@@ -10207,7 +10342,7 @@
     const rows = Array.isArray(src) ? src : src && typeof src === 'object' ? Object.values(src) : null;
     if (!rows) throw new Error('Not a World Info file: expected an entries object.');
     list(rows, 'World Info entries', 1000);
-    return rows.map(e => {
+    return rows.filter(e => e && typeof e === 'object').map(e => {
       const secondary = Array.isArray(e.keysecondary) ? e.keysecondary.map(String).join(', ') : '';
       return loreEntry({ title: cap(e.comment, 2000) || 'Imported entry', kind: 'imported', body: cap(e.content, 100000),
         keywords: Array.isArray(e.key) ? e.key.map(String).join(', ') : '', secondaryKeys: secondary,
@@ -10540,6 +10675,8 @@
   const values = v => Array.isArray(v) ? v : obj(v) ? Object.values(v) : [];
   const keyArray = k => Array.isArray(k) ? k.map(s => str(s).trim()).filter(Boolean) : typeof k === 'string' ? k.split(',').map(s => s.trim()).filter(Boolean) : [];
   function uniqueId(prefix) { return prefix + C.id().replace(/-/g, '').slice(0, 14); }
+  const idSuffix = v => str(v).replace(/[^a-z0-9]/gi, '').slice(0, 16);            // a Studio id -> a Dad-safe id suffix
+  const dadPriority = v => Math.min(100, Math.max(1, Math.round(v) || 10));        // Studio lore priority -> Dad [1,100] int, default 10
 
   // ---- detection ----
   function detect(raw) {
@@ -10637,9 +10774,9 @@
   function dadLoreEntries(p, c) {
     const out = {};
     p.lore.filter(l => C.visible(l, c.id)).forEach(l => {
-      const id = 'lore_' + l.id.replace(/[^a-z0-9]/gi, '').slice(0, 16);
-      const keys = [...new Set(l.keywords.split(',').concat(l.secondaryKeys.split(',')).map(k => k.trim()).filter(Boolean))];
-      out[id] = { id, name: l.title, keys, content: l.body, priority: Math.min(100, Math.max(1, Math.round(l.priority) || 10)), constant: l.activation === 'always',
+      const id = 'lore_' + idSuffix(l.id);
+      const keys = [...new Set(keyArray(l.keywords).concat(keyArray(l.secondaryKeys)))];
+      out[id] = { id, name: l.title, keys, content: l.body, priority: dadPriority(l.priority), constant: l.activation === 'always',
         enabled: l.activation !== 'manual', vectorized: false, excludeRecursion: !l.recursive, scanDepth: null };
     });
     return out;
@@ -10650,13 +10787,13 @@
     const rows = rowsFromExamples(c.examples);
     const sections = Object.keys(FIELD_SECTIONS).filter(k => c[k].trim()).map(k => ({ header: FIELD_SECTIONS[k], content: c[k] }));
     return { type: 'dad-char', version: 2, data: {
-      id: 'char_studio_' + c.id.replace(/[^a-z0-9]/gi, '').slice(0, 16), name: c.name, avatar: c.avatar || '',
+      id: 'char_studio_' + idSuffix(c.id), name: c.name, avatar: c.avatar || '',
       description: c.creatorNotes || c.personality.replace(/\s+/g, ' ').slice(0, 240), systemPrompt: c.systemPrompt,
       profile: { name: c.name, age: '', gender: '', appearance: '', personality: c.personality, background: '', scenario: c.scenario, systemNote: '' },
       customSections: sections, exampleDialogue: rows,
       firstMessage: [c.opening].concat(c.alternateGreetings).filter(g => g.trim()), reminderMessage: c.postHistory,
       userOverride: { name: withPersona ? p.persona.name : '', description: withPersona ? p.persona.description : '', avatar: null }, preInstruction: c.systemPrompt.trim() ? 'custom' : 'roleplay',
-      preInstructionCustom: c.systemPrompt, tags: c.tags.split(',').map(t => t.trim()).filter(Boolean),
+      preInstructionCustom: c.systemPrompt, tags: keyArray(c.tags),
       chatBackground: '', bgBlur: '0', bgOpacity: '1', imagePrefix: '', visualMap: '', lorebook: dadLoreEntries(p, c),
       authorNote: { text: c.depthPrompt, depth: c.depthPromptDepth, role: 'system', enabled: !!c.depthPrompt.trim() }, lastModified: Date.now() } };
   }
@@ -10672,11 +10809,11 @@
   function toDadWorld(p) {
     const entries = {};
     p.lore.forEach(l => {
-      const id = 'we_' + l.id.replace(/[^a-z0-9]/gi, '').slice(0, 16);
-      entries[id] = { id, name: l.title, keys: l.keywords.split(',').map(k => k.trim()).filter(Boolean), content: l.body, priority: Math.min(100, Math.max(1, Math.round(l.priority) || 10)),
+      const id = 'we_' + idSuffix(l.id);
+      entries[id] = { id, name: l.title, keys: keyArray(l.keywords), content: l.body, priority: dadPriority(l.priority),
         constant: l.activation === 'always', vectorized: false, enabled: l.activation !== 'manual', excludeRecursion: !l.recursive, scanDepth: null };
     });
-    return { type: 'dad-world', version: 1, world: { id: 'world_' + p.id.replace(/[^a-z0-9]/gi, '').slice(0, 16), name: p.name, description: [p.world.description, p.world.rules && 'RULES\n' + p.world.rules].filter(Boolean).join('\n\n'), entries } };
+    return { type: 'dad-world', version: 1, world: { id: 'world_' + idSuffix(p.id), name: p.name, description: [p.world.description, p.world.rules && 'RULES\n' + p.world.rules].filter(Boolean).join('\n\n'), entries } };
   }
   function toBibleText(p) { return [p.world.description, p.world.rules].filter(x => x.trim()).join('\n\n') + '\n'; }
   function chatText(p, s) {
@@ -10797,13 +10934,16 @@
     let pos = view.getUint32(end + 16, true), total = 0;
     const files = [];
     for (let i = 0; i < count; i++) {
+      if (pos < 0 || pos + 46 > bytes.length) throw new Error('Corrupt zip directory.');
       if (view.getUint32(pos, true) !== 0x02014b50) throw new Error('Corrupt zip directory.');
       const method = view.getUint16(pos + 10, true), csize = view.getUint32(pos + 20, true), usize = view.getUint32(pos + 24, true);
       const nlen = view.getUint16(pos + 28, true), elen = view.getUint16(pos + 30, true), clen = view.getUint16(pos + 32, true), local = view.getUint32(pos + 42, true);
+      if (pos + 46 + nlen > bytes.length) throw new Error('Corrupt zip directory.');
       const name = TD.decode(bytes.subarray(pos + 46, pos + 46 + nlen));
       pos += 46 + nlen + elen + clen;
       if (name.endsWith('/')) continue;
       if (usize > MAX_ENTRY || total + usize > MAX_TOTAL) throw new Error('The zip is too large to open here.');
+      if (local < 0 || local + 30 > bytes.length) throw new Error('Corrupt zip directory.');
       const lnlen = view.getUint16(local + 26, true), lelen = view.getUint16(local + 28, true), start = local + 30 + lnlen + lelen;
       const raw = bytes.subarray(start, start + csize);
       if (method !== 0 && method !== 8) throw new Error('Unsupported zip compression in ' + name + '.');
@@ -10877,7 +11017,7 @@
         addLore(plan, loreList(w.entries), 'World book entries'); break;
       }
       case 'dad-full': {
-        const cfg = raw.config, book = values(cfg.characterBook).filter(c => obj(c) && typeof c.name === 'string');
+        const cfg = obj(raw.config) ? raw.config : {}, book = values(cfg.characterBook).filter(c => obj(c) && typeof c.name === 'string');
         const idMap = {};
         book.slice(0, LIMITS.characters).forEach(d => { const it = addCharacter(plan, d, { skipPersona: true }); it.checked = !/^char_preset_/.test(str(d.id)); idMap[str(d.id)] = it; if (!it.checked) it.detail += ' (built-in preset)'; });
         values(obj(cfg.worldBook) ? cfg.worldBook.worlds : null).filter(obj).forEach(w => {
@@ -10916,19 +11056,19 @@
   async function readFile(file, options) {
     const opts = options || {}, name = str(file.name), lower = name.toLowerCase(), plan = newPlan(name.replace(/\.[^.]+$/, ''));
     const apply = async (f, sub) => {
-      const n = str(f.name).toLowerCase();
+      const n = str(f.name).toLowerCase(), base = str(f.name).replace(/\.[^.]+$/, '');
       if (n.endsWith('.png') || f.type === 'image/png') {
         const buf = f.bytes || new Uint8Array(await f.arrayBuffer());
         cardPlan(sub, C.pngReadCard(buf).card, f.name); sub.format = 'Character card (PNG)';
       } else if (n.endsWith('.jsonl')) {
         const res = C.fromChatJsonl(typeof f.text === 'function' ? await f.text() : TD.decode(f.bytes));
-        item(sub, 'session', 'Chat "' + str(f.name).replace(/\.[^.]+$/, '') + '"', res.messages.length + ' messages', { session: { name: str(f.name).replace(/\.[^.]+$/, ''), messages: res.messages, memories: [], summary: '' }, characterRef: '', characterName: res.characterName, userName: res.userName });
+        item(sub, 'session', 'Chat "' + base + '"', res.messages.length + ' messages', { session: { name: base, messages: res.messages, memories: [], summary: '' }, characterRef: '', characterName: res.characterName, userName: res.userName });
         sub.format = 'Chat log (JSONL)';
       } else if (n.endsWith('.txt') || n.endsWith('.md') || f.type === 'text/plain') {
         const t = typeof f.text === 'function' ? await f.text() : TD.decode(f.bytes);
         if (t.length > 5000000) throw new Error('Text file exceeds 5 MB.');
-        if (looksLikeChat(t)) { const m = fromChatText(t, opts.userNames); item(sub, 'session', 'Chat "' + str(f.name).replace(/\.[^.]+$/, '') + '"', m.length + ' messages (from text)', { session: { name: str(f.name).replace(/\.[^.]+$/, ''), messages: m, memories: [], summary: '' }, characterRef: '', characterName: '', userName: '' }); sub.format = 'Chat text'; }
-        else { item(sub, 'world', 'World bible "' + str(f.name).replace(/\.[^.]+$/, '') + '"', t.length + ' characters', { description: cap(t.trim()), checked: true }); sub.format = 'World bible text'; }
+        if (looksLikeChat(t)) { const m = fromChatText(t, opts.userNames); item(sub, 'session', 'Chat "' + base + '"', m.length + ' messages (from text)', { session: { name: base, messages: m, memories: [], summary: '' }, characterRef: '', characterName: '', userName: '' }); sub.format = 'Chat text'; }
+        else { item(sub, 'world', 'World bible "' + base + '"', t.length + ' characters', { description: cap(t.trim()), checked: true }); sub.format = 'World bible text'; }
       } else if (n.endsWith('.js')) {
         const t = typeof f.text === 'function' ? await f.text() : TD.decode(f.bytes);
         const persona = personaFromScript(t);
@@ -12813,8 +12953,9 @@
       });
     }
     // function bodies: only note which names are read
+    const dslLines = lines(dsl);   // split once; reused below (was re-split per code line)
     parsed.functions.forEach(f => {
-      const body = f.codeLines.length ? f.codeLines.map(l => lines(dsl)[l - 1]).join('\n') : (f.value || '');
+      const body = f.codeLines.length ? f.codeLines.map(l => dslLines[l - 1]).join('\n') : (f.value || '');
       identifiers(body).used.forEach(x => used.add(x));
     });
     // top-level special blocks and meta
@@ -12852,7 +12993,7 @@
     // Browser APIs in executable DSL fragments can also be shadowed by Perchance names.
     const browserFragments = [];
     parsed.functions.forEach(f => {
-      const body = f.codeLines.length ? '\n' + lines(dsl).slice(f.line, Math.max(...f.codeLines)).join('\n') : (f.value || '');
+      const body = f.codeLines.length ? '\n' + dslLines.slice(f.line, Math.max(...f.codeLines)).join('\n') : (f.value || '');
       browserFragments.push({ code: '(' + f.params + ') => {' + body + '}', line: f.line, type: '' });
     });
     blockNodes.forEach(n => squareBlocks(nodeText(n)).blocks.forEach(b => browserFragments.push({ code: b.content, line: n.line, type: '' })));
@@ -12931,17 +13072,18 @@
     const capabilities = uniq(everyImport.filter(n => KNOWN_PLUGINS[n]).map(n => KNOWN_PLUGINS[n].label));
     const network = everyImport.some(n => KNOWN_PLUGINS[n] && KNOWN_PLUGINS[n].network);
     const items = lists.reduce((s, l) => s + l.items, 0);
+    const todos = parsed.comments.filter(c => /\b(TODO|FIXME|HACK|XXX)\b/i.test(c.text));
     return {
       version: VERSION, name: input.name || '',
       stats: { dslBytes: bytes(dsl), dslLines: parsed.lines, htmlBytes: html == null ? 0 : bytes(html), htmlLines: html == null ? 0 : lines(html).length,
         lists: lists.length, items, functions: parsed.functions.length, imports: allImports.length, scripts: hv ? hv.scripts.length : 0,
-        comments: parsed.comments.length, todos: parsed.comments.filter(c => /\b(TODO|FIXME|HACK|XXX)\b/i.test(c.text)).length },
+        comments: parsed.comments.length, todos: todos.length },
       lists, aliases, imports: allImports, capabilities, network,
       outputSpace: estimateSpace(parsed),
       findings, suppressedFindings, counts: { error: findings.filter(f => f.severity === 'error').length, warn: findings.filter(f => f.severity === 'warn').length, info: findings.filter(f => f.severity === 'info').length },
       html: hv ? { ids: hv.ids, scripts: hv.scripts, urls: hv.urls, hosts: hv.hosts, externalScripts: hv.externalScripts, stylesheets: hv.stylesheets,
         storage: hv.storage, rootRefs: hv.rootRefs, functions: hv.functions } : null,
-      todos: parsed.comments.filter(c => /\b(TODO|FIXME|HACK|XXX)\b/i.test(c.text)),
+      todos: todos,
       functions: parsed.functions.map(f => ({ name: f.name, line: f.line, async: !!f.async, lines: f.codeLines.length || 1 }))
     };
   }
@@ -13717,6 +13859,7 @@
 })(typeof window === 'object' ? window : globalThis, function (P) {
   'use strict';
   const VERSION = 1;
+  const SEVERITY_RANK = { error: 0, warn: 1, info: 2 };   // finding severity order, shared by get_findings and the push gate
 
   // ------------------------------------------------------------------ primer
   // Condensed from Perchance's tutorial and known-bugs list. Given to models so they write
@@ -13782,7 +13925,7 @@
           distinct_outputs: a.outputSpace ? a.outputSpace.text : null, stats: a.stats };
       },
       get_findings: args => {
-        const a = analysisOf(src()), rank = { error: 0, warn: 1, info: 2 }, max = rank[(args && args.min_severity) || 'warn'];
+        const a = analysisOf(src()), rank = SEVERITY_RANK, max = rank[(args && args.min_severity) || 'warn'];
         const list = a.findings.filter(f => rank[f.severity] <= (max == null ? 1 : max));
         return { counts: a.counts, findings: list.slice(0, 60).map(f => ({ severity: f.severity, pane: f.pane, line: f.line, message: f.message, hint: f.hint || undefined })), truncated: list.length > 60 };
       },
@@ -13808,7 +13951,9 @@
         return { matches: out, truncated: out.length >= 80 };
       },
       find_usages: args => {
-        const s = src(), r = scanName(s.dsl, s.html, String((args && args.name) || ''), null);
+        const name = String((args && args.name) || '');
+        if (!validName(name)) return { name: args && args.name, error: '"' + name + '" is not a valid list name.', uses: [], count: 0, truncated: false };
+        const s = src(), r = scanName(s.dsl, s.html, name, null);
         return { name: args && args.name, uses: r.hits.slice(0, 100), count: r.hits.length, truncated: r.hits.length > 100 };
       },
       get_imports: () => {
@@ -14193,7 +14338,7 @@
 
   // ------------------------------------------------------------- push gate
   function gateReport(analysis, level) {
-    const rank = { error: 0, warn: 1, info: 2 }, max = rank[level || 'warn'];
+    const rank = SEVERITY_RANK, max = rank[level || 'warn'];
     const list = analysis.findings.filter(f => rank[f.severity] <= max);
     return { count: list.length, lines: list.slice(0, 6).map(f => '• ' + f.pane + (f.line ? ' line ' + f.line : '') + ': ' + f.message), more: Math.max(0, list.length - 6) };
   }
@@ -14542,6 +14687,7 @@
       if (!rp.cfg.owner || !rp.cfg.repo) throw new Error('Set your repo in the GitHub tab first.');
       const a = await fetchText(rp.r.dslUrl), b = await fetchText(rp.r.htmlUrl).catch(() => null);
       if (!live) A.repoState = 'The repo has the files. Open the editor to compare them.';
+      else if (b === null && live.html && live.html.trim()) A.repoState = '\u26a0 Fetched the repo DSL but could not fetch its HTML, so the two could not be fully compared. Push first to be safe.';
       else if (D.syncPlan({ dsl: live.dsl, html: live.html }, { dsl: a, html: b }, null).state === 'in-sync') A.repoState = '\u2713 The repo copy matches your editor.';
       else A.repoState = '\u26A0 The repo copy differs from your editor. Push first so the agent starts from your latest version.';
     } catch (e) { A.repoState = ''; A.error = e.message || String(e); }
@@ -16947,7 +17093,8 @@ the diagnostics preview calls the same builders as the real prompt.`
     expanded: new Set(), concise: false,
     favorites: Array.isArray(stored) ? stored.filter(id => C.get(id)) : [], details: '', findings: false, draft: '', dirty: false };
   const note = text => E('div', { class: 'wc-section-note', text });
-  const fieldStyle = { width: '100%', boxSizing: 'border-box', border: '1px solid var(--wc-line,#555)', borderRadius: '8px',
+  const LINE = '1px solid var(--wc-line,#555)';   // standard divider (the active-accent border is a deliberate exception)
+  const fieldStyle = { width: '100%', boxSizing: 'border-box', border: LINE, borderRadius: '8px',
     padding: '10px', background: 'var(--wc-input,rgba(0,0,0,.18))', color: 'inherit', font: 'inherit' };
   function render(parent) {
     const slug = H.slug() || '';
@@ -16986,7 +17133,7 @@ the diagnostics preview calls the same builders as the real prompt.`
       if (!matches.length) { list.appendChild(note('No matching skills. Try another search or turn off Favorites only.')); return; }
       groups.forEach(g => {
         const autoExpand = Boolean(S.query || S.category || S.type || S.mode || S.favoritesOnly);
-        const attrs = { 'data-section': g.id, style: { border: '1px solid var(--wc-line,#555)', borderRadius: '9px', padding: '10px' } };
+        const attrs = { 'data-section': g.id, style: { border: LINE, borderRadius: '9px', padding: '10px' } };
         if (autoExpand || S.expanded.has(g.id)) attrs.open = '';
         const section = E('details', attrs);
         section.addEventListener('toggle', () => {
@@ -17001,7 +17148,7 @@ the diagnostics preview calls the same builders as the real prompt.`
         const active = p.id === S.selected;
         grid.appendChild(E('button', { type: 'button', 'data-skill': p.id, 'aria-pressed': String(active),
           style: { textAlign: 'left', padding: '12px', borderRadius: '9px', cursor: 'pointer', color: 'inherit', font: 'inherit',
-            border: active ? '1px solid var(--wc-accent,#f39245)' : '1px solid var(--wc-line,#555)',
+            border: active ? '1px solid var(--wc-accent,#f39245)' : LINE,
             background: active ? 'rgba(243,146,69,.12)' : 'rgba(255,255,255,.035)' },
           onclick: () => { S.selected = p.id; drawList(); drawDetail(); build(); if (detail.scrollIntoView) detail.scrollIntoView({ block: 'nearest' }); }
         }, [E('strong', { text: (S.favorites.includes(p.id) ? '\u2605 ' : '') + p.title }),
@@ -17082,7 +17229,7 @@ the diagnostics preview calls the same builders as the real prompt.`
       E('label', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [fav, E('span', { text: 'Favorites only' })])]));
     count = E('div', { style: { fontSize: '12px', opacity: '.7', marginBottom: '8px' }, 'aria-live': 'polite' }); wrap.appendChild(count);
     list = E('div', { 'aria-label': 'Skill presets', style: { display: 'grid', gap: '8px', maxHeight: '380px', overflowY: 'auto', padding: '2px' } }); wrap.appendChild(list);
-    detail = E('div', { style: { borderTop: '1px solid var(--wc-line,#555)', marginTop: '18px', paddingTop: '16px' } }); wrap.appendChild(detail);
+    detail = E('div', { style: { borderTop: LINE, marginTop: '18px', paddingTop: '16px' } }); wrap.appendChild(detail);
     wrap.appendChild(E('label', { for: 'wc-skill-details', text: 'Your goal or extra instructions (optional)' }));
     const details = E('textarea', { id: 'wc-skill-details', rows: '3', placeholder: 'What should change? Any style, feature or behavior to preserve?',
       style: Object.assign({}, fieldStyle, { marginTop: '6px', resize: 'vertical' }) });
@@ -17138,6 +17285,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   const LEGACY_PREFIX = 'dadchat:vault:';
   const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
   const num = v => (typeof v === 'number' && isFinite(v) ? v : null);
+  const atOf = x => isObj(x) ? (num(x.at) || 0) : 0;   // a record's numeric timestamp, or 0
   const text = (v, max) => typeof v === 'string' ? v.slice(0, max || 120) : '';
 
   // key -> { kind, gen, sub }. kind: snapshot | chat-index | chat-copy | legacy | operational | other
@@ -17307,13 +17455,14 @@ the diagnostics preview calls the same builders as the real prompt.`
   function fmtBytes(n) { n = Number(n) || 0; return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB'; }
   function fmtDate(t) { const n = num(t); if (n === null || n <= 0) return ''; try { return new Date(n).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'; } catch (e) { return ''; } }
   const slugPart = s => String(s || 'unknown').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'unknown';
+  const keyTail = k => slugPart(String(k).slice(String(k).lastIndexOf('/') + 1).replace(/^.*:/, ''));   // storage key -> slugged filename tail
   const datePart = t => { try { return new Date(t).toISOString().slice(0, 10); } catch (e) { return 'undated'; } };
 
   // Export bundles. Values are copied exactly as stored; owner identity stays in the key and filename.
   function entryFor(rec) { return { key: rec.key, storedBy: rec.caller, size: rec.size, stale: !!rec.stale, value: rec.value === undefined ? null : rec.value }; }
   function exportRecord(rec, now) {
     const p = parseKey(rec.key), who = p.gen || (p.kind === 'legacy' ? 'legacy' : 'misc');
-    const tail = slugPart(rec.key.slice(rec.key.lastIndexOf('/') + 1).replace(/^.*:/, ''));
+    const tail = keyTail(rec.key);
     return { filename: 'weld-backup-' + slugPart(who) + '-' + (p.kind === 'snapshot' ? 'snapshot' : tail) + '-' + datePart(now) + '.json',
       text: JSON.stringify({ format: 'weld-backup-record', v: 1, exportedAt: now, record: entryFor(rec) }, null, 2) };
   }
@@ -17384,7 +17533,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   // rec: { key, value } -> { dir: [segments], name }
   function backupTarget(rec) {
     const p = parseKey(rec.key), v = rec.value, body = JSON.stringify(v === undefined ? null : v), at = isObj(v) ? stampPart(v.at) : '';
-    const tail = slugPart(String(rec.key).slice(String(rec.key).lastIndexOf('/') + 1).replace(/^.*:/, ''));
+    const tail = keyTail(rec.key);
     if (p.kind === 'snapshot') return { dir: [p.gen, 'snapshot'], name: 'snapshot-' + (at || hash8(body)) + '-' + hash8(body).slice(0, 4) + '.json' };
     if (p.kind === 'chat-copy') return { dir: [p.gen, 'chat'], name: tail + '.json' };
     if (p.kind === 'chat-index') return { dir: [p.gen, 'chat'], name: 'index-' + hash8(body) + '.json' };
@@ -17397,23 +17546,27 @@ the diagnostics preview calls the same builders as the real prompt.`
   // exact: byte-identical content (compared in full, not by hash alone) -> keep the newest, offer the rest.
   // near: same generator, same thread and message counts, different content -> only for a human or the AI helper to judge.
   // Copies holding secret-shaped values are left out entirely: they are never copied to a folder, so they must not be deleted here.
-  function canonical(v) {
-    if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
-    if (isObj(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+  function canonical(v, depth) {
+    depth = depth || 0;
+    if (depth > 300) throw new Error('Value nested too deeply to compare.');   // real backups nest a handful deep; this only trips a crafted/corrupt value, well before a stack overflow
+    if (Array.isArray(v)) return '[' + v.map(x => canonical(x, depth + 1)).join(',') + ']';
+    if (isObj(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k], depth + 1)).join(',') + '}';
     return JSON.stringify(v === undefined ? null : v);
   }
   function findDuplicates(recs) {
-    const out = { exact: [], near: [], left: 0 };
+    const out = { exact: [], near: [], left: 0, skipped: 0 };
     const buckets = new Map();   // gen|kind|content hash -> [{ rec, body }]
     (recs || []).forEach(rec => {
       const p = parseKey(rec.key), v = rec.value;
       if (!p.gen || !isObj(v) || (p.kind !== 'chat-copy' && p.kind !== 'snapshot')) return;
       if (p.kind === 'chat-copy' && secretScan(v.data).length) { out.left++; return; }
       // what the copy IS, not when or why it was taken
-      const body = canonical(p.kind === 'chat-copy' ? v.data : { bundle: v.bundle, modelText: v.modelText, outputTemplate: v.outputTemplate, srcManifest: v.srcManifest });
+      let body;
+      try { body = canonical(p.kind === 'chat-copy' ? v.data : { bundle: v.bundle, modelText: v.modelText, outputTemplate: v.outputTemplate, srcManifest: v.srcManifest }); }
+      catch (e) { out.skipped++; return; }   // surfaced via out.skipped (this module never logs content); fail safe: an uncomparable copy is never a duplicate, so it is never offered for deletion
       const id = p.gen + '|' + p.kind + '|' + hash8(body) + '|' + body.length;
       let b = buckets.get(id); if (!b) buckets.set(id, b = []);
-      b.push({ rec, p, body, at: isObj(v) ? (num(v.at) || 0) : 0 });
+      b.push({ rec, p, body, at: atOf(v) });
     });
     const newest = (a, b) => b.at - a.at || (a.rec.key < b.rec.key ? 1 : -1);
     const singles = new Map();   // gen -> [{...}] one representative per distinct content, for the near pass
@@ -17469,7 +17622,7 @@ the diagnostics preview calls the same builders as the real prompt.`
         if (p.kind !== 'snapshot' && p.kind !== 'chat-copy' && p.kind !== 'chat-index') { skipped.invalid++; return; }   // only the three documented key shapes
         const caller = p.gen;   // never trust a file's storedBy: a record can only land in the namespace its own key names
         if (p.kind === 'chat-copy' && secretScan(isObj(r.value) ? r.value.data : null).length) { skipped.held++; return; }
-        const id = caller + '\u0000' + r.key, at = isObj(r.value) ? (num(r.value.at) || 0) : 0, c = { id, caller, key: r.key, p, value: r.value, ex, at };
+        const id = caller + '\u0000' + r.key, at = atOf(r.value), c = { id, caller, key: r.key, p, value: r.value, ex, at };
         const g = groups.get(id);
         const better = !g || (p.kind === 'snapshot' ? (at > g.at || (at === g.at && ex > g.ex)) : ex > g.ex);
         if (better) groups.set(id, c);
@@ -17485,7 +17638,7 @@ the diagnostics preview calls the same builders as the real prompt.`
       if (cur === undefined) { add.push(item(c, 'new', 'not here yet')); adding.add(c.key); return; }
       if (cur === null) { skipped.tombstoned++; return; }
       if (c.p.kind === 'snapshot') {
-        const have = isObj(cur) ? (num(cur.at) || 0) : 0;
+        const have = atOf(cur);
         if (c.at > have) update.push(item(c, 'newer', 'folder copy ' + fmtDate(c.at) + ' replaces ' + (have ? fmtDate(have) : 'an undated copy')));
         else if (c.at < have) skipped.older++; else skipped.unchanged++;
         return;
@@ -17527,6 +17680,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   let host = null, unsub = null;
   const note = t => E('div', { class: 'wc-section-note', text: t });
   const small = { fontSize: '12px', opacity: '.75' };
+  const LINE = '1px solid var(--wc-line,#555)';   // the standard divider/border (the red #c0392b border is a deliberate exception)
   // el() sets attributes with setAttribute, so a false `disabled` would still disable the button: only pass it when true.
   const btn = (label, fn, extra) => { const a = Object.assign({ type: 'button', class: 'wc-btn wc-mini', text: label, onclick: fn }, extra || {}); if (!a.disabled) delete a.disabled; return E('button', a); };
   const V = () => H.vault || null;
@@ -17634,7 +17788,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   }
   function inspector(rerender) {
     const i = S.inspected; if (!i) return note('Select Inspect on a record to see its details.');
-    const wrap = E('div', { 'aria-label': 'Record inspector', style: { borderTop: '1px solid var(--wc-line,#555)', marginTop: '12px', paddingTop: '10px' } });
+    const wrap = E('div', { 'aria-label': 'Record inspector', style: { borderTop: LINE, marginTop: '12px', paddingTop: '10px' } });
     wrap.appendChild(E('div', { text: 'Inspector', style: { fontWeight: '600', marginBottom: '6px' } }));
     i.report.meta.forEach(m => wrap.appendChild(E('div', { style: { display: 'flex', gap: '8px', fontSize: '12px' } }, [E('span', { text: m[0], style: { minWidth: '110px', opacity: '.7' } }), E('span', { text: m[1], style: { wordBreak: 'break-all' } })])));
     const chat = i.report.chat;
@@ -17659,7 +17813,7 @@ the diagnostics preview calls the same builders as the real prompt.`
     Object.keys(pres.tabs || {}).forEach(t => { if (C.GEN_RE.test(t)) tags.add(t); });
     const here = typeof H.slug === 'function' ? H.slug() : ''; if (here && C.GEN_RE.test(here)) tags.add(here);
     const list = Array.from(tags).sort();
-    const card = E('div', { 'data-family': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    const card = E('div', { 'data-family': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Dad-Chat family', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Any generator that stores copies under its own tag appears here. The companion only watches; it never routes chats or subscribes channels for a generator.' }));
     if (!list.length) { card.appendChild(note('No generator tags seen yet.')); return card; }
@@ -17684,6 +17838,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   // Files are only ever ADDED: a changed record gets a new file, an unchanged one is skipped, nothing is overwritten or deleted.
   const AUTO_KEY = 'backupFolderAuto';
   const F = { supported: false, handle: null, name: '', perm: 'none', auto: false, busy: false, error: '', last: null };
+  const folderReady = () => !!F.handle && F.perm === 'granted';   // the backup folder is chosen AND access is allowed
   const memKv = new Map();
   let dbp = null;
   function kvdb() {
@@ -17736,7 +17891,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   }
   // Copy every readable, non-stale record into the folder. Records holding plaintext secret-shaped values are held back.
   async function syncToFolder(manual) {
-    if (F.busy) return; if (!F.handle || F.perm !== 'granted') { if (manual) { F.error = 'Choose a backup folder and allow access first.'; draw(); } return; }
+    if (F.busy) return; if (!folderReady()) { if (manual) { F.error = 'Choose a backup folder and allow access first.'; draw(); } return; }
     F.busy = true; const res = { at: Date.now(), written: 0, skipped: 0, held: [], failed: 0 };
     try {
       load();
@@ -17771,7 +17926,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   }
   async function scanFolder() {
     if (L.busy) return;
-    if (!F.handle || F.perm !== 'granted') { F.error = 'Choose a backup folder and allow access first.'; draw(); return; }
+    if (!folderReady()) { F.error = 'Choose a backup folder and allow access first.'; draw(); return; }
     L.busy = true; L.plan = null; L.unreadable = 0; L.msg = ''; draw();
     try {
       load();
@@ -17800,13 +17955,13 @@ the diagnostics preview calls the same builders as the real prompt.`
     L.busy = false; draw();
   }
   function importCard() {
-    const wrap = E('div', { 'data-import': '1', style: { marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--wc-line,#555)' } });
+    const wrap = E('div', { 'data-import': '1', style: { marginTop: '8px', paddingTop: '8px', borderTop: LINE } });
     wrap.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Load copies that other computers saved into this folder. You see what would change first. Chat copies already here are never overwritten; a source copy is replaced only by a newer one.' }));
-    wrap.appendChild(btn(L.busy ? 'Working...' : 'Check folder for new saves', () => { scanFolder(); }, { disabled: !F.handle || F.perm !== 'granted' || L.busy || F.busy }));
+    wrap.appendChild(btn(L.busy ? 'Working...' : 'Check folder for new saves', () => { scanFolder(); }, { disabled: !folderReady() || L.busy || F.busy }));
     const p = L.plan;
     if (p) {
       const n = p.add.length + p.update.length, sk = p.skipped;
-      wrap.appendChild(E('div', { 'data-import-summary': '1', style: { fontSize: '12px', margin: '6px 0' }, text: 'Read ' + L.files + ' file' + (L.files === 1 ? '' : 's') + (L.unreadable ? ' (' + L.unreadable + ' unreadable)' : '') + ': ' + p.add.length + ' new, ' + p.update.length + ' updated. Left alone: ' + (sk.present + sk.unchanged + sk.older) + ' already here or older, ' + (sk.operational + sk.legacy) + ' device-specific or legacy' + (sk.held ? ', ' + sk.held + ' held back for secret-shaped values' : '') + (sk.tombstoned ? ', ' + sk.tombstoned + ' deleted here on purpose' : '') + '.' }));
+      wrap.appendChild(E('div', { 'data-import-summary': '1', style: { fontSize: '12px', margin: '6px 0' }, text: 'Read ' + L.files + ' file' + (L.files === 1 ? '' : 's') + (L.unreadable ? ' (' + L.unreadable + ' unreadable)' : '') + ': ' + p.add.length + ' new, ' + p.update.length + ' updated. Left alone: ' + (sk.present + sk.unchanged + sk.older) + ' already here or older, ' + (sk.operational + sk.legacy) + ' device-specific or legacy' + (sk.held ? ', ' + sk.held + ' held back for secret-shaped values' : '') + (sk.tombstoned ? ', ' + sk.tombstoned + ' deleted here on purpose' : '') + (sk.invalid ? ', ' + sk.invalid + ' not recognized or malformed' : '') + '.' }));
       p.add.concat(p.update).slice(0, 60).forEach(it => wrap.appendChild(E('div', { style: { fontSize: '12px', wordBreak: 'break-all' }, text: (it.action === 'new' ? 'NEW ' : it.action === 'newer' ? 'NEWER ' : 'MERGE ') + it.key + ' · ' + C.fmtBytes(it.bytes) + ' · ' + it.note })));
       if (n > 60) wrap.appendChild(E('div', { style: small, text: '...and ' + (n - 60) + ' more.' }));
       if (!n) wrap.appendChild(E('div', { style: { fontSize: '12px' }, text: 'Everything in the folder is already here.' }));
@@ -17821,9 +17976,12 @@ the diagnostics preview calls the same builders as the real prompt.`
     load();
     const recs = [];
     (S.rows || []).forEach(r => { const k = C.parseKey(r.key).kind; if (r.stale || r.parseError || (k !== 'chat-copy' && k !== 'snapshot')) return; const rec = full(r.gmKey); if (rec && !rec.unreadable && !rec.parseError) recs.push({ key: r.key, caller: r.caller, value: rec.value }); });
-    D.found = C.findDuplicates(recs); D.sel = new Set();
+    try { D.found = C.findDuplicates(recs); }
+    catch (e) { D.found = { exact: [], near: [], left: 0, skipped: 0 }; say('Could not scan for duplicates — some copies could not be compared. Nothing was changed.'); draw(); return; }
+    D.sel = new Set();
     D.found.exact.forEach(g => g.drop.forEach(x => D.sel.add(x.caller + '\u0000' + x.key)));
-    say(D.found.exact.length || D.found.near.length ? 'Found ' + D.found.exact.length + ' exact duplicate group' + (D.found.exact.length === 1 ? '' : 's') + ' and ' + D.found.near.length + ' possible group' + (D.found.near.length === 1 ? '' : 's') + '.' : 'No duplicates found.');
+    const skipNote = D.found.skipped ? ' ' + D.found.skipped + ' cop' + (D.found.skipped === 1 ? 'y' : 'ies') + ' could not be compared and were left alone.' : '';
+    say((D.found.exact.length || D.found.near.length ? 'Found ' + D.found.exact.length + ' exact duplicate group' + (D.found.exact.length === 1 ? '' : 's') + ' and ' + D.found.near.length + ' possible group' + (D.found.near.length === 1 ? '' : 's') + '.' : 'No duplicates found.') + skipNote);
     draw();
   }
   function askAIAboutDups() {
@@ -17833,7 +17991,7 @@ the diagnostics preview calls the same builders as the real prompt.`
   }
   async function runCleanup() {
     if (!D.found || D.busy) return;
-    if (!F.handle || F.perm !== 'granted') { say('Choose a backup folder and allow access first. Duplicates are only deleted after they are safely saved there.', true); return draw(); }
+    if (!folderReady()) { say('Choose a backup folder and allow access first. Duplicates are only deleted after they are safely saved there.', true); return draw(); }
     D.busy = true; draw();
     let gone = 0, unsaved = 0;
     try {
@@ -17861,7 +18019,7 @@ the diagnostics preview calls the same builders as the real prompt.`
     D.found = null; D.sel = new Set(); D.busy = false; load(); draw();
   }
   function cleanupCard() {
-    const card = E('div', { 'data-cleanup': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    const card = E('div', { 'data-cleanup': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Cleanup duplicates', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Finds copies with identical content. Only exact duplicates can be deleted here, the newest copy is always kept, and each one is deleted only after it is confirmed saved in your backup folder. Possible duplicates (same size, different content) are listed for you or the AI helper to judge.' }));
     card.appendChild(btn('Find duplicates', () => findDups(), { disabled: D.busy || !(S.rows && S.rows.length) }));
@@ -17882,9 +18040,9 @@ the diagnostics preview calls the same builders as the real prompt.`
     if (f.exact.length || f.near.length) card.appendChild(E('div', { style: { fontSize: '12px', marginTop: '6px', opacity: '.75' }, text: 'The AI helper gets names, dates and counts only, never chat text. You press Ask yourself there.' }));
     const row = E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' } });
     if (f.exact.length || f.near.length) row.appendChild(btn('Ask the AI helper to review', () => askAIAboutDups(), { disabled: D.busy }));
-    if (f.exact.length) row.appendChild(btn('Delete ' + D.sel.size + ' selected duplicate' + (D.sel.size === 1 ? '' : 's'), () => { runCleanup(); }, { disabled: D.busy || !D.sel.size || !F.handle || F.perm !== 'granted' }));
+    if (f.exact.length) row.appendChild(btn('Delete ' + D.sel.size + ' selected duplicate' + (D.sel.size === 1 ? '' : 's'), () => { runCleanup(); }, { disabled: D.busy || !D.sel.size || !folderReady() }));
     card.appendChild(row);
-    if (f.exact.length && (!F.handle || F.perm !== 'granted')) card.appendChild(note('Deleting needs a backup folder with access allowed, so every copy is saved first.'));
+    if (f.exact.length && (!folderReady())) card.appendChild(note('Deleting needs a backup folder with access allowed, so every copy is saved first.'));
     return card;
   }
   let syncTimer = null;
@@ -17897,7 +18055,7 @@ the diagnostics preview calls the same builders as the real prompt.`
     if (host) draw();
   }
   function folderCard() {
-    const card = E('div', { 'data-folder': '1', style: { border: '1px solid var(--wc-line,#555)', borderRadius: '8px', padding: '10px', margin: '8px 0' } });
+    const card = E('div', { 'data-folder': '1', style: { border: LINE, borderRadius: '8px', padding: '10px', margin: '8px 0' } });
     card.appendChild(E('div', { text: 'Backup location', style: { fontWeight: '600' } }));
     card.appendChild(E('div', { style: Object.assign({ marginBottom: '6px' }, small), text: 'Choose any folder on a drive or inside a cloud-synced folder (Google Drive, OneDrive, iCloud, Dropbox). Copies are saved there as files that are only ever added: nothing is overwritten or deleted, so browser cache clears cannot touch them.' }));
     if (!F.supported) card.appendChild(E('div', { style: { fontSize: '12px', color: '#e0a030' }, text: 'This browser cannot open folders (Chrome or Edge can). The Download buttons below still work.' }));
@@ -17906,7 +18064,7 @@ the diagnostics preview calls the same builders as the real prompt.`
     const row = E('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', margin: '6px 0' } });
     row.appendChild(btn(F.handle ? 'Change folder...' : 'Choose folder...', () => { chooseFolder(); }, { disabled: !F.supported }));
     if (F.handle && F.perm !== 'granted') row.appendChild(btn('Allow access', () => { allowFolder(); }));
-    row.appendChild(btn('Save all to folder now', () => { syncToFolder(true); }, { disabled: !F.handle || F.perm !== 'granted' || F.busy }));
+    row.appendChild(btn('Save all to folder now', () => { syncToFolder(true); }, { disabled: !folderReady() || F.busy }));
     if (F.handle) row.appendChild(btn('Disconnect folder', () => { forgetFolder(); }, { 'aria-label': 'Disconnect folder (nothing in it is deleted)' }));
     card.appendChild(row);
     const auto = E('input', { type: 'checkbox', 'aria-label': 'Save new backups to the folder automatically' }); auto.checked = F.auto;
@@ -17969,7 +18127,7 @@ the diagnostics preview calls the same builders as the real prompt.`
     plain('Other vault-prefix keys', inv.other, true, 'Keys under weld:genvault: whose folder name is not a valid generator name.');
     if (S.secrets) {
       wrap.appendChild(E('div', { text: 'Secret scan', style: { fontWeight: '600', marginTop: '10px' } }));
-      if (!S.secrets.length) wrap.appendChild(note('No plaintext secret-shaped values found.'));
+      if (!S.secrets.length) wrap.appendChild(note('No plaintext secret-shaped config values found.'));
       S.secrets.forEach(h => wrap.appendChild(E('div', { 'data-secret': '1', style: { fontSize: '12px' }, text: '⚠ ' + h.key + ': ' + h.paths.join(', ') + ' (value hidden)' })));
     }
     wrap.appendChild(inspector(rerender));

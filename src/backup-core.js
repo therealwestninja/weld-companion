@@ -13,6 +13,7 @@
   const LEGACY_PREFIX = 'dadchat:vault:';
   const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
   const num = v => (typeof v === 'number' && isFinite(v) ? v : null);
+  const atOf = x => isObj(x) ? (num(x.at) || 0) : 0;   // a record's numeric timestamp, or 0
   const text = (v, max) => typeof v === 'string' ? v.slice(0, max || 120) : '';
 
   // key -> { kind, gen, sub }. kind: snapshot | chat-index | chat-copy | legacy | operational | other
@@ -182,13 +183,14 @@
   function fmtBytes(n) { n = Number(n) || 0; return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB'; }
   function fmtDate(t) { const n = num(t); if (n === null || n <= 0) return ''; try { return new Date(n).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'; } catch (e) { return ''; } }
   const slugPart = s => String(s || 'unknown').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'unknown';
+  const keyTail = k => slugPart(String(k).slice(String(k).lastIndexOf('/') + 1).replace(/^.*:/, ''));   // storage key -> slugged filename tail
   const datePart = t => { try { return new Date(t).toISOString().slice(0, 10); } catch (e) { return 'undated'; } };
 
   // Export bundles. Values are copied exactly as stored; owner identity stays in the key and filename.
   function entryFor(rec) { return { key: rec.key, storedBy: rec.caller, size: rec.size, stale: !!rec.stale, value: rec.value === undefined ? null : rec.value }; }
   function exportRecord(rec, now) {
     const p = parseKey(rec.key), who = p.gen || (p.kind === 'legacy' ? 'legacy' : 'misc');
-    const tail = slugPart(rec.key.slice(rec.key.lastIndexOf('/') + 1).replace(/^.*:/, ''));
+    const tail = keyTail(rec.key);
     return { filename: 'weld-backup-' + slugPart(who) + '-' + (p.kind === 'snapshot' ? 'snapshot' : tail) + '-' + datePart(now) + '.json',
       text: JSON.stringify({ format: 'weld-backup-record', v: 1, exportedAt: now, record: entryFor(rec) }, null, 2) };
   }
@@ -259,7 +261,7 @@
   // rec: { key, value } -> { dir: [segments], name }
   function backupTarget(rec) {
     const p = parseKey(rec.key), v = rec.value, body = JSON.stringify(v === undefined ? null : v), at = isObj(v) ? stampPart(v.at) : '';
-    const tail = slugPart(String(rec.key).slice(String(rec.key).lastIndexOf('/') + 1).replace(/^.*:/, ''));
+    const tail = keyTail(rec.key);
     if (p.kind === 'snapshot') return { dir: [p.gen, 'snapshot'], name: 'snapshot-' + (at || hash8(body)) + '-' + hash8(body).slice(0, 4) + '.json' };
     if (p.kind === 'chat-copy') return { dir: [p.gen, 'chat'], name: tail + '.json' };
     if (p.kind === 'chat-index') return { dir: [p.gen, 'chat'], name: 'index-' + hash8(body) + '.json' };
@@ -272,23 +274,27 @@
   // exact: byte-identical content (compared in full, not by hash alone) -> keep the newest, offer the rest.
   // near: same generator, same thread and message counts, different content -> only for a human or the AI helper to judge.
   // Copies holding secret-shaped values are left out entirely: they are never copied to a folder, so they must not be deleted here.
-  function canonical(v) {
-    if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
-    if (isObj(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+  function canonical(v, depth) {
+    depth = depth || 0;
+    if (depth > 300) throw new Error('Value nested too deeply to compare.');   // real backups nest a handful deep; this only trips a crafted/corrupt value, well before a stack overflow
+    if (Array.isArray(v)) return '[' + v.map(x => canonical(x, depth + 1)).join(',') + ']';
+    if (isObj(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k], depth + 1)).join(',') + '}';
     return JSON.stringify(v === undefined ? null : v);
   }
   function findDuplicates(recs) {
-    const out = { exact: [], near: [], left: 0 };
+    const out = { exact: [], near: [], left: 0, skipped: 0 };
     const buckets = new Map();   // gen|kind|content hash -> [{ rec, body }]
     (recs || []).forEach(rec => {
       const p = parseKey(rec.key), v = rec.value;
       if (!p.gen || !isObj(v) || (p.kind !== 'chat-copy' && p.kind !== 'snapshot')) return;
       if (p.kind === 'chat-copy' && secretScan(v.data).length) { out.left++; return; }
       // what the copy IS, not when or why it was taken
-      const body = canonical(p.kind === 'chat-copy' ? v.data : { bundle: v.bundle, modelText: v.modelText, outputTemplate: v.outputTemplate, srcManifest: v.srcManifest });
+      let body;
+      try { body = canonical(p.kind === 'chat-copy' ? v.data : { bundle: v.bundle, modelText: v.modelText, outputTemplate: v.outputTemplate, srcManifest: v.srcManifest }); }
+      catch (e) { out.skipped++; return; }   // surfaced via out.skipped (this module never logs content); fail safe: an uncomparable copy is never a duplicate, so it is never offered for deletion
       const id = p.gen + '|' + p.kind + '|' + hash8(body) + '|' + body.length;
       let b = buckets.get(id); if (!b) buckets.set(id, b = []);
-      b.push({ rec, p, body, at: isObj(v) ? (num(v.at) || 0) : 0 });
+      b.push({ rec, p, body, at: atOf(v) });
     });
     const newest = (a, b) => b.at - a.at || (a.rec.key < b.rec.key ? 1 : -1);
     const singles = new Map();   // gen -> [{...}] one representative per distinct content, for the near pass
@@ -344,7 +350,7 @@
         if (p.kind !== 'snapshot' && p.kind !== 'chat-copy' && p.kind !== 'chat-index') { skipped.invalid++; return; }   // only the three documented key shapes
         const caller = p.gen;   // never trust a file's storedBy: a record can only land in the namespace its own key names
         if (p.kind === 'chat-copy' && secretScan(isObj(r.value) ? r.value.data : null).length) { skipped.held++; return; }
-        const id = caller + '\u0000' + r.key, at = isObj(r.value) ? (num(r.value.at) || 0) : 0, c = { id, caller, key: r.key, p, value: r.value, ex, at };
+        const id = caller + '\u0000' + r.key, at = atOf(r.value), c = { id, caller, key: r.key, p, value: r.value, ex, at };
         const g = groups.get(id);
         const better = !g || (p.kind === 'snapshot' ? (at > g.at || (at === g.at && ex > g.ex)) : ex > g.ex);
         if (better) groups.set(id, c);
@@ -360,7 +366,7 @@
       if (cur === undefined) { add.push(item(c, 'new', 'not here yet')); adding.add(c.key); return; }
       if (cur === null) { skipped.tombstoned++; return; }
       if (c.p.kind === 'snapshot') {
-        const have = isObj(cur) ? (num(cur.at) || 0) : 0;
+        const have = atOf(cur);
         if (c.at > have) update.push(item(c, 'newer', 'folder copy ' + fmtDate(c.at) + ' replaces ' + (have ? fmtDate(have) : 'an undated copy')));
         else if (c.at < have) skipped.older++; else skipped.unchanged++;
         return;

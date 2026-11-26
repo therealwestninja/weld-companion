@@ -783,8 +783,9 @@
       });
     }
     // function bodies: only note which names are read
+    const dslLines = lines(dsl);   // split once; reused below (was re-split per code line)
     parsed.functions.forEach(f => {
-      const body = f.codeLines.length ? f.codeLines.map(l => lines(dsl)[l - 1]).join('\n') : (f.value || '');
+      const body = f.codeLines.length ? f.codeLines.map(l => dslLines[l - 1]).join('\n') : (f.value || '');
       identifiers(body).used.forEach(x => used.add(x));
     });
     // top-level special blocks and meta
@@ -822,7 +823,7 @@
     // Browser APIs in executable DSL fragments can also be shadowed by Perchance names.
     const browserFragments = [];
     parsed.functions.forEach(f => {
-      const body = f.codeLines.length ? '\n' + lines(dsl).slice(f.line, Math.max(...f.codeLines)).join('\n') : (f.value || '');
+      const body = f.codeLines.length ? '\n' + dslLines.slice(f.line, Math.max(...f.codeLines)).join('\n') : (f.value || '');
       browserFragments.push({ code: '(' + f.params + ') => {' + body + '}', line: f.line, type: '' });
     });
     blockNodes.forEach(n => squareBlocks(nodeText(n)).blocks.forEach(b => browserFragments.push({ code: b.content, line: n.line, type: '' })));
@@ -901,17 +902,18 @@
     const capabilities = uniq(everyImport.filter(n => KNOWN_PLUGINS[n]).map(n => KNOWN_PLUGINS[n].label));
     const network = everyImport.some(n => KNOWN_PLUGINS[n] && KNOWN_PLUGINS[n].network);
     const items = lists.reduce((s, l) => s + l.items, 0);
+    const todos = parsed.comments.filter(c => /\b(TODO|FIXME|HACK|XXX)\b/i.test(c.text));
     return {
       version: VERSION, name: input.name || '',
       stats: { dslBytes: bytes(dsl), dslLines: parsed.lines, htmlBytes: html == null ? 0 : bytes(html), htmlLines: html == null ? 0 : lines(html).length,
         lists: lists.length, items, functions: parsed.functions.length, imports: allImports.length, scripts: hv ? hv.scripts.length : 0,
-        comments: parsed.comments.length, todos: parsed.comments.filter(c => /\b(TODO|FIXME|HACK|XXX)\b/i.test(c.text)).length },
+        comments: parsed.comments.length, todos: todos.length },
       lists, aliases, imports: allImports, capabilities, network,
       outputSpace: estimateSpace(parsed),
       findings, suppressedFindings, counts: { error: findings.filter(f => f.severity === 'error').length, warn: findings.filter(f => f.severity === 'warn').length, info: findings.filter(f => f.severity === 'info').length },
       html: hv ? { ids: hv.ids, scripts: hv.scripts, urls: hv.urls, hosts: hv.hosts, externalScripts: hv.externalScripts, stylesheets: hv.stylesheets,
         storage: hv.storage, rootRefs: hv.rootRefs, functions: hv.functions } : null,
-      todos: parsed.comments.filter(c => /\b(TODO|FIXME|HACK|XXX)\b/i.test(c.text)),
+      todos: todos,
       functions: parsed.functions.map(f => ({ name: f.name, line: f.line, async: !!f.async, lines: f.codeLines.length || 1 }))
     };
   }

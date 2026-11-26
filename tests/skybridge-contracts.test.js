@@ -20,8 +20,9 @@ function load(names, code, extras) {
 }
 
 const fetchGuard = load(
-  ['sbPrivateIpv4', 'sbIpv6Parts', 'sbPrivateIpv6', 'sbFetchGuard'],
+  ['sbPrivateIpv4', 'sbIpv6Parts', 'sbPrivateIpv6', 'sbFetchGuard', 'sbHostAllowed'],
   between('function sbPrivateIpv4(', 'function sbServiceFetch('),
+  { gget: () => [] },   // no user allowlist in this contract test: every private host must still be blocked
 );
 
 for (const url of [

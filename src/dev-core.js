@@ -6,6 +6,7 @@
 })(typeof window === 'object' ? window : globalThis, function (P) {
   'use strict';
   const VERSION = 1;
+  const SEVERITY_RANK = { error: 0, warn: 1, info: 2 };   // finding severity order, shared by get_findings and the push gate
 
   // ------------------------------------------------------------------ primer
   // Condensed from Perchance's tutorial and known-bugs list. Given to models so they write
@@ -71,7 +72,7 @@
           distinct_outputs: a.outputSpace ? a.outputSpace.text : null, stats: a.stats };
       },
       get_findings: args => {
-        const a = analysisOf(src()), rank = { error: 0, warn: 1, info: 2 }, max = rank[(args && args.min_severity) || 'warn'];
+        const a = analysisOf(src()), rank = SEVERITY_RANK, max = rank[(args && args.min_severity) || 'warn'];
         const list = a.findings.filter(f => rank[f.severity] <= (max == null ? 1 : max));
         return { counts: a.counts, findings: list.slice(0, 60).map(f => ({ severity: f.severity, pane: f.pane, line: f.line, message: f.message, hint: f.hint || undefined })), truncated: list.length > 60 };
       },
@@ -97,7 +98,9 @@
         return { matches: out, truncated: out.length >= 80 };
       },
       find_usages: args => {
-        const s = src(), r = scanName(s.dsl, s.html, String((args && args.name) || ''), null);
+        const name = String((args && args.name) || '');
+        if (!validName(name)) return { name: args && args.name, error: '"' + name + '" is not a valid list name.', uses: [], count: 0, truncated: false };
+        const s = src(), r = scanName(s.dsl, s.html, name, null);
         return { name: args && args.name, uses: r.hits.slice(0, 100), count: r.hits.length, truncated: r.hits.length > 100 };
       },
       get_imports: () => {
@@ -482,7 +485,7 @@
 
   // ------------------------------------------------------------- push gate
   function gateReport(analysis, level) {
-    const rank = { error: 0, warn: 1, info: 2 }, max = rank[level || 'warn'];
+    const rank = SEVERITY_RANK, max = rank[level || 'warn'];
     const list = analysis.findings.filter(f => rank[f.severity] <= max);
     return { count: list.length, lines: list.slice(0, 6).map(f => '• ' + f.pane + (f.line ? ' line ' + f.line : '') + ': ' + f.message), more: Math.max(0, list.length - 6) };
   }

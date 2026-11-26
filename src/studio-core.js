@@ -467,7 +467,7 @@
   function fromV2Book(book) {
     if (!book || !Array.isArray(book.entries)) throw new Error('Not a character book: expected an entries array.');
     list(book.entries, 'Lorebook entries', 1000);
-    return book.entries.map(e => {
+    return book.entries.filter(e => e && typeof e === 'object').map(e => {
       const ws = (e.extensions && e.extensions.weld_studio) || {};
       const ext = e.extensions || {};
       const secondary = Array.isArray(e.secondary_keys) ? e.secondary_keys.map(String).join(', ') : '';
@@ -497,7 +497,7 @@
     const rows = Array.isArray(src) ? src : src && typeof src === 'object' ? Object.values(src) : null;
     if (!rows) throw new Error('Not a World Info file: expected an entries object.');
     list(rows, 'World Info entries', 1000);
-    return rows.map(e => {
+    return rows.filter(e => e && typeof e === 'object').map(e => {
       const secondary = Array.isArray(e.keysecondary) ? e.keysecondary.map(String).join(', ') : '';
       return loreEntry({ title: cap(e.comment, 2000) || 'Imported entry', kind: 'imported', body: cap(e.content, 100000),
         keywords: Array.isArray(e.key) ? e.key.map(String).join(', ') : '', secondaryKeys: secondary,

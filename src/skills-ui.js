@@ -10,7 +10,8 @@
     expanded: new Set(), concise: false,
     favorites: Array.isArray(stored) ? stored.filter(id => C.get(id)) : [], details: '', findings: false, draft: '', dirty: false };
   const note = text => E('div', { class: 'wc-section-note', text });
-  const fieldStyle = { width: '100%', boxSizing: 'border-box', border: '1px solid var(--wc-line,#555)', borderRadius: '8px',
+  const LINE = '1px solid var(--wc-line,#555)';   // standard divider (the active-accent border is a deliberate exception)
+  const fieldStyle = { width: '100%', boxSizing: 'border-box', border: LINE, borderRadius: '8px',
     padding: '10px', background: 'var(--wc-input,rgba(0,0,0,.18))', color: 'inherit', font: 'inherit' };
   function render(parent) {
     const slug = H.slug() || '';
@@ -49,7 +50,7 @@
       if (!matches.length) { list.appendChild(note('No matching skills. Try another search or turn off Favorites only.')); return; }
       groups.forEach(g => {
         const autoExpand = Boolean(S.query || S.category || S.type || S.mode || S.favoritesOnly);
-        const attrs = { 'data-section': g.id, style: { border: '1px solid var(--wc-line,#555)', borderRadius: '9px', padding: '10px' } };
+        const attrs = { 'data-section': g.id, style: { border: LINE, borderRadius: '9px', padding: '10px' } };
         if (autoExpand || S.expanded.has(g.id)) attrs.open = '';
         const section = E('details', attrs);
         section.addEventListener('toggle', () => {
@@ -64,7 +65,7 @@
         const active = p.id === S.selected;
         grid.appendChild(E('button', { type: 'button', 'data-skill': p.id, 'aria-pressed': String(active),
           style: { textAlign: 'left', padding: '12px', borderRadius: '9px', cursor: 'pointer', color: 'inherit', font: 'inherit',
-            border: active ? '1px solid var(--wc-accent,#f39245)' : '1px solid var(--wc-line,#555)',
+            border: active ? '1px solid var(--wc-accent,#f39245)' : LINE,
             background: active ? 'rgba(243,146,69,.12)' : 'rgba(255,255,255,.035)' },
           onclick: () => { S.selected = p.id; drawList(); drawDetail(); build(); if (detail.scrollIntoView) detail.scrollIntoView({ block: 'nearest' }); }
         }, [E('strong', { text: (S.favorites.includes(p.id) ? '\u2605 ' : '') + p.title }),
@@ -145,7 +146,7 @@
       E('label', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [fav, E('span', { text: 'Favorites only' })])]));
     count = E('div', { style: { fontSize: '12px', opacity: '.7', marginBottom: '8px' }, 'aria-live': 'polite' }); wrap.appendChild(count);
     list = E('div', { 'aria-label': 'Skill presets', style: { display: 'grid', gap: '8px', maxHeight: '380px', overflowY: 'auto', padding: '2px' } }); wrap.appendChild(list);
-    detail = E('div', { style: { borderTop: '1px solid var(--wc-line,#555)', marginTop: '18px', paddingTop: '16px' } }); wrap.appendChild(detail);
+    detail = E('div', { style: { borderTop: LINE, marginTop: '18px', paddingTop: '16px' } }); wrap.appendChild(detail);
     wrap.appendChild(E('label', { for: 'wc-skill-details', text: 'Your goal or extra instructions (optional)' }));
     const details = E('textarea', { id: 'wc-skill-details', rows: '3', placeholder: 'What should change? Any style, feature or behavior to preserve?',
       style: Object.assign({}, fieldStyle, { marginTop: '6px', resize: 'vertical' }) });
